@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useMemo, useEffect } from "react";
 import * as XLSX from "xlsx";
 
 const EXCLUDED = ["VISTORIA","CORTE SUPRESSÃO ADM","FISCALIZAÇÃO","SERV COMPLEMENTAR","ABASTECIMENTO","DESOBSTRUÇÃO"];
-const KEEP_COLS = ["Número OS","TSS","Família","Tempo Residual","Endereço","Número","Bairro","Município","Status da OS","ATO"];
+const KEEP_COLS = ["Número OS","TSS","Família","Tempo Residual","Endereço","Número","Bairro","Município","Status da OS","ATO","SF"];
 const SKEY = "sabesp-data-v3";
 const UNITS = [
   { id:"interlagos", label:"Interlagos", ato:32, icon:"🏙️" },
@@ -51,6 +51,29 @@ function Check({checked,onChange}){
 }
 function OSModal({rows,familia,tssName,tipo,onClose}){
   const label=tipo==="prazo"?"No Prazo":"Fora do Prazo";const color=tipo==="prazo"?C.green:C.red;
+  const [modalSort,setModalSort]=useState({col:null,asc:true});
+  const cols=[
+    {key:"os",label:"Nº OS",get:r=>r["Número OS"]},
+    {key:"tss",label:"TSS",get:r=>r["TSS"]},
+    {key:"sf",label:"SF",get:r=>r["SF"]},
+    {key:"end",label:"Endereço",get:r=>String(r["Endereço"]).trim()+", "+r["Número"]},
+    {key:"bairro",label:"Bairro",get:r=>r["Bairro"]},
+    {key:"mun",label:"Município",get:r=>r["Município"]},
+    {key:"tempo",label:"Tempo Residual",get:r=>r["Tempo Residual"],sort:r=>tempoDays(r["Tempo Residual"])},
+    {key:"status",label:"Status",get:r=>r["Status da OS"]},
+  ];
+  const sorted=useMemo(()=>{
+    if(!modalSort.col)return rows;
+    const def=cols.find(c=>c.key===modalSort.col);if(!def)return rows;
+    const fn=def.sort||def.get;
+    return[...rows].sort((a,b)=>{
+      let va=fn(a),vb=fn(b);
+      if(typeof va==="string")va=va.toLowerCase();if(typeof vb==="string")vb=vb.toLowerCase();
+      const cmp=va<vb?-1:va>vb?1:0;
+      return modalSort.asc?cmp:-cmp;
+    });
+  },[rows,modalSort]);
+  const toggleSort=(key)=>setModalSort(prev=>prev.col===key?{col:key,asc:!prev.asc}:{col:key,asc:true});
   return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(4px)"}}>
     <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:16,border:`1px solid ${C.border}`,width:"100%",maxWidth:1400,maxHeight:"80vh",display:"flex",flexDirection:"column",overflow:"hidden",animation:"modalIn 0.2s ease"}}>
       <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
@@ -60,13 +83,14 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
       <div style={{overflowY:"auto",flex:1}}>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
           <thead><tr style={{background:C.headerBg,position:"sticky",top:0,zIndex:1}}>
-            {["Nº OS","TSS","Endereço","Bairro","Município","Tempo Residual","Status"].map(h=>
-              <th key={h} style={{padding:"10px 12px",textAlign:"left",fontSize:11,fontWeight:700,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{h}</th>
+            {cols.map(col=>
+              <th key={col.key} onClick={()=>toggleSort(col.key)} style={{padding:"10px 12px",textAlign:"left",fontSize:11,fontWeight:700,color:modalSort.col===col.key?C.accent:C.textDim,textTransform:"uppercase",letterSpacing:0.5,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap",cursor:"pointer",userSelect:"none"}}>{col.label}{modalSort.col===col.key?(modalSort.asc?" ↑":" ↓"):""}</th>
             )}</tr></thead>
-          <tbody>{rows.map((r,i)=>
+          <tbody>{sorted.map((r,i)=>
             <tr key={i} style={{background:i%2?C.cardAlt:"transparent"}} onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background=i%2?C.cardAlt:"transparent")}>
               <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,fontVariantNumeric:"tabular-nums",fontWeight:600,color:C.accent}}>{r["Número OS"]}</td>
               <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r["TSS"]}</td>
+              <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,fontWeight:600,color:C.textMuted}}>{r["SF"]}</td>
               <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{String(r["Endereço"]).trim()}, {r["Número"]}</td>
               <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`}}>{r["Bairro"]}</td>
               <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`}}>{r["Município"]}</td>
@@ -321,6 +345,9 @@ export default function App(){
           </div>
           <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label}/>
         </div>}
+        <div style={{textAlign:"center",padding:"32px 16px 16px",color:C.textDim,fontSize:11,letterSpacing:0.3,opacity:0.6}}>
+          Criado por Bryan Mendes Deodato, todos os direitos reservados
+        </div>
       </div>
     </div>
 
