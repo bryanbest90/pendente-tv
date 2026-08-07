@@ -2,10 +2,23 @@ import { useState, useCallback, useRef, useMemo, useEffect } from "react";
 import * as XLSX from "xlsx";
 
 // ━━━ COLE AQUI A URL DO SEU GOOGLE APPS SCRIPT ━━━
-const API_URL = "https://script.google.com/macros/s/AKfycbwn3ctlfnKud3pgovOiH-BHhEi1oe9loyfJNb9Qwej_AM-Daz3OsNXALWXCnpcMpaNCeQ/exec";
+const API_URL = "COLE_SUA_URL_AQUI";
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 const EXCLUDED_DISPLAY = ["VISTORIA","CORTE SUPRESSÃO ADM","FISCALIZAÇÃO","SERV COMPLEMENTAR","ABASTECIMENTO","DESOBSTRUÇÃO"];
+const EXCLUDED_TSS = [
+  "RETIRAR LACRE NUMERADO",
+  "LIGAÇÃO DE ÁGUA - PROG AGUA LEGAL",
+  "DESCARGA EM REDE DE ÁGUA",
+  "INSTALAR CAIXA D'ÁGUA",
+  "INSTALAR CAIXA UMA (PARTE CIVIL)",
+  "PREPARAR INSTALAÇÃO PARA CAIXA D'AGUA",
+  "RESTABELECER LIGAÇÃO SERVIÇOS ADICIONAIS",
+  "LIGAÇÃO DE ESGOTO - PROG AGUA LEGAL",
+  "LIGAÇÃO DE ESGOTO - PROG SE LIGA NA REDE",
+  "TESTE DE CORANTE OP",
+  "SUPRIMIR LIGAÇÃO DE POÇO",
+];
 const VALID_ATCS = [923, 929, 299];
 const UNITS = [
   { id:"geral", label:"Geral", atc:null, icon:"📊" },
@@ -358,7 +371,7 @@ export default function App(){
     try{
       flash("Processando arquivo...");
       const all=await parseFile(file);
-      const filtered=all.map(sanitize).filter(r=>VALID_ATCS.includes(Number(r["ATC"])));
+      const filtered=all.map(sanitize).filter(r=>VALID_ATCS.includes(Number(r["ATC"]))&&!EXCLUDED_TSS.includes(String(r["TSS"]||"").trim()));
       // Atualiza tela imediatamente
       setRawRows(filtered);
       setExcludedTSS(new Set());
@@ -400,10 +413,10 @@ export default function App(){
   },[]);
 
   const currentUnit=UNITS.find(u=>u.id===activeUnit)||UNITS[0];
-  const filteredRows=useMemo(()=>rawRows?rawRows.filter(r=>(currentUnit.atc===null?VALID_ATCS.includes(Number(r["ATC"])):Number(r["ATC"])===currentUnit.atc)&&!EXCLUDED_DISPLAY.includes(String(r["Família"]||"").trim())):[],[rawRows,currentUnit]);
+  const filteredRows=useMemo(()=>rawRows?rawRows.filter(r=>(currentUnit.atc===null?VALID_ATCS.includes(Number(r["ATC"])):Number(r["ATC"])===currentUnit.atc)&&!EXCLUDED_DISPLAY.includes(String(r["Família"]||"").trim())&&!EXCLUDED_TSS.includes(String(r["TSS"]||"").trim())):[],[rawRows,currentUnit]);
   const unitCounts=useMemo(()=>{
     if(!rawRows)return{};const out={};
-    UNITS.forEach(u=>{const ur=rawRows.filter(r=>(u.atc===null?VALID_ATCS.includes(Number(r["ATC"])):Number(r["ATC"])===u.atc)&&!EXCLUDED_DISPLAY.includes(String(r["Família"]||"").trim())&&!excludedTSS.has(String(r["TSS"]||"").trim()));const p=ur.filter(r=>tempo(r["Tempo Residual"])==="prazo").length;const f=ur.filter(r=>tempo(r["Tempo Residual"])==="fora").length;out[u.id]={total:p+f,prazo:p,fora:f};});
+    UNITS.forEach(u=>{const ur=rawRows.filter(r=>(u.atc===null?VALID_ATCS.includes(Number(r["ATC"])):Number(r["ATC"])===u.atc)&&!EXCLUDED_DISPLAY.includes(String(r["Família"]||"").trim())&&!EXCLUDED_TSS.includes(String(r["TSS"]||"").trim())&&!excludedTSS.has(String(r["TSS"]||"").trim()));const p=ur.filter(r=>tempo(r["Tempo Residual"])==="prazo").length;const f=ur.filter(r=>tempo(r["Tempo Residual"])==="fora").length;out[u.id]={total:p+f,prazo:p,fora:f};});
     return out;
   },[rawRows,excludedTSS]);
 
