@@ -60,8 +60,16 @@ async function fetchRows(){
 }
 
 async function uploadRows(rows){
-  // 1. Deletar dados antigos
-  await fetch(SUPABASE_URL+"/rest/v1/pendente_os?id=gt.0",{method:"DELETE",headers:HEADERS});
+  // 1. Deletar TODOS os dados antigos (loop para superar limite de 1000)
+  let deleted = true;
+  while(deleted){
+    const res = await fetch(SUPABASE_URL+"/rest/v1/pendente_os?id=gt.0&limit=5000",{
+      method:"DELETE",
+      headers:{...HEADERS,"Prefer":"count=exact"},
+    });
+    const count = parseInt(res.headers.get("content-range")?.split("/")?.[1] || "0");
+    deleted = count > 0;
+  }
   // 2. Inserir novos em lotes de 500
   const batchSize = 500;
   for(let i=0;i<rows.length;i+=batchSize){
@@ -71,7 +79,7 @@ async function uploadRows(rows){
       headers:{...HEADERS,"Prefer":"return=minimal"},
       body:JSON.stringify(batch),
     });
-    if(!res.ok) throw new Error("Erro inserindo lote: "+await res.text());
+    if(!res.ok) throw new Error("Erro inserindo lote "+(Math.floor(i/batchSize)+1)+": "+await res.text());
   }
   // 3. Atualizar meta
   const now = new Date().toISOString();
