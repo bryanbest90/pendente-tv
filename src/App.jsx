@@ -1,9 +1,10 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react";
 import * as XLSX from "xlsx";
 
-// ━━━ COLE AQUI A URL DO SEU GOOGLE APPS SCRIPT ━━━
-const API_URL = "https://script.google.com/macros/s/AKfycbwn3ctlfnKud3pgovOiH-BHhEi1oe9loyfJNb9Qwej_AM-Daz3OsNXALWXCnpcMpaNCeQ/exec";
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ━━━ SUPABASE ━━━
+const SUPABASE_URL = "https://iggnfikqbdgrvfshxhul.supabase.co";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlnZ25maWtxYmRncnZmc2h4aHVsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU3MDgwNTIsImV4cCI6MjEwMTI4NDA1Mn0.Wnpzw5NK9b55oLwBiuFKcmx5rgG5F39Ka-fdho2aH9E";
+const HEADERS = {"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY,"Content-Type":"application/json"};
 
 const EXCLUDED_DISPLAY = ["VISTORIA","CORTE SUPRESSÃO ADM","FISCALIZAÇÃO","SERV COMPLEMENTAR","ABASTECIMENTO","DESOBSTRUÇÃO"];
 const EXCLUDED_TSS = [
@@ -41,60 +42,45 @@ const C = {
 /* ── Storage (filtros pessoais + cache local) ── */
 function saveLocal(obj){try{localStorage.setItem("sabesp-filters-v1",JSON.stringify(obj));}catch{}}
 function loadLocal(){try{const d=localStorage.getItem("sabesp-filters-v1");return d?JSON.parse(d):null;}catch{return null;}}
-function cacheRows(rows,updatedAt){try{localStorage.setItem("sabesp-cache-v1",JSON.stringify({rows,updatedAt}));}catch{}}
-function loadCache(){try{const d=localStorage.getItem("sabesp-cache-v1");return d?JSON.parse(d):null;}catch{return null;}}
+function cacheRows(rows,updatedAt){try{localStorage.setItem("sabesp-cache-v2",JSON.stringify({rows,updatedAt}));}catch{}}
+function loadCache(){try{const d=localStorage.getItem("sabesp-cache-v2");return d?JSON.parse(d):null;}catch{return null;}}
 
-/* ── API ── */
+/* ── Supabase API ── */
 async function fetchRows(){
-  const res = await fetch(API_URL);
+  // Buscar meta
+  const metaRes = await fetch(SUPABASE_URL+"/rest/v1/pendente_meta?id=eq.1&select=updated_at,total_rows",{headers:HEADERS});
+  const meta = await metaRes.json();
+  const updatedAt = meta[0]?.updated_at || null;
+  // Buscar dados (limit alto para pegar todos)
+  const res = await fetch(SUPABASE_URL+"/rest/v1/pendente_os?select=dados&limit=10000",{headers:HEADERS});
+  if(!res.ok) throw new Error("Erro "+res.status+": "+await res.text());
   const data = await res.json();
-  if(data.error) throw new Error(data.error);
-  return data;
-}
-async function uploadRows(rows){
-  // Tenta POST primeiro
-  try {
-    const res = await fetch(API_URL, {
-      method: "POST",
-      headers: {"Content-Type": "text/plain;charset=utf-8"},
-      body: JSON.stringify({ rows }),
-    });
-    const text = await res.text();
-    // Se veio HTML (redirect do GAS), tenta parsear como JSON do conteúdo
-    if (text.trim().startsWith("<")) {
-      // POST foi redirecionado — usa método alternativo
-      return await uploadViaChunkedGet(rows);
-    }
-    const data = JSON.parse(text);
-    if (data.error) throw new Error(data.error);
-    return data;
-  } catch(e) {
-    // Fallback: envia via GET em chunks
-    if (e.message && !e.message.includes("Nenhuma")) {
-      return await uploadViaChunkedGet(rows);
-    }
-    throw e;
-  }
+  const rows = data.map(r=>r.dados);
+  return { rows, updatedAt };
 }
 
-// Fallback: envia dados via POST com XMLHttpRequest (não segue redirect)
-async function uploadViaChunkedGet(rows) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", API_URL);
-    xhr.setRequestHeader("Content-Type", "text/plain;charset=utf-8");
-    xhr.onload = function() {
-      try {
-        const data = JSON.parse(xhr.responseText);
-        if (data.error) reject(new Error(data.error));
-        else resolve(data);
-      } catch(e) {
-        reject(new Error("Resposta inválida do servidor"));
-      }
-    };
-    xhr.onerror = function() { reject(new Error("Falha na conexão")); };
-    xhr.send(JSON.stringify({ rows }));
+async function uploadRows(rows){
+  // 1. Deletar dados antigos
+  await fetch(SUPABASE_URL+"/rest/v1/pendente_os?id=gt.0",{method:"DELETE",headers:HEADERS});
+  // 2. Inserir novos em lotes de 500
+  const batchSize = 500;
+  for(let i=0;i<rows.length;i+=batchSize){
+    const batch = rows.slice(i,i+batchSize).map(r=>({dados:r}));
+    const res = await fetch(SUPABASE_URL+"/rest/v1/pendente_os",{
+      method:"POST",
+      headers:{...HEADERS,"Prefer":"return=minimal"},
+      body:JSON.stringify(batch),
+    });
+    if(!res.ok) throw new Error("Erro inserindo lote: "+await res.text());
+  }
+  // 3. Atualizar meta
+  const now = new Date().toISOString();
+  await fetch(SUPABASE_URL+"/rest/v1/pendente_meta?id=eq.1",{
+    method:"PATCH",
+    headers:{...HEADERS,"Prefer":"return=minimal"},
+    body:JSON.stringify({updated_at:now,total_rows:rows.length}),
   });
+  return { count:rows.length, updatedAt:now };
 }
 
 /* ── Helpers ── */
@@ -104,18 +90,10 @@ function parseFile(file){
     const reader=new FileReader();
     reader.onload=e=>{
       const buf=e.target.result;
-      // Tenta várias configurações de leitura
-      const attempts=[
-        {type:"array",cellDates:false},
-        {type:"array",cellDates:false,raw:true},
-        {type:"array"},
-        {type:"binary"},
-      ];
+      const attempts=[{type:"array",cellDates:false},{type:"array",cellDates:false,raw:true},{type:"array"},{type:"binary"}];
       for(const opts of attempts){
         try{
-          const input=opts.type==="binary"
-            ?Array.from(new Uint8Array(buf)).map(b=>String.fromCharCode(b)).join("")
-            :buf;
+          const input=opts.type==="binary"?Array.from(new Uint8Array(buf)).map(b=>String.fromCharCode(b)).join(""):buf;
           const wb=XLSX.read(input,opts);
           const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:""});
           if(rows.length>0){resolve(rows);return;}
@@ -321,73 +299,51 @@ export default function App(){
   const [uploading,setUploading]=useState(false);
   const [toast,setToast]=useState("");
   const [dragOver,setDragOver]=useState(false);
-  const [activeUnit,setActiveUnit]=useState("interlagos");
+  const [activeUnit,setActiveUnit]=useState("geral");
   const [sideCollapsed,setSideCollapsed]=useState(false);
   const inputRef=useRef();
 
   const flash=(msg)=>{setToast(msg);setTimeout(()=>setToast(""),4000);};
 
-  // ── Boot: load from API, fallback to cache ──
+  const saveFilters=useCallback((excSet,sort,unit)=>{saveLocal({excluded:[...excSet],sortBy:sort,activeUnit:unit});},[]);
+
+  // ── Boot ──
   useEffect(()=>{
     (async()=>{
-      // Filtros pessoais
       const local=loadLocal();
       if(local){
         if(local.excluded?.length>0) setExcludedTSS(new Set(local.excluded));
         if(local.sortBy) setSortBy(local.sortBy);
         if(local.activeUnit) setActiveUnit(local.activeUnit);
       }
-      // Dados: tenta API, senão usa cache local
       let loaded=false;
       try{
         const data=await fetchRows();
-        if(data.rows?.length>0){
-          setRawRows(data.rows);
-          setUpdatedAt(data.updatedAt);
-          cacheRows(data.rows,data.updatedAt);
-          loaded=true;
-        }
-      }catch(e){}
+        if(data.rows?.length>0){setRawRows(data.rows);setUpdatedAt(data.updatedAt);cacheRows(data.rows,data.updatedAt);loaded=true;}
+      }catch(e){flash("Erro Supabase: "+e.message);}
       if(!loaded){
         const cached=loadCache();
-        if(cached?.rows?.length>0){
-          setRawRows(cached.rows);
-          setUpdatedAt(cached.updatedAt);
-          flash("Usando dados em cache (offline)");
-        }
+        if(cached?.rows?.length>0){setRawRows(cached.rows);setUpdatedAt(cached.updatedAt);flash("Usando dados em cache");}
       }
       setLoading(false);
     })();
   },[]);
 
-  // Save filters locally on change
-  const saveFilters=useCallback((excSet,sort,unit)=>{
-    saveLocal({excluded:[...excSet],sortBy:sort,activeUnit:unit});
-  },[]);
-
-  // ── Upload file → API + cache ──
+  // ── Upload ──
   const handleFile=useCallback(async(file)=>{
-    if(!file)return; setUploading(true);
+    if(!file)return;setUploading(true);
     try{
       flash("Processando arquivo...");
       const all=await parseFile(file);
       const filtered=all.map(sanitize).filter(r=>VALID_ATCS.includes(Number(r["ATC"]))&&!EXCLUDED_TSS.includes(String(r["TSS"]||"").trim()));
-      // Atualiza tela imediatamente
-      setRawRows(filtered);
-      setExcludedTSS(new Set());
-      const now=new Date().toISOString();
-      setUpdatedAt(now);
-      cacheRows(filtered,now);
-      saveFilters(new Set(),sortBy,activeUnit);
-      // Envia pro servidor em background
-      flash("Enviando "+filtered.length+" OS para o servidor...");
-      try{
-        const result=await uploadRows(filtered);
-        setUpdatedAt(result.updatedAt);
-        cacheRows(filtered,result.updatedAt);
-        flash("Pendente atualizado ✓ ("+result.count+" OS)");
-      }catch(e){flash("Dados carregados localmente. Erro no servidor: "+e.message);}
-    }catch(e){flash("Erro ao ler arquivo: "+e.message);}
+      setRawRows(filtered);setExcludedTSS(new Set());
+      const now=new Date().toISOString();setUpdatedAt(now);
+      cacheRows(filtered,now);saveFilters(new Set(),sortBy,activeUnit);
+      flash("Enviando "+filtered.length+" OS para o Supabase...");
+      const result=await uploadRows(filtered);
+      setUpdatedAt(result.updatedAt);cacheRows(filtered,result.updatedAt);
+      flash("Pendente atualizado ✓ ("+result.count+" OS)");
+    }catch(e){flash("Erro: "+e.message);}
     setUploading(false);
   },[saveFilters,sortBy,activeUnit]);
 
@@ -396,27 +352,19 @@ export default function App(){
   const doSort=useCallback(key=>{setSortBy(key);saveFilters(excludedTSS,key,activeUnit);},[saveFilters,excludedTSS,activeUnit]);
   const switchUnit=useCallback(id=>{setActiveUnit(id);saveFilters(excludedTSS,sortBy,id);},[saveFilters,excludedTSS,sortBy]);
 
-  // ── Refresh from API ──
   const refresh=useCallback(async()=>{
-    try{
-      flash("Atualizando...");
-      const data=await fetchRows();
-      if(data.rows?.length>0){
-        setRawRows(data.rows);
-        setUpdatedAt(data.updatedAt);
-        cacheRows(data.rows,data.updatedAt);
-        flash("Dados atualizados ✓ ("+data.rows.length+" OS)");
-      }else{
-        flash("Servidor retornou vazio — dados locais mantidos");
-      }
-    }catch(e){flash("Erro ao atualizar: "+e.message+" — dados locais mantidos");}
+    try{flash("Atualizando...");const data=await fetchRows();
+      if(data.rows?.length>0){setRawRows(data.rows);setUpdatedAt(data.updatedAt);cacheRows(data.rows,data.updatedAt);flash("Dados atualizados ✓ ("+data.rows.length+" OS)");}
+      else flash("Servidor vazio — dados locais mantidos");
+    }catch(e){flash("Erro: "+e.message+" — dados locais mantidos");}
   },[]);
 
   const currentUnit=UNITS.find(u=>u.id===activeUnit)||UNITS[0];
   const filteredRows=useMemo(()=>rawRows?rawRows.filter(r=>(currentUnit.atc===null?VALID_ATCS.includes(Number(r["ATC"])):Number(r["ATC"])===currentUnit.atc)&&!EXCLUDED_DISPLAY.includes(String(r["Família"]||"").trim())&&!EXCLUDED_TSS.includes(String(r["TSS"]||"").trim())):[],[rawRows,currentUnit]);
   const unitCounts=useMemo(()=>{
     if(!rawRows)return{};const out={};
-    UNITS.forEach(u=>{const ur=rawRows.filter(r=>(u.atc===null?VALID_ATCS.includes(Number(r["ATC"])):Number(r["ATC"])===u.atc)&&!EXCLUDED_DISPLAY.includes(String(r["Família"]||"").trim())&&!EXCLUDED_TSS.includes(String(r["TSS"]||"").trim())&&!excludedTSS.has(String(r["TSS"]||"").trim()));const p=ur.filter(r=>tempo(r["Tempo Residual"])==="prazo").length;const f=ur.filter(r=>tempo(r["Tempo Residual"])==="fora").length;out[u.id]={total:p+f,prazo:p,fora:f};});
+    UNITS.forEach(u=>{const ur=rawRows.filter(r=>(u.atc===null?VALID_ATCS.includes(Number(r["ATC"])):Number(r["ATC"])===u.atc)&&!EXCLUDED_DISPLAY.includes(String(r["Família"]||"").trim())&&!EXCLUDED_TSS.includes(String(r["TSS"]||"").trim())&&!excludedTSS.has(String(r["TSS"]||"").trim()));
+      const p=ur.filter(r=>tempo(r["Tempo Residual"])==="prazo").length;const f=ur.filter(r=>tempo(r["Tempo Residual"])==="fora").length;out[u.id]={total:p+f,prazo:p,fora:f};});
     return out;
   },[rawRows,excludedTSS]);
 
@@ -424,22 +372,19 @@ export default function App(){
 
   if(loading)return<div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",color:C.textDim,fontFamily:"'Inter',sans-serif",flexDirection:"column",gap:12}}>
     <div style={{width:32,height:32,border:`3px solid ${C.border}`,borderTop:`3px solid ${C.accent}`,borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>
-    <span>Carregando dados do servidor…</span>
+    <span>Carregando dados do Supabase…</span>
     <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
   </div>;
 
   return <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"'Inter',-apple-system,sans-serif",display:"flex"}}>
     {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed}/>}
-
     <div style={{flex:1,padding:"24px 16px",overflowY:"auto",minHeight:"100vh"}}>
       <div style={{maxWidth:960,margin:"0 auto"}}>
         <div style={{marginBottom:24,textAlign:"center"}}>
           <h1 style={{fontSize:22,fontWeight:800,margin:0,letterSpacing:-0.5,background:"linear-gradient(135deg,#60a5fa,#3b82f6,#818cf8)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>Controle de Prazos — OS Pendentes</h1>
           <p style={{color:C.textDim,margin:"6px 0 0",fontSize:13}}>Análise por família de serviço</p>
         </div>
-
         {toast&&<div style={{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",zIndex:2000,padding:"10px 24px",borderRadius:10,fontSize:13,fontWeight:600,maxWidth:"90vw",wordBreak:"break-word",background:toast.includes("Erro")?"rgba(239,68,68,0.15)":"rgba(16,185,129,0.15)",color:toast.includes("Erro")?C.red:C.green,border:`1px solid ${toast.includes("Erro")?C.redBorder:C.greenBorder}`,backdropFilter:"blur(8px)",animation:"fadeIn 0.2s ease"}}>{toast}</div>}
-
         {!rawRows&&<div onDragOver={e=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)} onDrop={onDrop}
           onClick={()=>inputRef.current?.click()}
           style={{border:`2px dashed ${dragOver?C.accent:C.border}`,borderRadius:16,padding:"60px 20px",textAlign:"center",cursor:"pointer",background:dragOver?C.accentBg:C.card,transition:"all 0.2s"}}>
@@ -448,9 +393,7 @@ export default function App(){
           <p style={{fontSize:16,fontWeight:600,margin:0}}>Nenhum pendente no servidor</p>
           <p style={{fontSize:14,color:C.textDim,margin:"8px 0 0"}}>Importe o primeiro arquivo .xlsx</p>
         </div>}
-
         {rawRows&&<div style={{animation:"fadeIn 0.35s ease"}}>
-          {/* Top bar */}
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 16px",background:C.card,borderRadius:10,border:`1px solid ${C.border}`,marginBottom:16,flexWrap:"wrap",gap:8}}>
             <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
               <span style={{fontSize:12,padding:"2px 10px",borderRadius:8,background:C.accentBg,color:C.accent,border:"1px solid rgba(59,130,246,0.2)",fontWeight:700}}>{currentUnit.icon} {currentUnit.label}</span>
@@ -466,13 +409,11 @@ export default function App(){
           </div>
           <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label}/>
         </div>}
-
         <div style={{textAlign:"center",padding:"32px 16px 16px",color:C.textDim,fontSize:11,letterSpacing:0.3,opacity:0.6}}>
           Criado por Bryan Mendes Deodato, todos os direitos reservados
         </div>
       </div>
     </div>
-
     <style>{`@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@keyframes modalIn{from{opacity:0;transform:scale(0.95)}to{opacity:1;transform:scale(1)}}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}`}</style>
   </div>;
 }
