@@ -70,16 +70,13 @@ async function fetchRows(){
 }
 
 async function uploadRows(rows){
-  // 1. Deletar TODOS os dados antigos (loop para superar limite de 1000)
-  let deleted = true;
-  while(deleted){
-    const res = await fetch(SUPABASE_URL+"/rest/v1/pendente_os?id=gt.0&limit=5000",{
-      method:"DELETE",
-      headers:{...HEADERS,"Prefer":"count=exact"},
-    });
-    const count = parseInt(res.headers.get("content-range")?.split("/")?.[1] || "0");
-    deleted = count > 0;
-  }
+  // 1. Limpar tabela via função SQL (sem limite de 1000)
+  const delRes = await fetch(SUPABASE_URL+"/rest/v1/rpc/limpar_pendente",{
+    method:"POST",
+    headers:{...HEADERS,"Prefer":"return=minimal"},
+    body:"{}",
+  });
+  if(!delRes.ok) throw new Error("Erro ao limpar tabela: "+await delRes.text());
   // 2. Inserir novos em lotes de 500
   const batchSize = 500;
   for(let i=0;i<rows.length;i+=batchSize){
