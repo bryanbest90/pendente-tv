@@ -50,20 +50,20 @@ async function fetchRows(){
   const metaRes = await fetch(SUPABASE_URL+"/rest/v1/pendente_meta?id=eq.1&select=updated_at,total_rows",{headers:HEADERS});
   const meta = await metaRes.json();
   const updatedAt = meta[0]?.updated_at || null;
-  const totalExpected = meta[0]?.total_rows || 0;
-  // Buscar dados com Range header para superar limite de 1000
+  // Buscar dados paginando de 1000 em 1000 (limite do Supabase)
   const allRows = [];
   let from = 0;
-  const pageSize = 5000;
+  const pageSize = 1000;
   while(true){
-    const res = await fetch(SUPABASE_URL+"/rest/v1/pendente_os?select=dados&order=id",{
-      headers:{...HEADERS,"Range":from+"-"+(from+pageSize-1),"Prefer":"count=exact"},
+    const to = from + pageSize - 1;
+    const res = await fetch(SUPABASE_URL+"/rest/v1/pendente_os?select=dados&order=id.asc",{
+      headers:{...HEADERS,"Range":from+"-"+to},
     });
-    if(!res.ok) throw new Error("Erro "+res.status+": "+await res.text());
+    if(!res.ok && res.status !== 206) throw new Error("Erro "+res.status);
     const data = await res.json();
-    if(!data.length) break;
+    if(!data || !data.length) break;
     data.forEach(r=>allRows.push(r.dados));
-    if(data.length < pageSize) break;
+    if(data.length < pageSize) break; // última página
     from += pageSize;
   }
   return { rows: allRows, updatedAt };
