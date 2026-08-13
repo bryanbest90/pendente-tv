@@ -47,16 +47,26 @@ function loadCache(){try{const d=localStorage.getItem("sabesp-cache-v2");return 
 
 /* ── Supabase API ── */
 async function fetchRows(){
-  // Buscar meta
   const metaRes = await fetch(SUPABASE_URL+"/rest/v1/pendente_meta?id=eq.1&select=updated_at,total_rows",{headers:HEADERS});
   const meta = await metaRes.json();
   const updatedAt = meta[0]?.updated_at || null;
-  // Buscar dados (limit alto para pegar todos)
-  const res = await fetch(SUPABASE_URL+"/rest/v1/pendente_os?select=dados&limit=10000",{headers:HEADERS});
-  if(!res.ok) throw new Error("Erro "+res.status+": "+await res.text());
-  const data = await res.json();
-  const rows = data.map(r=>r.dados);
-  return { rows, updatedAt };
+  const totalExpected = meta[0]?.total_rows || 0;
+  // Buscar dados com Range header para superar limite de 1000
+  const allRows = [];
+  let from = 0;
+  const pageSize = 5000;
+  while(true){
+    const res = await fetch(SUPABASE_URL+"/rest/v1/pendente_os?select=dados&order=id",{
+      headers:{...HEADERS,"Range":from+"-"+(from+pageSize-1),"Prefer":"count=exact"},
+    });
+    if(!res.ok) throw new Error("Erro "+res.status+": "+await res.text());
+    const data = await res.json();
+    if(!data.length) break;
+    data.forEach(r=>allRows.push(r.dados));
+    if(data.length < pageSize) break;
+    from += pageSize;
+  }
+  return { rows: allRows, updatedAt };
 }
 
 async function uploadRows(rows){
