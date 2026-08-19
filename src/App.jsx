@@ -1,6 +1,5 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react";
 import * as XLSX from "xlsx";
-import { XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Area, AreaChart } from "recharts";
 
 // ━━━ SUPABASE ━━━
 const SUPABASE_URL = "https://iggnfikqbdgrvfshxhul.supabase.co";
@@ -29,8 +28,6 @@ const UNITS = [
   { id:"embu", label:"Embu-Guaçu", atc:299, icon:"🌿" },
 ];
 
-const UNIT_TO_HISTORICO = { geral: null, interlagos: "Interlagos", grajau: "Grajau", embu: "Embu-Guacu" };
-
 const C = {
   bg:"#0a0f1a",card:"#111827",cardAlt:"#0d1321",border:"#1e293b",
   accent:"#3b82f6",accentBg:"rgba(59,130,246,0.06)",
@@ -53,6 +50,7 @@ async function fetchRows(){
   const metaRes = await fetch(SUPABASE_URL+"/rest/v1/pendente_meta?id=eq.1&select=updated_at,total_rows",{headers:HEADERS});
   const meta = await metaRes.json();
   const updatedAt = meta[0]?.updated_at || null;
+  // Buscar dados paginando de 1000 em 1000 (limite do Supabase)
   const allRows = [];
   let from = 0;
   const pageSize = 1000;
@@ -65,27 +63,21 @@ async function fetchRows(){
     const data = await res.json();
     if(!data || !data.length) break;
     data.forEach(r=>allRows.push(r.dados));
-    if(data.length < pageSize) break;
+    if(data.length < pageSize) break; // última página
     from += pageSize;
   }
   return { rows: allRows, updatedAt };
 }
 
-async function fetchHistorico(){
-  const res = await fetch(SUPABASE_URL+"/rest/v1/pendente_historico?select=dia,unidade,familia,no_prazo,fora_prazo,total&order=dia.asc",{
-    headers:HEADERS,
-  });
-  if(!res.ok) throw new Error("Erro historico "+res.status);
-  return await res.json();
-}
-
 async function uploadRows(rows){
+  // 1. Limpar tabela via função SQL (sem limite de 1000)
   const delRes = await fetch(SUPABASE_URL+"/rest/v1/rpc/limpar_pendente",{
     method:"POST",
     headers:{...HEADERS,"Prefer":"return=minimal"},
     body:"{}",
   });
   if(!delRes.ok) throw new Error("Erro ao limpar tabela: "+await delRes.text());
+  // 2. Inserir novos em lotes de 500
   const batchSize = 500;
   for(let i=0;i<rows.length;i+=batchSize){
     const batch = rows.slice(i,i+batchSize).map(r=>({dados:r}));
@@ -96,6 +88,7 @@ async function uploadRows(rows){
     });
     if(!res.ok) throw new Error("Erro inserindo lote "+(Math.floor(i/batchSize)+1)+": "+await res.text());
   }
+  // 3. Atualizar meta
   const now = new Date().toISOString();
   await fetch(SUPABASE_URL+"/rest/v1/pendente_meta?id=eq.1",{
     method:"PATCH",
@@ -130,7 +123,6 @@ function parseFile(file){
 function tempo(val){const s=String(val).trim();return !s?null:s.startsWith("-")?"fora":"prazo";}
 function tempoDays(val){const m=String(val).match(/(-?\d+)d/);return m?parseInt(m[1]):0;}
 function fmtDate(iso){if(!iso)return"—";try{const d=new Date(iso);return d.toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"});}catch{return iso;}}
-function fmtDiaShort(dia){try{const[y,m,d]=dia.split("-");return`${d}/${m}`;}catch{return dia;}}
 
 /* ── Components ── */
 function Pill({value,color,bg,border,onClick,clickable}){
@@ -195,102 +187,6 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
         </table>
       </div>
     </div>
-  </div>;
-}
-
-/* ── Historico Chart ── */
-function CustomTooltip({active,payload,label}){
-  if(!active||!payload?.length)return null;
-  return <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",fontSize:12,boxShadow:"0 8px 24px rgba(0,0,0,0.4)"}}>
-    <div style={{fontWeight:700,color:C.text,marginBottom:6}}>{label}</div>
-    {payload.map((p,i)=>(
-      <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"2px 0"}}>
-        <span style={{width:8,height:8,borderRadius:"50%",background:p.color,flexShrink:0}}/>
-        <span style={{color:C.textMuted}}>{p.name}:</span>
-        <span style={{fontWeight:700,color:p.color,fontVariantNumeric:"tabular-nums"}}>{p.value.toLocaleString("pt-BR")}</span>
-      </div>
-    ))}
-  </div>;
-}
-
-function HistoricoChart({historico,activeUnit}){
-  const [showChart,setShowChart]=useState(true);
-  const unidadeFilter = UNIT_TO_HISTORICO[activeUnit];
-
-  const chartData = useMemo(()=>{
-    if(!historico||!historico.length)return[];
-    const byDay={};
-    historico.forEach(r=>{
-      if(unidadeFilter!==null && r.unidade!==unidadeFilter) return;
-      if(!byDay[r.dia]) byDay[r.dia]={dia:r.dia,no_prazo:0,fora_prazo:0,total:0};
-      byDay[r.dia].no_prazo += r.no_prazo;
-      byDay[r.dia].fora_prazo += r.fora_prazo;
-      byDay[r.dia].total += r.total;
-    });
-    return Object.values(byDay)
-      .sort((a,b)=>a.dia.localeCompare(b.dia))
-      .map(d=>({...d, label:fmtDiaShort(d.dia)}));
-  },[historico,unidadeFilter]);
-
-  if(!chartData.length) return null;
-
-  const primeiro = chartData[0];
-  const ultimo = chartData[chartData.length-1];
-  const varTotal = ultimo.total - primeiro.total;
-  const varFora = ultimo.fora_prazo - primeiro.fora_prazo;
-
-  return <div style={{background:C.card,borderRadius:14,border:`1px solid ${C.border}`,marginBottom:16,overflow:"hidden"}}>
-    <div onClick={()=>setShowChart(!showChart)} style={{padding:"14px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",borderBottom:showChart?`1px solid ${C.border}`:"none"}}
-      onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
-      <div style={{display:"flex",alignItems:"center",gap:10}}>
-        <span style={{fontSize:10,color:C.textDim,transition:"transform 0.15s",display:"inline-block",transform:showChart?"rotate(90deg)":"rotate(0deg)"}}>▶</span>
-        <span style={{fontSize:13,fontWeight:700,color:C.text}}>Evolução da Carteira</span>
-        <span style={{fontSize:11,color:C.textDim}}>({chartData.length} dias)</span>
-      </div>
-      <div style={{display:"flex",gap:12,fontSize:12}}>
-        <span style={{color:varTotal>0?C.red:varTotal<0?C.green:C.textDim,fontWeight:600}}>
-          {varTotal>0?"+":""}{varTotal} OS
-        </span>
-        <span style={{color:varFora>0?C.red:varFora<0?C.green:C.textDim,fontWeight:600}}>
-          {varFora>0?"+":""}{varFora} fora
-        </span>
-      </div>
-    </div>
-    {showChart&&<div style={{padding:"16px 12px 8px"}}>
-      <ResponsiveContainer width="100%" height={260}>
-        <AreaChart data={chartData} margin={{top:5,right:10,left:0,bottom:5}}>
-          <defs>
-            <linearGradient id="gradTotal" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor={C.accent} stopOpacity={0.15}/>
-              <stop offset="95%" stopColor={C.accent} stopOpacity={0}/>
-            </linearGradient>
-            <linearGradient id="gradPrazo" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor={C.green} stopOpacity={0.15}/>
-              <stop offset="95%" stopColor={C.green} stopOpacity={0}/>
-            </linearGradient>
-            <linearGradient id="gradFora" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor={C.red} stopOpacity={0.15}/>
-              <stop offset="95%" stopColor={C.red} stopOpacity={0}/>
-            </linearGradient>
-          </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke={C.border} vertical={false}/>
-          <XAxis dataKey="label" tick={{fill:C.textDim,fontSize:11}} tickLine={false} axisLine={{stroke:C.border}}/>
-          <YAxis tick={{fill:C.textDim,fontSize:11}} tickLine={false} axisLine={false} width={45}/>
-          <Tooltip content={<CustomTooltip/>}/>
-          <Area type="monotone" dataKey="total" name="Total" stroke={C.accent} fill="url(#gradTotal)" strokeWidth={2} dot={chartData.length<=31}/>
-          <Area type="monotone" dataKey="no_prazo" name="No Prazo" stroke={C.green} fill="url(#gradPrazo)" strokeWidth={2} dot={chartData.length<=31}/>
-          <Area type="monotone" dataKey="fora_prazo" name="Fora do Prazo" stroke={C.red} fill="url(#gradFora)" strokeWidth={2} dot={chartData.length<=31}/>
-        </AreaChart>
-      </ResponsiveContainer>
-      <div style={{display:"flex",justifyContent:"center",gap:20,padding:"4px 0 8px"}}>
-        {[{label:"Total",color:C.accent},{label:"No Prazo",color:C.green},{label:"Fora do Prazo",color:C.red}].map(l=>
-          <div key={l.label} style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:C.textMuted}}>
-            <span style={{width:10,height:3,borderRadius:2,background:l.color}}/>
-            {l.label}
-          </div>
-        )}
-      </div>
-    </div>}
   </div>;
 }
 
@@ -364,7 +260,7 @@ function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed}){
 }
 
 /* ── Dashboard ── */
-function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitLabel,historico,activeUnit}){
+function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitLabel}){
   const {familyMap,totalPrazo,totalFora,total}=useMemo(()=>{
     const fm={};let tp=0,tf=0;
     rows.forEach(r=>{const fam=String(r["Família"]||"").trim();if(!fam)return;if(!fm[fam])fm[fam]=[];fm[fam].push(r);
@@ -389,7 +285,6 @@ function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitL
       </div>
       <Bar prazo={totalPrazo} fora={totalFora} total={total}/>
     </div>
-    {historico&&historico.length>0&&<HistoricoChart historico={historico} activeUnit={activeUnit}/>}
     <div style={{fontSize:12,color:C.textDim,marginBottom:10,padding:"0 4px",display:"flex",gap:16,flexWrap:"wrap"}}>
       <span>▶ Clique na família para filtrar TSS</span>
       <span>🔢 Clique nos números para ver as OS</span>
@@ -402,7 +297,7 @@ function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitL
               <th key={col.key} onClick={()=>onSort(col.key)} style={{padding:"12px 16px",textAlign:col.key==="name"?"left":"center",fontSize:11,fontWeight:700,color:sortBy===col.key?C.accent:C.textDim,textTransform:"uppercase",letterSpacing:0.8,cursor:"pointer",userSelect:"none",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{col.label}{sortBy===col.key?" ↓":""}</th>
             )}
           </tr></thead>
-          <tbody>{sortedFams.map((f,i)=><FamilyRow key={f.name} fam={f.name} rows={f.rows} excludedTSS={excludedTSS} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} idx={i}/>)}</tbody>
+          <tbody>{sortedFams.map((f,i)=><FamilyRow key={f.name} fam={f.name} rows={f.rows} excludedTSS={excludedTSS} onToggleTSS={onToggleTSS} onToggleAll={onToggleAll} idx={i}/>)}</tbody>
         </table>
       </div>
     </div>
@@ -421,7 +316,6 @@ export default function App(){
   const [dragOver,setDragOver]=useState(false);
   const [activeUnit,setActiveUnit]=useState("geral");
   const [sideCollapsed,setSideCollapsed]=useState(false);
-  const [historico,setHistorico]=useState(null);
   const inputRef=useRef();
 
   const flash=(msg)=>{setToast(msg);setTimeout(()=>setToast(""),4000);};
@@ -446,11 +340,6 @@ export default function App(){
         const cached=loadCache();
         if(cached?.rows?.length>0){setRawRows(cached.rows);setUpdatedAt(cached.updatedAt);flash("Usando dados em cache");}
       }
-      // Buscar histórico (silencioso)
-      try{
-        const hist=await fetchHistorico();
-        if(hist?.length>0) setHistorico(hist);
-      }catch(e){console.warn("Historico indisponivel:",e.message);}
       setLoading(false);
     })();
   },[]);
@@ -483,8 +372,6 @@ export default function App(){
       if(data.rows?.length>0){setRawRows(data.rows);setUpdatedAt(data.updatedAt);cacheRows(data.rows,data.updatedAt);flash("Dados atualizados ✓ ("+data.rows.length+" OS)");}
       else flash("Servidor vazio — dados locais mantidos");
     }catch(e){flash("Erro: "+e.message+" — dados locais mantidos");}
-    // Atualizar histórico também
-    try{const hist=await fetchHistorico();if(hist?.length>0)setHistorico(hist);}catch{}
   },[]);
 
   const currentUnit=UNITS.find(u=>u.id===activeUnit)||UNITS[0];
@@ -535,10 +422,10 @@ export default function App(){
               </label>
             </div>
           </div>
-          <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label} historico={historico} activeUnit={activeUnit}/>
+          <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label}/>
         </div>}
         <div style={{textAlign:"center",padding:"32px 16px 16px",color:C.textDim,fontSize:11,letterSpacing:0.3,opacity:0.6}}>
-          Criado por Bryan Mendes Deodato, todos os direitos reservados
+          Desenvolvido por Bryan Mendes Deodato, todos os direitos reservados
         </div>
       </div>
     </div>
