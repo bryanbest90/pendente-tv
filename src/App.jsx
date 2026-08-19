@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react";
 import * as XLSX from "xlsx";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, Area, AreaChart } from "recharts";
 
 // ━━━ SUPABASE ━━━
 const SUPABASE_URL = "https://iggnfikqbdgrvfshxhul.supabase.co";
@@ -28,6 +29,13 @@ const UNITS = [
   { id:"embu", label:"Embu-Guaçu", atc:299, icon:"🌿" },
 ];
 
+// Mapeamento unidade → id do sidebar
+const UNIDADE_TO_ID = {
+  "Interlagos":"interlagos",
+  "Grajau":"grajau",
+  "Embu-Guacu":"embu",
+};
+
 const C = {
   bg:"#0a0f1a",card:"#111827",cardAlt:"#0d1321",border:"#1e293b",
   accent:"#3b82f6",accentBg:"rgba(59,130,246,0.06)",
@@ -50,7 +58,6 @@ async function fetchRows(){
   const metaRes = await fetch(SUPABASE_URL+"/rest/v1/pendente_meta?id=eq.1&select=updated_at,total_rows",{headers:HEADERS});
   const meta = await metaRes.json();
   const updatedAt = meta[0]?.updated_at || null;
-  // Buscar dados paginando de 1000 em 1000 (limite do Supabase)
   const allRows = [];
   let from = 0;
   const pageSize = 1000;
@@ -63,21 +70,38 @@ async function fetchRows(){
     const data = await res.json();
     if(!data || !data.length) break;
     data.forEach(r=>allRows.push(r.dados));
-    if(data.length < pageSize) break; // última página
+    if(data.length < pageSize) break;
     from += pageSize;
   }
   return { rows: allRows, updatedAt };
 }
 
+async function fetchHistorico(){
+  const allRows = [];
+  let from = 0;
+  const pageSize = 1000;
+  while(true){
+    const to = from + pageSize - 1;
+    const res = await fetch(SUPABASE_URL+"/rest/v1/pendente_historico?select=dia,unidade,familia,no_prazo,fora_prazo,total&order=dia.asc",{
+      headers:{...HEADERS,"Range":from+"-"+to},
+    });
+    if(!res.ok && res.status !== 206) return [];
+    const data = await res.json();
+    if(!data || !data.length) break;
+    allRows.push(...data);
+    if(data.length < pageSize) break;
+    from += pageSize;
+  }
+  return allRows;
+}
+
 async function uploadRows(rows){
-  // 1. Limpar tabela via função SQL (sem limite de 1000)
   const delRes = await fetch(SUPABASE_URL+"/rest/v1/rpc/limpar_pendente",{
     method:"POST",
     headers:{...HEADERS,"Prefer":"return=minimal"},
     body:"{}",
   });
   if(!delRes.ok) throw new Error("Erro ao limpar tabela: "+await delRes.text());
-  // 2. Inserir novos em lotes de 500
   const batchSize = 500;
   for(let i=0;i<rows.length;i+=batchSize){
     const batch = rows.slice(i,i+batchSize).map(r=>({dados:r}));
@@ -88,7 +112,6 @@ async function uploadRows(rows){
     });
     if(!res.ok) throw new Error("Erro inserindo lote "+(Math.floor(i/batchSize)+1)+": "+await res.text());
   }
-  // 3. Atualizar meta
   const now = new Date().toISOString();
   await fetch(SUPABASE_URL+"/rest/v1/pendente_meta?id=eq.1",{
     method:"PATCH",
@@ -123,6 +146,12 @@ function parseFile(file){
 function tempo(val){const s=String(val).trim();return !s?null:s.startsWith("-")?"fora":"prazo";}
 function tempoDays(val){const m=String(val).match(/(-?\d+)d/);return m?parseInt(m[1]):0;}
 function fmtDate(iso){if(!iso)return"—";try{const d=new Date(iso);return d.toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"});}catch{return iso;}}
+function fmtDiaShort(dia){
+  if(!dia)return"";
+  const parts=dia.split("-");
+  if(parts.length===3)return parts[2]+"/"+parts[1];
+  return dia;
+}
 
 /* ── Components ── */
 function Pill({value,color,bg,border,onClick,clickable}){
@@ -187,6 +216,103 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
         </table>
       </div>
     </div>
+  </div>;
+}
+
+/* ── History Chart ── */
+function CustomTooltip({active,payload,label}){
+  if(!active||!payload?.length)return null;
+  return <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",fontSize:13}}>
+    <div style={{fontWeight:700,color:C.text,marginBottom:6}}>{label}</div>
+    {payload.map((p,i)=>(
+      <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:2}}>
+        <div style={{width:8,height:8,borderRadius:"50%",background:p.color}}/>
+        <span style={{color:C.textMuted}}>{p.name}:</span>
+        <span style={{fontWeight:700,color:p.color}}>{p.value.toLocaleString("pt-BR")}</span>
+      </div>
+    ))}
+  </div>;
+}
+
+function HistoryChart({historico,activeUnit}){
+  const [showChart,setShowChart]=useState(true);
+
+  const chartData=useMemo(()=>{
+    if(!historico||!historico.length)return [];
+    // Filtrar por unidade ativa
+    const filtered=activeUnit==="geral"
+      ? historico
+      : historico.filter(r=>{
+          const uid=UNIDADE_TO_ID[r.unidade];
+          return uid===activeUnit;
+        });
+
+    // Agrupar por dia
+    const porDia={};
+    filtered.forEach(r=>{
+      if(!porDia[r.dia])porDia[r.dia]={dia:r.dia,total:0,no_prazo:0,fora_prazo:0};
+      porDia[r.dia].total+=r.total;
+      porDia[r.dia].no_prazo+=r.no_prazo;
+      porDia[r.dia].fora_prazo+=r.fora_prazo;
+    });
+
+    return Object.values(porDia)
+      .sort((a,b)=>a.dia.localeCompare(b.dia))
+      .map(d=>({...d,diaLabel:fmtDiaShort(d.dia)}));
+  },[historico,activeUnit]);
+
+  if(!chartData.length)return null;
+
+  const ultimo=chartData[chartData.length-1];
+  const penultimo=chartData.length>=2?chartData[chartData.length-2]:null;
+  const diffTotal=penultimo?ultimo.total-penultimo.total:0;
+  const diffFora=penultimo?ultimo.fora_prazo-penultimo.fora_prazo:0;
+
+  return <div style={{background:C.card,borderRadius:14,border:`1px solid ${C.border}`,marginBottom:16,overflow:"hidden"}}>
+    <div onClick={()=>setShowChart(!showChart)} style={{padding:"14px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",borderBottom:showChart?`1px solid ${C.border}`:"none"}}
+      onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
+      <div style={{display:"flex",alignItems:"center",gap:10}}>
+        <span style={{fontSize:10,color:C.textDim,transition:"transform 0.15s",display:"inline-block",transform:showChart?"rotate(90deg)":"rotate(0deg)"}}>▶</span>
+        <span style={{fontSize:13,fontWeight:700,color:C.text}}>Evolução Diária</span>
+        <span style={{fontSize:11,color:C.textDim}}>{chartData.length} dia{chartData.length!==1?"s":""}</span>
+      </div>
+      {penultimo&&<div style={{display:"flex",gap:12,fontSize:12}}>
+        <span style={{color:diffTotal>0?C.red:diffTotal<0?C.green:C.textDim}}>
+          Total: {diffTotal>0?"+":""}{diffTotal}
+        </span>
+        <span style={{color:diffFora>0?C.red:diffFora<0?C.green:C.textDim}}>
+          Fora: {diffFora>0?"+":""}{diffFora}
+        </span>
+      </div>}
+    </div>
+    {showChart&&<div style={{padding:"12px 8px 8px 0"}}>
+      <ResponsiveContainer width="100%" height={240}>
+        <AreaChart data={chartData} margin={{top:8,right:16,left:0,bottom:4}}>
+          <defs>
+            <linearGradient id="gradTotal" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor={C.accent} stopOpacity={0.2}/>
+              <stop offset="95%" stopColor={C.accent} stopOpacity={0}/>
+            </linearGradient>
+            <linearGradient id="gradPrazo" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor={C.green} stopOpacity={0.15}/>
+              <stop offset="95%" stopColor={C.green} stopOpacity={0}/>
+            </linearGradient>
+            <linearGradient id="gradFora" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor={C.red} stopOpacity={0.15}/>
+              <stop offset="95%" stopColor={C.red} stopOpacity={0}/>
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke={C.border} vertical={false}/>
+          <XAxis dataKey="diaLabel" tick={{fill:C.textDim,fontSize:11}} tickLine={false} axisLine={{stroke:C.border}}/>
+          <YAxis tick={{fill:C.textDim,fontSize:11}} tickLine={false} axisLine={false} width={50}/>
+          <Tooltip content={<CustomTooltip/>}/>
+          <Area type="monotone" dataKey="total" name="Total" stroke={C.accent} strokeWidth={2} fill="url(#gradTotal)" dot={{r:3,fill:C.accent,strokeWidth:0}} activeDot={{r:5,fill:C.accent}}/>
+          <Area type="monotone" dataKey="no_prazo" name="No Prazo" stroke={C.green} strokeWidth={2} fill="url(#gradPrazo)" dot={{r:3,fill:C.green,strokeWidth:0}} activeDot={{r:5,fill:C.green}}/>
+          <Area type="monotone" dataKey="fora_prazo" name="Fora do Prazo" stroke={C.red} strokeWidth={2} fill="url(#gradFora)" dot={{r:3,fill:C.red,strokeWidth:0}} activeDot={{r:5,fill:C.red}}/>
+          <Legend iconType="circle" iconSize={8} wrapperStyle={{fontSize:12,color:C.textDim,paddingTop:8}}/>
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>}
   </div>;
 }
 
@@ -260,7 +386,7 @@ function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed}){
 }
 
 /* ── Dashboard ── */
-function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitLabel}){
+function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitLabel,historico,activeUnit}){
   const {familyMap,totalPrazo,totalFora,total}=useMemo(()=>{
     const fm={};let tp=0,tf=0;
     rows.forEach(r=>{const fam=String(r["Família"]||"").trim();if(!fam)return;if(!fm[fam])fm[fam]=[];fm[fam].push(r);
@@ -285,6 +411,8 @@ function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitL
       </div>
       <Bar prazo={totalPrazo} fora={totalFora} total={total}/>
     </div>
+    {/* Gráfico de evolução diária */}
+    <HistoryChart historico={historico} activeUnit={activeUnit}/>
     <div style={{fontSize:12,color:C.textDim,marginBottom:10,padding:"0 4px",display:"flex",gap:16,flexWrap:"wrap"}}>
       <span>▶ Clique na família para filtrar TSS</span>
       <span>🔢 Clique nos números para ver as OS</span>
@@ -307,6 +435,7 @@ function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitL
 /* ── Main ── */
 export default function App(){
   const [rawRows,setRawRows]=useState(null);
+  const [historico,setHistorico]=useState([]);
   const [excludedTSS,setExcludedTSS]=useState(new Set());
   const [sortBy,setSortBy]=useState("fora");
   const [updatedAt,setUpdatedAt]=useState(null);
@@ -340,6 +469,11 @@ export default function App(){
         const cached=loadCache();
         if(cached?.rows?.length>0){setRawRows(cached.rows);setUpdatedAt(cached.updatedAt);flash("Usando dados em cache");}
       }
+      // Carregar histórico
+      try{
+        const hist=await fetchHistorico();
+        setHistorico(hist);
+      }catch(e){console.warn("Erro ao carregar histórico:",e);}
       setLoading(false);
     })();
   },[]);
@@ -371,6 +505,8 @@ export default function App(){
     try{flash("Atualizando...");const data=await fetchRows();
       if(data.rows?.length>0){setRawRows(data.rows);setUpdatedAt(data.updatedAt);cacheRows(data.rows,data.updatedAt);flash("Dados atualizados ✓ ("+data.rows.length+" OS)");}
       else flash("Servidor vazio — dados locais mantidos");
+      // Atualizar histórico também
+      try{const hist=await fetchHistorico();setHistorico(hist);}catch{}
     }catch(e){flash("Erro: "+e.message+" — dados locais mantidos");}
   },[]);
 
@@ -422,10 +558,10 @@ export default function App(){
               </label>
             </div>
           </div>
-          <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label}/>
+          <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label} historico={historico} activeUnit={activeUnit}/>
         </div>}
         <div style={{textAlign:"center",padding:"32px 16px 16px",color:C.textDim,fontSize:11,letterSpacing:0.3,opacity:0.6}}>
-          Desenvolvido por Bryan Mendes Deodato, todos os direitos reservados
+          Criado por Bryan Mendes Deodato, todos os direitos reservados
         </div>
       </div>
     </div>
