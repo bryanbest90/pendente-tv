@@ -425,7 +425,7 @@ export default function App(){
           <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label}/>
         </div>}
         <div style={{textAlign:"center",padding:"32px 16px 16px",color:C.textDim,fontSize:11,letterSpacing:0.3,opacity:0.6}}>
-          Criado por Bryan Mendes Deodato, todos os direitos reservados
+          Desenvolvido por Bryan Mendes Deodato, todos os direitos reservados
         </div>
       </div>
     </div>
