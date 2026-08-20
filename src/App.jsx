@@ -310,14 +310,13 @@ function CustomTooltip({active,payload,label}){
   </div>;
 }
 
-const PERIOD_OPTIONS = [
-  {label:"7d",days:7},{label:"15d",days:15},{label:"30d",days:30},{label:"60d",days:60},{label:"Tudo",days:0},
-];
+const dateInputStyle = {padding:"4px 8px",borderRadius:6,fontSize:12,fontWeight:600,border:`1px solid ${C.border}`,background:C.cardAlt,color:C.text,cursor:"pointer",colorScheme:"dark"};
 
 function HistoricoChart({historico,activeUnit}){
   const [showChart,setShowChart]=useState(true);
   const [diffModal,setDiffModal]=useState(null);
-  const [periodDays,setPeriodDays]=useState(30);
+  const [dateFrom,setDateFrom]=useState("");
+  const [dateTo,setDateTo]=useState("");
   const [familyFilter,setFamilyFilter]=useState(new Set());
   const unidadeFilter = UNIT_TO_HISTORICO[activeUnit];
 
@@ -350,14 +349,10 @@ function HistoricoChart({historico,activeUnit}){
       byDay[r.dia].total += r.total;
     });
     let data = Object.values(byDay).sort((a,b)=>a.dia.localeCompare(b.dia));
-    if(periodDays > 0 && data.length > 0){
-      const cutoff = new Date();
-      cutoff.setDate(cutoff.getDate() - periodDays);
-      const cutoffStr = cutoff.toISOString().split("T")[0];
-      data = data.filter(d => d.dia >= cutoffStr);
-    }
+    if(dateFrom) data = data.filter(d => d.dia >= dateFrom);
+    if(dateTo) data = data.filter(d => d.dia <= dateTo);
     return data.map(d=>({...d,label:fmtDiaShort(d.dia)}));
-  },[historico,unidadeFilter,familyFilter,periodDays]);
+  },[historico,unidadeFilter,familyFilter,dateFrom,dateTo]);
 
   const handleChartClick = useCallback((e)=>{
     if(!e?.activePayload?.length) return;
@@ -390,15 +385,12 @@ function HistoricoChart({historico,activeUnit}){
 
     {showChart&&<div style={{padding:"12px 16px 8px"}}>
       <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14,flexWrap:"wrap"}}>
-        <div style={{display:"flex",alignItems:"center",gap:4}}>
-          <span style={{fontSize:11,color:C.textDim,fontWeight:600,marginRight:4}}>Período:</span>
-          {PERIOD_OPTIONS.map(p=>(
-            <button key={p.label} onClick={()=>setPeriodDays(p.days)}
-              style={{padding:"4px 10px",borderRadius:6,fontSize:11,fontWeight:600,cursor:"pointer",border:`1px solid ${periodDays===p.days?"rgba(59,130,246,0.4)":C.border}`,
-                background:periodDays===p.days?C.accentBg:"transparent",color:periodDays===p.days?C.accent:C.textDim,transition:"all 0.12s"}}>
-              {p.label}
-            </button>
-          ))}
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <span style={{fontSize:11,color:C.textDim,fontWeight:600}}>De:</span>
+          <input type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)} style={dateInputStyle}/>
+          <span style={{fontSize:11,color:C.textDim,fontWeight:600}}>Até:</span>
+          <input type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)} style={dateInputStyle}/>
+          {(dateFrom||dateTo)&&<button onClick={()=>{setDateFrom("");setDateTo("");}} style={{padding:"4px 8px",borderRadius:6,fontSize:10,fontWeight:600,cursor:"pointer",border:`1px solid ${C.border}`,background:"transparent",color:C.textDim}}>Limpar</button>}
         </div>
         <div style={{width:1,height:20,background:C.border}}/>
         <div style={{display:"flex",alignItems:"center",gap:6}}>
