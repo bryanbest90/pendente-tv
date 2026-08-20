@@ -63,6 +63,19 @@ async function fetchHistorico(){
   if(!res.ok) throw new Error("Erro historico "+res.status);
   return await res.json();
 }
+async function fetchDiarioOS(dia){
+  const allRows=[];let from=0;const ps=1000;
+  while(true){
+    const res=await fetch(SUPABASE_URL+`/rest/v1/pendente_diario_os?dia=eq.${dia}&select=numero_os,familia,unidade,tss`,{headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
+    if(!res.ok&&res.status!==206) break;
+    const data=await res.json();
+    if(!data?.length)break;
+    allRows.push(...data);
+    if(data.length<ps)break;
+    from+=ps;
+  }
+  return allRows;
+}
 async function uploadRows(rows){
   const delRes = await fetch(SUPABASE_URL+"/rest/v1/rpc/limpar_pendente",{method:"POST",headers:{...HEADERS,"Prefer":"return=minimal"},body:"{}"});
   if(!delRes.ok) throw new Error("Erro ao limpar: "+await delRes.text());
@@ -312,9 +325,97 @@ function CustomTooltip({active,payload,label}){
 
 const dateInputStyle = {padding:"4px 8px",borderRadius:6,fontSize:12,fontWeight:600,border:`1px solid ${C.border}`,background:C.cardAlt,color:C.text,cursor:"pointer",colorScheme:"dark"};
 
+/* ── Modal de OS que saíram do pendente ── */
+function OSExitModal({diaA,diaB,activeUnit,familyFilter,onClose}){
+  const [loading,setLoading]=useState(true);
+  const [osExited,setOsExited]=useState([]);
+  const [sortCol,setSortCol]=useState("familia");
+  const [sortAsc,setSortAsc]=useState(true);
+  const unidadeFilter = UNIT_TO_HISTORICO[activeUnit];
+
+  useEffect(()=>{
+    (async()=>{
+      try{
+        const [osA,osB] = await Promise.all([fetchDiarioOS(diaA),fetchDiarioOS(diaB)]);
+        const setB = new Set(osB.map(r=>r.numero_os));
+        let exited = osA.filter(r=>!setB.has(r.numero_os));
+        // Aplicar filtros
+        if(unidadeFilter) exited=exited.filter(r=>r.unidade===unidadeFilter);
+        if(familyFilter.size>0) exited=exited.filter(r=>familyFilter.has(r.familia));
+        setOsExited(exited);
+      }catch(e){console.error(e);}
+      setLoading(false);
+    })();
+  },[diaA,diaB,unidadeFilter,familyFilter]);
+
+  const sorted = useMemo(()=>{
+    return [...osExited].sort((a,b)=>{
+      let va=a[sortCol]||"",vb=b[sortCol]||"";
+      if(typeof va==="string"){va=va.toLowerCase();vb=vb.toLowerCase();}
+      const cmp=va<vb?-1:va>vb?1:0;
+      return sortAsc?cmp:-cmp;
+    });
+  },[osExited,sortCol,sortAsc]);
+
+  const byFamilia = useMemo(()=>{
+    const m={};osExited.forEach(r=>{if(!m[r.familia])m[r.familia]=0;m[r.familia]++;});
+    return Object.entries(m).sort((a,b)=>b[1]-a[1]);
+  },[osExited]);
+
+  const toggleSort=(col)=>setSortCol(prev=>prev===col?(setSortAsc(!sortAsc),col):(setSortAsc(true),col));
+
+  return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(4px)"}}>
+    <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:16,border:`1px solid ${C.border}`,width:"100%",maxWidth:1000,maxHeight:"85vh",display:"flex",flexDirection:"column",overflow:"hidden",animation:"modalIn 0.2s ease"}}>
+      <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+        <div>
+          <div style={{fontSize:16,fontWeight:700,color:C.text}}>OS que saíram do pendente</div>
+          <div style={{fontSize:13,color:C.textDim,marginTop:2}}>
+            {fmtDiaFull(diaA)} → {fmtDiaFull(diaB)} · <span style={{color:C.green,fontWeight:700}}>{osExited.length} OS resolvidas</span>
+          </div>
+        </div>
+        <button onClick={onClose} style={{background:"transparent",border:"none",color:C.textDim,fontSize:22,cursor:"pointer",padding:"4px 8px"}}>✕</button>
+      </div>
+
+      {loading?<div style={{padding:40,textAlign:"center",color:C.textDim}}>Carregando...</div>:<>
+        {/* Resumo por família */}
+        {byFamilia.length>0&&<div style={{padding:"12px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",gap:8,flexWrap:"wrap",background:C.cardAlt}}>
+          {byFamilia.map(([fam,count])=>(
+            <span key={fam} style={{fontSize:11,padding:"3px 10px",borderRadius:6,background:C.greenBg,color:C.green,border:`1px solid ${C.greenBorder}`,fontWeight:600}}>
+              {fam}: {count}
+            </span>
+          ))}
+        </div>}
+
+        {osExited.length===0?<div style={{padding:40,textAlign:"center",color:C.textDim}}>
+          {`Nenhuma OS saiu do pendente entre ${fmtDiaFull(diaA)} e ${fmtDiaFull(diaB)}`}
+          {familyFilter.size>0?" (com os filtros selecionados)":""}
+        </div>:
+        <div style={{overflowY:"auto",flex:1}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+            <thead><tr style={{background:C.headerBg,position:"sticky",top:0,zIndex:1}}>
+              {[{key:"numero_os",label:"Nº OS"},{key:"familia",label:"Família"},{key:"tss",label:"TSS"},{key:"unidade",label:"Unidade"}].map(col=>
+                <th key={col.key} onClick={()=>toggleSort(col.key)} style={{padding:"10px 14px",textAlign:"left",fontSize:11,fontWeight:700,color:sortCol===col.key?C.accent:C.textDim,textTransform:"uppercase",letterSpacing:0.5,borderBottom:`1px solid ${C.border}`,cursor:"pointer",userSelect:"none"}}>{col.label}{sortCol===col.key?(sortAsc?" ↑":" ↓"):""}</th>
+              )}
+            </tr></thead>
+            <tbody>{sorted.map((r,i)=>
+              <tr key={r.numero_os} style={{background:i%2?C.cardAlt:"transparent"}} onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background=i%2?C.cardAlt:"transparent")}>
+                <td style={{padding:"8px 14px",borderBottom:`1px solid ${C.border}`,fontWeight:600,color:C.accent,fontVariantNumeric:"tabular-nums"}}>{r.numero_os}</td>
+                <td style={{padding:"8px 14px",borderBottom:`1px solid ${C.border}`,fontWeight:600}}>{r.familia}</td>
+                <td style={{padding:"8px 14px",borderBottom:`1px solid ${C.border}`,color:C.textMuted,maxWidth:250,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.tss}</td>
+                <td style={{padding:"8px 14px",borderBottom:`1px solid ${C.border}`,color:C.textMuted}}>{r.unidade}</td>
+              </tr>
+            )}</tbody>
+          </table>
+        </div>}
+      </>}
+    </div>
+  </div>;
+}
+
 function HistoricoChart({historico,activeUnit}){
   const [showChart,setShowChart]=useState(true);
   const [diffModal,setDiffModal]=useState(null);
+  const [exitModal,setExitModal]=useState(null);
   const [dateFrom,setDateFrom]=useState("");
   const [dateTo,setDateTo]=useState("");
   const [familyFilter,setFamilyFilter]=useState(new Set());
@@ -423,11 +524,20 @@ function HistoricoChart({historico,activeUnit}){
             </div>
           )}
         </div>
-        <div style={{textAlign:"center",fontSize:10,color:C.textDim,paddingBottom:4}}>Clique em um ponto para ver a variação por família</div>
+        <div style={{display:"flex",justifyContent:"center",gap:12,padding:"6px 0 4px"}}>
+          <span style={{fontSize:10,color:C.textDim}}>Clique em um ponto para ver a variação por família</span>
+          {chartData.length>=2&&<button onClick={()=>{
+            const dA=chartData[0].dia, dB=chartData[chartData.length-1].dia;
+            setExitModal({diaA:dA,diaB:dB});
+          }} style={{fontSize:11,color:C.green,fontWeight:600,cursor:"pointer",padding:"3px 12px",borderRadius:6,border:`1px solid ${C.greenBorder}`,background:C.greenBg}}>
+            OS que saíram do pendente
+          </button>}
+        </div>
       </> : <div style={{padding:"40px 20px",textAlign:"center",color:C.textDim,fontSize:13}}>Sem dados para o período selecionado</div>}
     </div>}
 
     {diffModal&&<DiffModal historico={historico} dia={diffModal.dia} prevDia={diffModal.prevDia} activeUnit={activeUnit} familyFilter={familyFilter} onClose={()=>setDiffModal(null)}/>}
+    {exitModal&&<OSExitModal diaA={exitModal.diaA} diaB={exitModal.diaB} activeUnit={activeUnit} familyFilter={familyFilter} onClose={()=>setExitModal(null)}/>}
   </div>;
 }
 /* ── Family Row ── */
@@ -637,10 +747,6 @@ export default function App(){
             </div>
             <div style={{display:"flex",gap:8}}>
               <button onClick={refresh} style={{fontSize:12,color:C.accent,cursor:"pointer",fontWeight:600,padding:"4px 12px",borderRadius:6,border:"1px solid rgba(59,130,246,0.3)",background:C.accentBg}}>↻ Atualizar</button>
-              <label style={{fontSize:12,color:C.green,cursor:"pointer",fontWeight:600,padding:"4px 12px",borderRadius:6,border:`1px solid ${C.greenBorder}`,background:C.greenBg}}>
-                {uploading?"Enviando...":"📤 Importar novo"}
-                <input type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])} disabled={uploading}/>
-              </label>
             </div>
           </div>
           <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label} historico={historico} activeUnit={activeUnit}/>
