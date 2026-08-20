@@ -66,7 +66,7 @@ async function fetchHistorico(){
 async function fetchDiarioOS(dia){
   const allRows=[];let from=0;const ps=1000;
   while(true){
-    const res=await fetch(SUPABASE_URL+`/rest/v1/pendente_diario_os?dia=eq.${dia}&select=numero_os,familia,unidade,tss`,{headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
+    const res=await fetch(SUPABASE_URL+`/rest/v1/pendente_diario_os?dia=eq.${dia}&select=numero_os,familia,unidade,tss,fora_prazo,endereco,numero_end,complemento`,{headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
     if(!res.ok&&res.status!==206) break;
     const data=await res.json();
     if(!data?.length)break;
@@ -378,12 +378,18 @@ function OSExitModal({diaA,diaB,activeUnit,familyFilter,onClose}){
 
       {loading?<div style={{padding:40,textAlign:"center",color:C.textDim}}>Carregando...</div>:<>
         {/* Resumo por família */}
-        {byFamilia.length>0&&<div style={{padding:"12px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",gap:8,flexWrap:"wrap",background:C.cardAlt}}>
-          {byFamilia.map(([fam,count])=>(
-            <span key={fam} style={{fontSize:11,padding:"3px 10px",borderRadius:6,background:C.greenBg,color:C.green,border:`1px solid ${C.greenBorder}`,fontWeight:600}}>
-              {fam}: {count}
-            </span>
-          ))}
+        {byFamilia.length>0&&<div style={{padding:"12px 20px",borderBottom:`1px solid ${C.border}`,background:C.cardAlt}}>
+          <div style={{display:"flex",gap:12,marginBottom:8}}>
+            <span style={{fontSize:12,color:C.green,fontWeight:700}}>No prazo: {osExited.filter(r=>!r.fora_prazo).length}</span>
+            <span style={{fontSize:12,color:C.red,fontWeight:700}}>Fora do prazo: {osExited.filter(r=>r.fora_prazo).length}</span>
+          </div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            {byFamilia.map(([fam,count])=>(
+              <span key={fam} style={{fontSize:11,padding:"3px 10px",borderRadius:6,background:C.greenBg,color:C.green,border:`1px solid ${C.greenBorder}`,fontWeight:600}}>
+                {fam}: {count}
+              </span>
+            ))}
+          </div>
         </div>}
 
         {osExited.length===0?<div style={{padding:40,textAlign:"center",color:C.textDim}}>
@@ -393,17 +399,23 @@ function OSExitModal({diaA,diaB,activeUnit,familyFilter,onClose}){
         <div style={{overflowY:"auto",flex:1}}>
           <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
             <thead><tr style={{background:C.headerBg,position:"sticky",top:0,zIndex:1}}>
-              {[{key:"numero_os",label:"Nº OS"},{key:"familia",label:"Família"},{key:"tss",label:"TSS"},{key:"unidade",label:"Unidade"}].map(col=>
+              {[{key:"numero_os",label:"Nº OS"},{key:"familia",label:"Família"},{key:"tss",label:"TSS"},{key:"endereco",label:"Endereço"},{key:"unidade",label:"Unidade"},{key:"fora_prazo",label:"Prazo"}].map(col=>
                 <th key={col.key} onClick={()=>toggleSort(col.key)} style={{padding:"10px 14px",textAlign:"left",fontSize:11,fontWeight:700,color:sortCol===col.key?C.accent:C.textDim,textTransform:"uppercase",letterSpacing:0.5,borderBottom:`1px solid ${C.border}`,cursor:"pointer",userSelect:"none"}}>{col.label}{sortCol===col.key?(sortAsc?" ↑":" ↓"):""}</th>
               )}
             </tr></thead>
-            <tbody>{sorted.map((r,i)=>
-              <tr key={r.numero_os} style={{background:i%2?C.cardAlt:"transparent"}} onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background=i%2?C.cardAlt:"transparent")}>
+            <tbody>{sorted.map((r,i)=>{
+              const rowColor = r.fora_prazo ? C.red : C.green;
+              const rowBg = r.fora_prazo ? C.redBg : C.greenBg;
+              return <tr key={r.numero_os} style={{background:i%2?C.cardAlt:"transparent",borderLeft:`3px solid ${rowColor}`}} onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background=i%2?C.cardAlt:"transparent")}>
                 <td style={{padding:"8px 14px",borderBottom:`1px solid ${C.border}`,fontWeight:600,color:C.accent,fontVariantNumeric:"tabular-nums"}}>{r.numero_os}</td>
                 <td style={{padding:"8px 14px",borderBottom:`1px solid ${C.border}`,fontWeight:600}}>{r.familia}</td>
-                <td style={{padding:"8px 14px",borderBottom:`1px solid ${C.border}`,color:C.textMuted,maxWidth:250,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.tss}</td>
+                <td style={{padding:"8px 14px",borderBottom:`1px solid ${C.border}`,color:C.textMuted,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.tss}</td>
+                <td style={{padding:"8px 14px",borderBottom:`1px solid ${C.border}`,color:C.textMuted,whiteSpace:"nowrap"}}>{r.endereco}{r.numero_end?", "+r.numero_end:""}{r.complemento?" - "+r.complemento:""}</td>
                 <td style={{padding:"8px 14px",borderBottom:`1px solid ${C.border}`,color:C.textMuted}}>{r.unidade}</td>
-              </tr>
+                <td style={{padding:"8px 14px",borderBottom:`1px solid ${C.border}`}}>
+                  <span style={{fontSize:11,padding:"2px 8px",borderRadius:6,fontWeight:700,color:rowColor,background:rowBg,border:`1px solid ${r.fora_prazo?C.redBorder:C.greenBorder}`}}>{r.fora_prazo?"Fora":"OK"}</span>
+                </td>
+              </tr>;}
             )}</tbody>
           </table>
         </div>}
