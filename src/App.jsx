@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react";
 import * as XLSX from "xlsx";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, Area, AreaChart } from "recharts";
+import { XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Area, AreaChart } from "recharts";
 
 // ━━━ SUPABASE ━━━
 const SUPABASE_URL = "https://iggnfikqbdgrvfshxhul.supabase.co";
@@ -9,17 +9,10 @@ const HEADERS = {"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY,"C
 
 const EXCLUDED_DISPLAY = ["VISTORIA","CORTE SUPRESSÃO ADM","FISCALIZAÇÃO","SERV COMPLEMENTAR","ABASTECIMENTO","DESOBSTRUÇÃO"];
 const EXCLUDED_TSS = [
-  "RETIRAR LACRE NUMERADO",
-  "LIGAÇÃO DE ÁGUA - PROG AGUA LEGAL",
-  "DESCARGA EM REDE DE ÁGUA",
-  "INSTALAR CAIXA D'ÁGUA",
-  "INSTALAR CAIXA UMA (PARTE CIVIL)",
-  "PREPARAR INSTALAÇÃO PARA CAIXA D'AGUA",
-  "RESTABELECER LIGAÇÃO SERVIÇOS ADICIONAIS",
-  "LIGAÇÃO DE ESGOTO - PROG AGUA LEGAL",
-  "LIGAÇÃO DE ESGOTO - PROG SE LIGA NA REDE",
-  "TESTE DE CORANTE OP",
-  "SUPRIMIR LIGAÇÃO DE POÇO",
+  "RETIRAR LACRE NUMERADO","LIGAÇÃO DE ÁGUA - PROG AGUA LEGAL","DESCARGA EM REDE DE ÁGUA",
+  "INSTALAR CAIXA D'ÁGUA","INSTALAR CAIXA UMA (PARTE CIVIL)","PREPARAR INSTALAÇÃO PARA CAIXA D'AGUA",
+  "RESTABELECER LIGAÇÃO SERVIÇOS ADICIONAIS","LIGAÇÃO DE ESGOTO - PROG AGUA LEGAL",
+  "LIGAÇÃO DE ESGOTO - PROG SE LIGA NA REDE","TESTE DE CORANTE OP","SUPRIMIR LIGAÇÃO DE POÇO",
 ];
 const VALID_ATCS = [923, 929, 299];
 const UNITS = [
@@ -28,13 +21,7 @@ const UNITS = [
   { id:"grajau", label:"Grajaú", atc:929, icon:"🌊" },
   { id:"embu", label:"Embu-Guaçu", atc:299, icon:"🌿" },
 ];
-
-// Mapeamento unidade → id do sidebar
-const UNIDADE_TO_ID = {
-  "Interlagos":"interlagos",
-  "Grajau":"grajau",
-  "Embu-Guacu":"embu",
-};
+const UNIT_TO_HISTORICO = { geral: null, interlagos: "Interlagos", grajau: "Grajau", embu: "Embu-Guacu" };
 
 const C = {
   bg:"#0a0f1a",card:"#111827",cardAlt:"#0d1321",border:"#1e293b",
@@ -47,7 +34,7 @@ const C = {
   sidebar:"#0c1222",sideHover:"rgba(59,130,246,0.08)",sideActive:"rgba(59,130,246,0.14)",
 };
 
-/* ── Storage (filtros pessoais + cache local) ── */
+/* ── Storage ── */
 function saveLocal(obj){try{localStorage.setItem("sabesp-filters-v1",JSON.stringify(obj));}catch{}}
 function loadLocal(){try{const d=localStorage.getItem("sabesp-filters-v1");return d?JSON.parse(d):null;}catch{return null;}}
 function cacheRows(rows,updatedAt){try{localStorage.setItem("sabesp-cache-v2",JSON.stringify({rows,updatedAt}));}catch{}}
@@ -59,66 +46,35 @@ async function fetchRows(){
   const meta = await metaRes.json();
   const updatedAt = meta[0]?.updated_at || null;
   const allRows = [];
-  let from = 0;
-  const pageSize = 1000;
+  let from = 0, pageSize = 1000;
   while(true){
-    const to = from + pageSize - 1;
-    const res = await fetch(SUPABASE_URL+"/rest/v1/pendente_os?select=dados&order=id.asc",{
-      headers:{...HEADERS,"Range":from+"-"+to},
-    });
+    const res = await fetch(SUPABASE_URL+"/rest/v1/pendente_os?select=dados&order=id.asc",{headers:{...HEADERS,"Range":from+"-"+(from+pageSize-1)}});
     if(!res.ok && res.status !== 206) throw new Error("Erro "+res.status);
     const data = await res.json();
-    if(!data || !data.length) break;
+    if(!data?.length) break;
     data.forEach(r=>allRows.push(r.dados));
     if(data.length < pageSize) break;
     from += pageSize;
   }
   return { rows: allRows, updatedAt };
 }
-
 async function fetchHistorico(){
-  const allRows = [];
-  let from = 0;
-  const pageSize = 1000;
-  while(true){
-    const to = from + pageSize - 1;
-    const res = await fetch(SUPABASE_URL+"/rest/v1/pendente_historico?select=dia,unidade,familia,no_prazo,fora_prazo,total&order=dia.asc",{
-      headers:{...HEADERS,"Range":from+"-"+to},
-    });
-    if(!res.ok && res.status !== 206) return [];
-    const data = await res.json();
-    if(!data || !data.length) break;
-    allRows.push(...data);
-    if(data.length < pageSize) break;
-    from += pageSize;
-  }
-  return allRows;
+  const res = await fetch(SUPABASE_URL+"/rest/v1/pendente_historico?select=dia,unidade,familia,no_prazo,fora_prazo,total&order=dia.asc",{headers:HEADERS});
+  if(!res.ok) throw new Error("Erro historico "+res.status);
+  return await res.json();
 }
-
 async function uploadRows(rows){
-  const delRes = await fetch(SUPABASE_URL+"/rest/v1/rpc/limpar_pendente",{
-    method:"POST",
-    headers:{...HEADERS,"Prefer":"return=minimal"},
-    body:"{}",
-  });
-  if(!delRes.ok) throw new Error("Erro ao limpar tabela: "+await delRes.text());
-  const batchSize = 500;
-  for(let i=0;i<rows.length;i+=batchSize){
-    const batch = rows.slice(i,i+batchSize).map(r=>({dados:r}));
-    const res = await fetch(SUPABASE_URL+"/rest/v1/pendente_os",{
-      method:"POST",
-      headers:{...HEADERS,"Prefer":"return=minimal"},
-      body:JSON.stringify(batch),
-    });
-    if(!res.ok) throw new Error("Erro inserindo lote "+(Math.floor(i/batchSize)+1)+": "+await res.text());
+  const delRes = await fetch(SUPABASE_URL+"/rest/v1/rpc/limpar_pendente",{method:"POST",headers:{...HEADERS,"Prefer":"return=minimal"},body:"{}"});
+  if(!delRes.ok) throw new Error("Erro ao limpar: "+await delRes.text());
+  const bs=500;
+  for(let i=0;i<rows.length;i+=bs){
+    const batch=rows.slice(i,i+bs).map(r=>({dados:r}));
+    const res=await fetch(SUPABASE_URL+"/rest/v1/pendente_os",{method:"POST",headers:{...HEADERS,"Prefer":"return=minimal"},body:JSON.stringify(batch)});
+    if(!res.ok) throw new Error("Erro lote "+(Math.floor(i/bs)+1)+": "+await res.text());
   }
-  const now = new Date().toISOString();
-  await fetch(SUPABASE_URL+"/rest/v1/pendente_meta?id=eq.1",{
-    method:"PATCH",
-    headers:{...HEADERS,"Prefer":"return=minimal"},
-    body:JSON.stringify({updated_at:now,total_rows:rows.length}),
-  });
-  return { count:rows.length, updatedAt:now };
+  const now=new Date().toISOString();
+  await fetch(SUPABASE_URL+"/rest/v1/pendente_meta?id=eq.1",{method:"PATCH",headers:{...HEADERS,"Prefer":"return=minimal"},body:JSON.stringify({updated_at:now,total_rows:rows.length})});
+  return{count:rows.length,updatedAt:now};
 }
 
 /* ── Helpers ── */
@@ -129,31 +85,22 @@ function parseFile(file){
     reader.onload=e=>{
       const buf=e.target.result;
       const attempts=[{type:"array",cellDates:false},{type:"array",cellDates:false,raw:true},{type:"array"},{type:"binary"}];
-      for(const opts of attempts){
-        try{
-          const input=opts.type==="binary"?Array.from(new Uint8Array(buf)).map(b=>String.fromCharCode(b)).join(""):buf;
-          const wb=XLSX.read(input,opts);
-          const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:""});
-          if(rows.length>0){resolve(rows);return;}
-        }catch{}
-      }
-      reject(new Error("Não foi possível ler o arquivo. Tente salvar como .xlsx no Excel e reimportar."));
-    };
-    reader.onerror=reject;
-    reader.readAsArrayBuffer(file);
+      for(const opts of attempts){try{
+        const input=opts.type==="binary"?Array.from(new Uint8Array(buf)).map(b=>String.fromCharCode(b)).join(""):buf;
+        const wb=XLSX.read(input,opts);const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:""});
+        if(rows.length>0){resolve(rows);return;}
+      }catch{}}
+      reject(new Error("Não foi possível ler o arquivo."));
+    };reader.onerror=reject;reader.readAsArrayBuffer(file);
   });
 }
 function tempo(val){const s=String(val).trim();return !s?null:s.startsWith("-")?"fora":"prazo";}
 function tempoDays(val){const m=String(val).match(/(-?\d+)d/);return m?parseInt(m[1]):0;}
 function fmtDate(iso){if(!iso)return"—";try{const d=new Date(iso);return d.toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"});}catch{return iso;}}
-function fmtDiaShort(dia){
-  if(!dia)return"";
-  const parts=dia.split("-");
-  if(parts.length===3)return parts[2]+"/"+parts[1];
-  return dia;
-}
+function fmtDiaShort(dia){try{const[y,m,d]=dia.split("-");return`${d}/${m}`;}catch{return dia;}}
+function fmtDiaFull(dia){try{const[y,m,d]=dia.split("-");return`${d}/${m}/${y}`;}catch{return dia;}}
 
-/* ── Components ── */
+/* ── Pill / Bar / SummaryCard / Check ── */
 function Pill({value,color,bg,border,onClick,clickable}){
   return <span onClick={onClick} style={{display:"inline-flex",alignItems:"center",justifyContent:"center",minWidth:46,padding:"5px 14px",borderRadius:8,fontSize:15,fontWeight:700,fontVariantNumeric:"tabular-nums",color,background:bg,border:`1px solid ${border}`,cursor:clickable?"pointer":"default",transition:"transform 0.1s,box-shadow 0.15s"}}
     onMouseEnter={e=>{if(clickable){e.currentTarget.style.transform="scale(1.08)";e.currentTarget.style.boxShadow=`0 0 12px ${color}33`;}}}
@@ -172,23 +119,19 @@ function Check({checked,onChange}){
   return <div onClick={e=>{e.stopPropagation();onChange();}} style={{width:16,height:16,borderRadius:4,flexShrink:0,cursor:"pointer",border:checked?`2px solid ${C.accent}`:"2px solid #475569",background:checked?C.accent:"transparent",display:"flex",alignItems:"center",justifyContent:"center",transition:"all 0.12s"}}>
     {checked&&<svg width="10" height="10" viewBox="0 0 12 12" fill="none"><path d="M2.5 6L5 8.5L9.5 3.5" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>}</div>;
 }
+
+/* ── OS Modal ── */
 function OSModal({rows,familia,tssName,tipo,onClose}){
   const label=tipo==="prazo"?"No Prazo":"Fora do Prazo";const color=tipo==="prazo"?C.green:C.red;
   const [modalSort,setModalSort]=useState({col:null,asc:true});
   const cols=[
-    {key:"os",label:"Nº OS",get:r=>r["Número OS"]},
-    {key:"tss",label:"TSS",get:r=>r["TSS"]},
-    {key:"sf",label:"SF",get:r=>r["SF"]},
+    {key:"os",label:"Nº OS",get:r=>r["Número OS"]},{key:"tss",label:"TSS",get:r=>r["TSS"]},{key:"sf",label:"SF",get:r=>r["SF"]},
     {key:"end",label:"Endereço",get:r=>String(r["Endereço"]).trim()+", "+r["Número"]+(r["Complemento"]?" - "+String(r["Complemento"]).trim():"")},
-    {key:"bairro",label:"Bairro",get:r=>r["Bairro"]},
-    {key:"mun",label:"Município",get:r=>r["Município"]},
-    {key:"tempo",label:"Tempo Residual",get:r=>r["Tempo Residual"],sort:r=>tempoDays(r["Tempo Residual"])},
-    {key:"status",label:"Status",get:r=>r["Status da OS"]},
+    {key:"bairro",label:"Bairro",get:r=>r["Bairro"]},{key:"mun",label:"Município",get:r=>r["Município"]},
+    {key:"tempo",label:"Tempo Residual",get:r=>r["Tempo Residual"],sort:r=>tempoDays(r["Tempo Residual"])},{key:"status",label:"Status",get:r=>r["Status da OS"]},
   ];
-  const sorted=useMemo(()=>{
-    if(!modalSort.col)return rows;const def=cols.find(c=>c.key===modalSort.col);if(!def)return rows;const fn=def.sort||def.get;
-    return[...rows].sort((a,b)=>{let va=fn(a),vb=fn(b);if(typeof va==="string")va=va.toLowerCase();if(typeof vb==="string")vb=vb.toLowerCase();const cmp=va<vb?-1:va>vb?1:0;return modalSort.asc?cmp:-cmp;});
-  },[rows,modalSort]);
+  const sorted=useMemo(()=>{if(!modalSort.col)return rows;const def=cols.find(c=>c.key===modalSort.col);if(!def)return rows;const fn=def.sort||def.get;
+    return[...rows].sort((a,b)=>{let va=fn(a),vb=fn(b);if(typeof va==="string")va=va.toLowerCase();if(typeof vb==="string")vb=vb.toLowerCase();const cmp=va<vb?-1:va>vb?1:0;return modalSort.asc?cmp:-cmp;});},[rows,modalSort]);
   const toggleSort=(key)=>setModalSort(prev=>prev.col===key?{col:key,asc:!prev.asc}:{col:key,asc:true});
   return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(4px)"}}>
     <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:16,border:`1px solid ${C.border}`,width:"100%",maxWidth:1400,maxHeight:"80vh",display:"flex",flexDirection:"column",overflow:"hidden",animation:"modalIn 0.2s ease"}}>
@@ -211,111 +154,290 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
               <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`}}>{r["Município"]}</td>
               <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,fontWeight:600,color:tempo(r["Tempo Residual"])==="fora"?C.red:C.green}}>{r["Tempo Residual"]}</td>
               <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`}}>{r["Status da OS"]}</td>
-            </tr>
-          )}</tbody>
+            </tr>)}</tbody>
         </table>
       </div>
     </div>
   </div>;
 }
 
-/* ── History Chart ── */
-function CustomTooltip({active,payload,label}){
-  if(!active||!payload?.length)return null;
-  return <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",fontSize:13}}>
-    <div style={{fontWeight:700,color:C.text,marginBottom:6}}>{label}</div>
-    {payload.map((p,i)=>(
-      <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:2}}>
-        <div style={{width:8,height:8,borderRadius:"50%",background:p.color}}/>
-        <span style={{color:C.textMuted}}>{p.name}:</span>
-        <span style={{fontWeight:700,color:p.color}}>{p.value.toLocaleString("pt-BR")}</span>
+/* ── Diff Modal (comparação dia a dia) ── */
+function DiffModal({historico,dia,prevDia,activeUnit,familyFilter,onClose}){
+  const unidadeFilter = UNIT_TO_HISTORICO[activeUnit];
+  const diffColor = (v) => v < 0 ? C.green : v > 0 ? C.red : C.textDim;
+  const diffText = (v) => v > 0 ? "+"+v : String(v);
+
+  const diffData = useMemo(()=>{
+    const agrupar = (d) => {
+      const m = {};
+      historico.forEach(r => {
+        if (r.dia !== d) return;
+        if (unidadeFilter !== null && r.unidade !== unidadeFilter) return;
+        if (familyFilter.size > 0 && !familyFilter.has(r.familia)) return;
+        if (!m[r.familia]) m[r.familia] = { no_prazo:0, fora_prazo:0, total:0 };
+        m[r.familia].no_prazo += r.no_prazo;
+        m[r.familia].fora_prazo += r.fora_prazo;
+        m[r.familia].total += r.total;
+      });
+      return m;
+    };
+    const atual = agrupar(dia);
+    const anterior = prevDia ? agrupar(prevDia) : {};
+    const allFams = new Set([...Object.keys(atual), ...Object.keys(anterior)]);
+    const rows = [];
+    allFams.forEach(fam => {
+      const a = anterior[fam] || { total:0, no_prazo:0, fora_prazo:0 };
+      const b = atual[fam] || { total:0, no_prazo:0, fora_prazo:0 };
+      rows.push({ familia:fam, anterior:a.total, atual:b.total, diff:b.total-a.total,
+        antFora:a.fora_prazo, atualFora:b.fora_prazo, diffFora:b.fora_prazo-a.fora_prazo });
+    });
+    rows.sort((a,b) => a.diff - b.diff);
+    return rows;
+  },[historico,dia,prevDia,unidadeFilter,familyFilter]);
+
+  const totais = useMemo(()=> diffData.reduce((acc,r) => ({
+    anterior:acc.anterior+r.anterior, atual:acc.atual+r.atual, diff:acc.diff+r.diff,
+    antFora:acc.antFora+r.antFora, atualFora:acc.atualFora+r.atualFora, diffFora:acc.diffFora+r.diffFora,
+  }),{anterior:0,atual:0,diff:0,antFora:0,atualFora:0,diffFora:0}),[diffData]);
+
+  return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(4px)"}}>
+    <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:16,border:`1px solid ${C.border}`,width:"100%",maxWidth:900,maxHeight:"80vh",display:"flex",flexDirection:"column",overflow:"hidden",animation:"modalIn 0.2s ease"}}>
+      <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+        <div>
+          <div style={{fontSize:16,fontWeight:700,color:C.text}}>Variação da Carteira</div>
+          <div style={{fontSize:13,color:C.textDim,marginTop:2}}>
+            {prevDia ? fmtDiaFull(prevDia)+" → "+fmtDiaFull(dia) : fmtDiaFull(dia)+" (sem dia anterior)"}
+            {" · "}<span style={{color:diffColor(totais.diff),fontWeight:700}}>{diffText(totais.diff)} OS</span>
+          </div>
+        </div>
+        <button onClick={onClose} style={{background:"transparent",border:"none",color:C.textDim,fontSize:22,cursor:"pointer",padding:"4px 8px"}}>✕</button>
       </div>
-    ))}
+      <div style={{padding:"12px 20px",display:"flex",gap:16,borderBottom:`1px solid ${C.border}`,background:C.cardAlt}}>
+        <div style={{flex:1,textAlign:"center"}}><div style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5}}>Total</div><div style={{fontSize:22,fontWeight:800,color:diffColor(totais.diff)}}>{diffText(totais.diff)}</div></div>
+        <div style={{flex:1,textAlign:"center"}}><div style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5}}>Fora do Prazo</div><div style={{fontSize:22,fontWeight:800,color:diffColor(totais.diffFora)}}>{diffText(totais.diffFora)}</div></div>
+        <div style={{flex:1,textAlign:"center"}}><div style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5}}>Reduziram</div><div style={{fontSize:22,fontWeight:800,color:C.green}}>{diffData.filter(r=>r.diff<0).length}</div></div>
+      </div>
+      <div style={{overflowY:"auto",flex:1}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+          <thead><tr style={{background:C.headerBg,position:"sticky",top:0,zIndex:1}}>
+            <th style={thStyle}>Família</th>
+            <th style={{...thStyle,textAlign:"center"}}>{prevDia?fmtDiaShort(prevDia):"—"}</th>
+            <th style={{...thStyle,textAlign:"center"}}>{fmtDiaShort(dia)}</th>
+            <th style={{...thStyle,textAlign:"center"}}>Diferença</th>
+            <th style={{...thStyle,textAlign:"center"}}>Fora Prazo</th>
+          </tr></thead>
+          <tbody>
+            {diffData.map((r,i)=>(
+              <tr key={r.familia} style={{background:i%2?C.cardAlt:"transparent"}} onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background=i%2?C.cardAlt:"transparent")}>
+                <td style={{padding:"10px 14px",borderBottom:`1px solid ${C.border}`,fontWeight:600}}>{r.familia}</td>
+                <td style={{padding:"10px 14px",borderBottom:`1px solid ${C.border}`,textAlign:"center",fontVariantNumeric:"tabular-nums",color:C.textMuted}}>{r.anterior}</td>
+                <td style={{padding:"10px 14px",borderBottom:`1px solid ${C.border}`,textAlign:"center",fontVariantNumeric:"tabular-nums",fontWeight:600}}>{r.atual}</td>
+                <td style={{padding:"10px 14px",borderBottom:`1px solid ${C.border}`,textAlign:"center",fontVariantNumeric:"tabular-nums",fontWeight:700,color:diffColor(r.diff)}}>
+                  {r.diff!==0?<span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 10px",borderRadius:6,background:r.diff<0?C.greenBg:C.redBg,border:`1px solid ${r.diff<0?C.greenBorder:C.redBorder}`}}>{r.diff<0?"↓":"↑"} {diffText(r.diff)}</span>:<span style={{color:C.textDim}}>—</span>}
+                </td>
+                <td style={{padding:"10px 14px",borderBottom:`1px solid ${C.border}`,textAlign:"center",fontVariantNumeric:"tabular-nums"}}>
+                  {r.diffFora!==0?<span style={{fontWeight:600,color:diffColor(r.diffFora)}}>{diffText(r.diffFora)}</span>:<span style={{color:C.textDim}}>—</span>}
+                </td>
+              </tr>))}
+            <tr style={{background:C.headerBg,fontWeight:800}}>
+              <td style={{padding:"12px 14px",borderTop:`2px solid ${C.accent}`}}>TOTAL</td>
+              <td style={{padding:"12px 14px",borderTop:`2px solid ${C.accent}`,textAlign:"center",fontVariantNumeric:"tabular-nums",color:C.textMuted}}>{totais.anterior}</td>
+              <td style={{padding:"12px 14px",borderTop:`2px solid ${C.accent}`,textAlign:"center",fontVariantNumeric:"tabular-nums"}}>{totais.atual}</td>
+              <td style={{padding:"12px 14px",borderTop:`2px solid ${C.accent}`,textAlign:"center",fontVariantNumeric:"tabular-nums",color:diffColor(totais.diff)}}>
+                <span style={{padding:"3px 12px",borderRadius:6,background:totais.diff<0?C.greenBg:totais.diff>0?C.redBg:"transparent",border:`1px solid ${totais.diff<0?C.greenBorder:totais.diff>0?C.redBorder:C.border}`}}>{totais.diff<0?"↓":"↑"} {diffText(totais.diff)}</span>
+              </td>
+              <td style={{padding:"12px 14px",borderTop:`2px solid ${C.accent}`,textAlign:"center",fontVariantNumeric:"tabular-nums",color:diffColor(totais.diffFora)}}>{diffText(totais.diffFora)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>;
+}
+const thStyle = {padding:"10px 14px",textAlign:"left",fontSize:11,fontWeight:700,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"};
+
+/* ── Family Dropdown (multi-select) ── */
+function FamilyDropdown({allFamilies,selected,onChange}){
+  const [open,setOpen]=useState(false);
+  const ref=useRef();
+  const allSelected = selected.size===0;
+  const label = allSelected ? "Todas as famílias" : selected.size===1 ? [...selected][0] : selected.size+" famílias";
+
+  useEffect(()=>{
+    const close=(e)=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};
+    document.addEventListener("mousedown",close);return()=>document.removeEventListener("mousedown",close);
+  },[]);
+
+  const toggle=(fam)=>{
+    const n=new Set(selected);
+    if(n.has(fam)) n.delete(fam); else n.add(fam);
+    if(n.size===allFamilies.length) onChange(new Set());
+    else onChange(n);
+  };
+  const selectAll=()=>onChange(new Set());
+
+  return <div ref={ref} style={{position:"relative"}}>
+    <div onClick={()=>setOpen(!open)} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 12px",borderRadius:8,border:`1px solid ${C.border}`,background:C.cardAlt,cursor:"pointer",fontSize:12,color:allSelected?C.textDim:C.accent,fontWeight:600,whiteSpace:"nowrap",maxWidth:220,overflow:"hidden",textOverflow:"ellipsis"}}>
+      <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis"}}>{label}</span>
+      <span style={{fontSize:8,color:C.textDim}}>{open?"▲":"▼"}</span>
+    </div>
+    {open&&<div style={{position:"absolute",top:"100%",left:0,marginTop:4,background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"6px 0",zIndex:100,minWidth:260,maxHeight:300,overflowY:"auto",boxShadow:"0 8px 32px rgba(0,0,0,0.5)"}}>
+      <div onClick={selectAll} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 14px",cursor:"pointer",fontSize:12,fontWeight:700,color:allSelected?C.accent:C.textMuted,borderBottom:`1px solid ${C.border}`}}
+        onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
+        <Check checked={allSelected} onChange={selectAll}/> Todas
+      </div>
+      {allFamilies.map(fam=>{
+        const on = selected.size===0 || selected.has(fam);
+        return <div key={fam} onClick={()=>toggle(fam)} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 14px",cursor:"pointer",fontSize:12,color:on?C.text:C.textDim,opacity:on?1:0.5}}
+          onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
+          <Check checked={on} onChange={()=>toggle(fam)}/> {fam}
+        </div>;
+      })}
+    </div>}
   </div>;
 }
 
-function HistoryChart({historico,activeUnit}){
+/* ── Historico Chart com filtros ── */
+function CustomTooltip({active,payload,label}){
+  if(!active||!payload?.length)return null;
+  return <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",fontSize:12,boxShadow:"0 8px 24px rgba(0,0,0,0.4)"}}>
+    <div style={{fontWeight:700,color:C.text,marginBottom:6}}>{label}</div>
+    {payload.map((p,i)=>(<div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"2px 0"}}>
+      <span style={{width:8,height:8,borderRadius:"50%",background:p.color,flexShrink:0}}/><span style={{color:C.textMuted}}>{p.name}:</span>
+      <span style={{fontWeight:700,color:p.color,fontVariantNumeric:"tabular-nums"}}>{p.value.toLocaleString("pt-BR")}</span>
+    </div>))}
+    <div style={{fontSize:10,color:C.textDim,marginTop:4,borderTop:`1px solid ${C.border}`,paddingTop:4}}>Clique para ver variação</div>
+  </div>;
+}
+
+const PERIOD_OPTIONS = [
+  {label:"7d",days:7},{label:"15d",days:15},{label:"30d",days:30},{label:"60d",days:60},{label:"Tudo",days:0},
+];
+
+function HistoricoChart({historico,activeUnit}){
   const [showChart,setShowChart]=useState(true);
+  const [diffModal,setDiffModal]=useState(null);
+  const [periodDays,setPeriodDays]=useState(30);
+  const [familyFilter,setFamilyFilter]=useState(new Set());
+  const unidadeFilter = UNIT_TO_HISTORICO[activeUnit];
 
-  const chartData=useMemo(()=>{
-    if(!historico||!historico.length)return [];
-    // Filtrar por unidade ativa
-    const filtered=activeUnit==="geral"
-      ? historico
-      : historico.filter(r=>{
-          const uid=UNIDADE_TO_ID[r.unidade];
-          return uid===activeUnit;
-        });
-
-    // Agrupar por dia
-    const porDia={};
-    filtered.forEach(r=>{
-      if(!porDia[r.dia])porDia[r.dia]={dia:r.dia,total:0,no_prazo:0,fora_prazo:0};
-      porDia[r.dia].total+=r.total;
-      porDia[r.dia].no_prazo+=r.no_prazo;
-      porDia[r.dia].fora_prazo+=r.fora_prazo;
+  const allFamilies = useMemo(()=>{
+    if(!historico?.length) return [];
+    const s = new Set();
+    historico.forEach(r=>{
+      if(unidadeFilter!==null && r.unidade!==unidadeFilter) return;
+      s.add(r.familia);
     });
+    return [...s].sort();
+  },[historico,unidadeFilter]);
 
-    return Object.values(porDia)
-      .sort((a,b)=>a.dia.localeCompare(b.dia))
-      .map(d=>({...d,diaLabel:fmtDiaShort(d.dia)}));
-  },[historico,activeUnit]);
+  useEffect(()=>{
+    if(familyFilter.size>0){
+      const valid = new Set([...familyFilter].filter(f=>allFamilies.includes(f)));
+      if(valid.size!==familyFilter.size) setFamilyFilter(valid);
+    }
+  },[allFamilies]);
 
-  if(!chartData.length)return null;
+  const chartData = useMemo(()=>{
+    if(!historico?.length)return[];
+    const byDay={};
+    historico.forEach(r=>{
+      if(unidadeFilter!==null && r.unidade!==unidadeFilter) return;
+      if(familyFilter.size>0 && !familyFilter.has(r.familia)) return;
+      if(!byDay[r.dia]) byDay[r.dia]={dia:r.dia,no_prazo:0,fora_prazo:0,total:0};
+      byDay[r.dia].no_prazo += r.no_prazo;
+      byDay[r.dia].fora_prazo += r.fora_prazo;
+      byDay[r.dia].total += r.total;
+    });
+    let data = Object.values(byDay).sort((a,b)=>a.dia.localeCompare(b.dia));
+    if(periodDays > 0 && data.length > 0){
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - periodDays);
+      const cutoffStr = cutoff.toISOString().split("T")[0];
+      data = data.filter(d => d.dia >= cutoffStr);
+    }
+    return data.map(d=>({...d,label:fmtDiaShort(d.dia)}));
+  },[historico,unidadeFilter,familyFilter,periodDays]);
 
-  const ultimo=chartData[chartData.length-1];
-  const penultimo=chartData.length>=2?chartData[chartData.length-2]:null;
-  const diffTotal=penultimo?ultimo.total-penultimo.total:0;
-  const diffFora=penultimo?ultimo.fora_prazo-penultimo.fora_prazo:0;
+  const handleChartClick = useCallback((e)=>{
+    if(!e?.activePayload?.length) return;
+    const clicked = e.activePayload[0].payload;
+    const idx = chartData.findIndex(d=>d.dia===clicked.dia);
+    const prevDia = idx > 0 ? chartData[idx-1].dia : null;
+    setDiffModal({dia:clicked.dia, prevDia});
+  },[chartData]);
+
+  if(!historico?.length) return null;
+
+  const primeiro = chartData[0];
+  const ultimo = chartData[chartData.length-1];
+  const varTotal = primeiro&&ultimo ? ultimo.total-primeiro.total : 0;
+  const varFora = primeiro&&ultimo ? ultimo.fora_prazo-primeiro.fora_prazo : 0;
 
   return <div style={{background:C.card,borderRadius:14,border:`1px solid ${C.border}`,marginBottom:16,overflow:"hidden"}}>
     <div onClick={()=>setShowChart(!showChart)} style={{padding:"14px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",borderBottom:showChart?`1px solid ${C.border}`:"none"}}
       onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
       <div style={{display:"flex",alignItems:"center",gap:10}}>
         <span style={{fontSize:10,color:C.textDim,transition:"transform 0.15s",display:"inline-block",transform:showChart?"rotate(90deg)":"rotate(0deg)"}}>▶</span>
-        <span style={{fontSize:13,fontWeight:700,color:C.text}}>Evolução Diária</span>
-        <span style={{fontSize:11,color:C.textDim}}>{chartData.length} dia{chartData.length!==1?"s":""}</span>
+        <span style={{fontSize:13,fontWeight:700,color:C.text}}>Evolução da Carteira</span>
+        <span style={{fontSize:11,color:C.textDim}}>({chartData.length} dias)</span>
       </div>
-      {penultimo&&<div style={{display:"flex",gap:12,fontSize:12}}>
-        <span style={{color:diffTotal>0?C.red:diffTotal<0?C.green:C.textDim}}>
-          Total: {diffTotal>0?"+":""}{diffTotal}
-        </span>
-        <span style={{color:diffFora>0?C.red:diffFora<0?C.green:C.textDim}}>
-          Fora: {diffFora>0?"+":""}{diffFora}
-        </span>
+      {chartData.length>=2&&<div style={{display:"flex",gap:12,fontSize:12}}>
+        <span style={{color:varTotal>0?C.red:varTotal<0?C.green:C.textDim,fontWeight:600}}>{varTotal>0?"+":""}{varTotal} OS</span>
+        <span style={{color:varFora>0?C.red:varFora<0?C.green:C.textDim,fontWeight:600}}>{varFora>0?"+":""}{varFora} fora</span>
       </div>}
     </div>
-    {showChart&&<div style={{padding:"12px 8px 8px 0"}}>
-      <ResponsiveContainer width="100%" height={240}>
-        <AreaChart data={chartData} margin={{top:8,right:16,left:0,bottom:4}}>
-          <defs>
-            <linearGradient id="gradTotal" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor={C.accent} stopOpacity={0.2}/>
-              <stop offset="95%" stopColor={C.accent} stopOpacity={0}/>
-            </linearGradient>
-            <linearGradient id="gradPrazo" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor={C.green} stopOpacity={0.15}/>
-              <stop offset="95%" stopColor={C.green} stopOpacity={0}/>
-            </linearGradient>
-            <linearGradient id="gradFora" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor={C.red} stopOpacity={0.15}/>
-              <stop offset="95%" stopColor={C.red} stopOpacity={0}/>
-            </linearGradient>
-          </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke={C.border} vertical={false}/>
-          <XAxis dataKey="diaLabel" tick={{fill:C.textDim,fontSize:11}} tickLine={false} axisLine={{stroke:C.border}}/>
-          <YAxis tick={{fill:C.textDim,fontSize:11}} tickLine={false} axisLine={false} width={50}/>
-          <Tooltip content={<CustomTooltip/>}/>
-          <Area type="monotone" dataKey="total" name="Total" stroke={C.accent} strokeWidth={2} fill="url(#gradTotal)" dot={{r:3,fill:C.accent,strokeWidth:0}} activeDot={{r:5,fill:C.accent}}/>
-          <Area type="monotone" dataKey="no_prazo" name="No Prazo" stroke={C.green} strokeWidth={2} fill="url(#gradPrazo)" dot={{r:3,fill:C.green,strokeWidth:0}} activeDot={{r:5,fill:C.green}}/>
-          <Area type="monotone" dataKey="fora_prazo" name="Fora do Prazo" stroke={C.red} strokeWidth={2} fill="url(#gradFora)" dot={{r:3,fill:C.red,strokeWidth:0}} activeDot={{r:5,fill:C.red}}/>
-          <Legend iconType="circle" iconSize={8} wrapperStyle={{fontSize:12,color:C.textDim,paddingTop:8}}/>
-        </AreaChart>
-      </ResponsiveContainer>
+
+    {showChart&&<div style={{padding:"12px 16px 8px"}}>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14,flexWrap:"wrap"}}>
+        <div style={{display:"flex",alignItems:"center",gap:4}}>
+          <span style={{fontSize:11,color:C.textDim,fontWeight:600,marginRight:4}}>Período:</span>
+          {PERIOD_OPTIONS.map(p=>(
+            <button key={p.label} onClick={()=>setPeriodDays(p.days)}
+              style={{padding:"4px 10px",borderRadius:6,fontSize:11,fontWeight:600,cursor:"pointer",border:`1px solid ${periodDays===p.days?"rgba(59,130,246,0.4)":C.border}`,
+                background:periodDays===p.days?C.accentBg:"transparent",color:periodDays===p.days?C.accent:C.textDim,transition:"all 0.12s"}}>
+              {p.label}
+            </button>
+          ))}
+        </div>
+        <div style={{width:1,height:20,background:C.border}}/>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <span style={{fontSize:11,color:C.textDim,fontWeight:600}}>Família:</span>
+          <FamilyDropdown allFamilies={allFamilies} selected={familyFilter} onChange={setFamilyFilter}/>
+        </div>
+      </div>
+
+      {chartData.length>0 ? <>
+        <ResponsiveContainer width="100%" height={260}>
+          <AreaChart data={chartData} margin={{top:5,right:10,left:0,bottom:5}} onClick={handleChartClick} style={{cursor:"pointer"}}>
+            <defs>
+              <linearGradient id="gradTotal" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={C.accent} stopOpacity={0.15}/><stop offset="95%" stopColor={C.accent} stopOpacity={0}/></linearGradient>
+              <linearGradient id="gradPrazo" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={C.green} stopOpacity={0.15}/><stop offset="95%" stopColor={C.green} stopOpacity={0}/></linearGradient>
+              <linearGradient id="gradFora" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={C.red} stopOpacity={0.15}/><stop offset="95%" stopColor={C.red} stopOpacity={0}/></linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke={C.border} vertical={false}/>
+            <XAxis dataKey="label" tick={{fill:C.textDim,fontSize:11}} tickLine={false} axisLine={{stroke:C.border}}/>
+            <YAxis tick={{fill:C.textDim,fontSize:11}} tickLine={false} axisLine={false} width={45}/>
+            <Tooltip content={<CustomTooltip/>}/>
+            <Area type="monotone" dataKey="total" name="Total" stroke={C.accent} fill="url(#gradTotal)" strokeWidth={2} dot={chartData.length<=31} activeDot={{r:6,stroke:C.accent,strokeWidth:2,fill:C.card}}/>
+            <Area type="monotone" dataKey="no_prazo" name="No Prazo" stroke={C.green} fill="url(#gradPrazo)" strokeWidth={2} dot={chartData.length<=31} activeDot={{r:5,stroke:C.green,strokeWidth:2,fill:C.card}}/>
+            <Area type="monotone" dataKey="fora_prazo" name="Fora do Prazo" stroke={C.red} fill="url(#gradFora)" strokeWidth={2} dot={chartData.length<=31} activeDot={{r:5,stroke:C.red,strokeWidth:2,fill:C.card}}/>
+          </AreaChart>
+        </ResponsiveContainer>
+        <div style={{display:"flex",justifyContent:"center",gap:20,padding:"4px 0 2px"}}>
+          {[{label:"Total",color:C.accent},{label:"No Prazo",color:C.green},{label:"Fora do Prazo",color:C.red}].map(l=>
+            <div key={l.label} style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:C.textMuted}}>
+              <span style={{width:10,height:3,borderRadius:2,background:l.color}}/>{l.label}
+            </div>
+          )}
+        </div>
+        <div style={{textAlign:"center",fontSize:10,color:C.textDim,paddingBottom:4}}>Clique em um ponto para ver a variação por família</div>
+      </> : <div style={{padding:"40px 20px",textAlign:"center",color:C.textDim,fontSize:13}}>Sem dados para o período selecionado</div>}
     </div>}
+
+    {diffModal&&<DiffModal historico={historico} dia={diffModal.dia} prevDia={diffModal.prevDia} activeUnit={activeUnit} familyFilter={familyFilter} onClose={()=>setDiffModal(null)}/>}
   </div>;
 }
-
 /* ── Family Row ── */
 function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx}){
   const [expanded,setExpanded]=useState(false);const [modal,setModal]=useState(null);
@@ -411,8 +533,7 @@ function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitL
       </div>
       <Bar prazo={totalPrazo} fora={totalFora} total={total}/>
     </div>
-    {/* Gráfico de evolução diária */}
-    <HistoryChart historico={historico} activeUnit={activeUnit}/>
+    {historico&&historico.length>0&&<HistoricoChart historico={historico} activeUnit={activeUnit}/>}
     <div style={{fontSize:12,color:C.textDim,marginBottom:10,padding:"0 4px",display:"flex",gap:16,flexWrap:"wrap"}}>
       <span>▶ Clique na família para filtrar TSS</span>
       <span>🔢 Clique nos números para ver as OS</span>
@@ -435,7 +556,6 @@ function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitL
 /* ── Main ── */
 export default function App(){
   const [rawRows,setRawRows]=useState(null);
-  const [historico,setHistorico]=useState([]);
   const [excludedTSS,setExcludedTSS]=useState(new Set());
   const [sortBy,setSortBy]=useState("fora");
   const [updatedAt,setUpdatedAt]=useState(null);
@@ -445,55 +565,31 @@ export default function App(){
   const [dragOver,setDragOver]=useState(false);
   const [activeUnit,setActiveUnit]=useState("geral");
   const [sideCollapsed,setSideCollapsed]=useState(false);
+  const [historico,setHistorico]=useState(null);
   const inputRef=useRef();
 
   const flash=(msg)=>{setToast(msg);setTimeout(()=>setToast(""),4000);};
-
   const saveFilters=useCallback((excSet,sort,unit)=>{saveLocal({excluded:[...excSet],sortBy:sort,activeUnit:unit});},[]);
 
-  // ── Boot ──
-  useEffect(()=>{
-    (async()=>{
-      const local=loadLocal();
-      if(local){
-        if(local.excluded?.length>0) setExcludedTSS(new Set(local.excluded));
-        if(local.sortBy) setSortBy(local.sortBy);
-        if(local.activeUnit) setActiveUnit(local.activeUnit);
-      }
-      let loaded=false;
-      try{
-        const data=await fetchRows();
-        if(data.rows?.length>0){setRawRows(data.rows);setUpdatedAt(data.updatedAt);cacheRows(data.rows,data.updatedAt);loaded=true;}
-      }catch(e){flash("Erro Supabase: "+e.message);}
-      if(!loaded){
-        const cached=loadCache();
-        if(cached?.rows?.length>0){setRawRows(cached.rows);setUpdatedAt(cached.updatedAt);flash("Usando dados em cache");}
-      }
-      // Carregar histórico
-      try{
-        const hist=await fetchHistorico();
-        setHistorico(hist);
-      }catch(e){console.warn("Erro ao carregar histórico:",e);}
-      setLoading(false);
-    })();
-  },[]);
+  useEffect(()=>{(async()=>{
+    const local=loadLocal();
+    if(local){if(local.excluded?.length>0)setExcludedTSS(new Set(local.excluded));if(local.sortBy)setSortBy(local.sortBy);if(local.activeUnit)setActiveUnit(local.activeUnit);}
+    let loaded=false;
+    try{const data=await fetchRows();if(data.rows?.length>0){setRawRows(data.rows);setUpdatedAt(data.updatedAt);cacheRows(data.rows,data.updatedAt);loaded=true;}}catch(e){flash("Erro Supabase: "+e.message);}
+    if(!loaded){const cached=loadCache();if(cached?.rows?.length>0){setRawRows(cached.rows);setUpdatedAt(cached.updatedAt);flash("Usando dados em cache");}}
+    try{const hist=await fetchHistorico();if(hist?.length>0)setHistorico(hist);}catch(e){console.warn("Historico indisponivel:",e.message);}
+    setLoading(false);
+  })();},[]);
 
-  // ── Upload ──
   const handleFile=useCallback(async(file)=>{
     if(!file)return;setUploading(true);
-    try{
-      flash("Processando arquivo...");
-      const all=await parseFile(file);
+    try{flash("Processando arquivo...");const all=await parseFile(file);
       const filtered=all.map(sanitize).filter(r=>VALID_ATCS.includes(Number(r["ATC"]))&&!EXCLUDED_TSS.includes(String(r["TSS"]||"").trim()));
-      setRawRows(filtered);setExcludedTSS(new Set());
-      const now=new Date().toISOString();setUpdatedAt(now);
+      setRawRows(filtered);setExcludedTSS(new Set());const now=new Date().toISOString();setUpdatedAt(now);
       cacheRows(filtered,now);saveFilters(new Set(),sortBy,activeUnit);
-      flash("Enviando "+filtered.length+" OS para o Supabase...");
-      const result=await uploadRows(filtered);
-      setUpdatedAt(result.updatedAt);cacheRows(filtered,result.updatedAt);
-      flash("Pendente atualizado ✓ ("+result.count+" OS)");
-    }catch(e){flash("Erro: "+e.message);}
-    setUploading(false);
+      flash("Enviando "+filtered.length+" OS...");const result=await uploadRows(filtered);
+      setUpdatedAt(result.updatedAt);cacheRows(filtered,result.updatedAt);flash("Pendente atualizado ✓ ("+result.count+" OS)");
+    }catch(e){flash("Erro: "+e.message);}setUploading(false);
   },[saveFilters,sortBy,activeUnit]);
 
   const toggleTSS=useCallback(tss=>{setExcludedTSS(prev=>{const n=new Set(prev);n.has(tss)?n.delete(tss):n.add(tss);saveFilters(n,sortBy,activeUnit);return n;});},[saveFilters,sortBy,activeUnit]);
@@ -505,9 +601,8 @@ export default function App(){
     try{flash("Atualizando...");const data=await fetchRows();
       if(data.rows?.length>0){setRawRows(data.rows);setUpdatedAt(data.updatedAt);cacheRows(data.rows,data.updatedAt);flash("Dados atualizados ✓ ("+data.rows.length+" OS)");}
       else flash("Servidor vazio — dados locais mantidos");
-      // Atualizar histórico também
-      try{const hist=await fetchHistorico();setHistorico(hist);}catch{}
     }catch(e){flash("Erro: "+e.message+" — dados locais mantidos");}
+    try{const hist=await fetchHistorico();if(hist?.length>0)setHistorico(hist);}catch{}
   },[]);
 
   const currentUnit=UNITS.find(u=>u.id===activeUnit)||UNITS[0];
@@ -523,8 +618,7 @@ export default function App(){
 
   if(loading)return<div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",color:C.textDim,fontFamily:"'Inter',sans-serif",flexDirection:"column",gap:12}}>
     <div style={{width:32,height:32,border:`3px solid ${C.border}`,borderTop:`3px solid ${C.accent}`,borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>
-    <span>Carregando dados do Supabase…</span>
-    <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    <span>Carregando dados do Supabase…</span><style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
   </div>;
 
   return <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"'Inter',-apple-system,sans-serif",display:"flex"}}>
@@ -537,8 +631,7 @@ export default function App(){
         </div>
         {toast&&<div style={{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",zIndex:2000,padding:"10px 24px",borderRadius:10,fontSize:13,fontWeight:600,maxWidth:"90vw",wordBreak:"break-word",background:toast.includes("Erro")?"rgba(239,68,68,0.15)":"rgba(16,185,129,0.15)",color:toast.includes("Erro")?C.red:C.green,border:`1px solid ${toast.includes("Erro")?C.redBorder:C.greenBorder}`,backdropFilter:"blur(8px)",animation:"fadeIn 0.2s ease"}}>{toast}</div>}
         {!rawRows&&<div onDragOver={e=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)} onDrop={onDrop}
-          onClick={()=>inputRef.current?.click()}
-          style={{border:`2px dashed ${dragOver?C.accent:C.border}`,borderRadius:16,padding:"60px 20px",textAlign:"center",cursor:"pointer",background:dragOver?C.accentBg:C.card,transition:"all 0.2s"}}>
+          onClick={()=>inputRef.current?.click()} style={{border:`2px dashed ${dragOver?C.accent:C.border}`,borderRadius:16,padding:"60px 20px",textAlign:"center",cursor:"pointer",background:dragOver?C.accentBg:C.card,transition:"all 0.2s"}}>
           <input ref={inputRef} type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
           <div style={{fontSize:40,marginBottom:12,opacity:0.7}}>📂</div>
           <p style={{fontSize:16,fontWeight:600,margin:0}}>Nenhum pendente no servidor</p>
@@ -560,9 +653,7 @@ export default function App(){
           </div>
           <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label} historico={historico} activeUnit={activeUnit}/>
         </div>}
-        <div style={{textAlign:"center",padding:"32px 16px 16px",color:C.textDim,fontSize:11,letterSpacing:0.3,opacity:0.6}}>
-          Criado por Bryan Mendes Deodato, todos os direitos reservados
-        </div>
+        <div style={{textAlign:"center",padding:"32px 16px 16px",color:C.textDim,fontSize:11,letterSpacing:0.3,opacity:0.6}}>Criado por Bryan Mendes Deodato, todos os direitos reservados</div>
       </div>
     </div>
     <style>{`@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@keyframes modalIn{from{opacity:0;transform:scale(0.95)}to{opacity:1;transform:scale(1)}}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}`}</style>
