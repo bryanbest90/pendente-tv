@@ -599,7 +599,7 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx}){
 const btnTiny={padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:600,border:`1px solid ${C.border}`,background:"transparent",color:C.textDim,cursor:"pointer"};
 
 /* ── Sidebar ── */
-function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed}){
+function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,gasCount,onGasClick}){
   return <div style={{width:collapsed?56:210,minWidth:collapsed?56:210,background:C.sidebar,borderRight:`1px solid ${C.border}`,display:"flex",flexDirection:"column",transition:"width 0.25s ease,min-width 0.25s ease",overflow:"hidden",flexShrink:0}}>
     <div style={{padding:collapsed?"16px 0":"16px 16px",display:"flex",alignItems:"center",justifyContent:collapsed?"center":"space-between",borderBottom:`1px solid ${C.border}`,minHeight:56}}>
       {!collapsed&&<span style={{fontSize:13,fontWeight:800,color:C.accent,letterSpacing:0.5,textTransform:"uppercase",whiteSpace:"nowrap"}}>Unidades</span>}
@@ -618,6 +618,18 @@ function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed}){
           </div>}
         </div>;})}
     </div>
+    {/* Botão Rede de Gás */}
+    {gasCount>0&&<div style={{padding:"8px",borderTop:`1px solid ${C.border}`}}>
+      <div onClick={onGasClick} style={{padding:collapsed?"10px 0":"10px 14px",borderRadius:10,cursor:"pointer",background:C.amberBg,border:"1px solid rgba(245,158,11,0.25)",display:"flex",alignItems:"center",justifyContent:collapsed?"center":"flex-start",gap:10,transition:"all 0.15s"}}
+        onMouseEnter={e=>(e.currentTarget.style.background="rgba(245,158,11,0.15)")} onMouseLeave={e=>(e.currentTarget.style.background=C.amberBg)}>
+        <span style={{fontSize:collapsed?20:17}}>🔥</span>
+        {!collapsed&&<div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:12,fontWeight:700,color:C.amber,whiteSpace:"nowrap"}}>Rede de Gás</div>
+          <div style={{fontSize:11,color:C.amber,opacity:0.7}}>{gasCount} alerta{gasCount>1?"s":""}</div>
+        </div>}
+        {collapsed&&<span style={{position:"absolute",top:-4,right:-4,fontSize:10,fontWeight:700,color:"#fff",background:"#d97706",borderRadius:"50%",width:18,height:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{gasCount}</span>}
+      </div>
+    </div>}
   </div>;
 }
 
@@ -648,7 +660,6 @@ function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitL
       <Bar prazo={totalPrazo} fora={totalFora} total={total}/>
     </div>
     {historico&&historico.length>0&&<HistoricoChart historico={historico} activeUnit={activeUnit}/>}
-    <GasAlertPanel rows={rows}/>
     <div style={{fontSize:12,color:C.textDim,marginBottom:10,padding:"0 4px",display:"flex",gap:16,flexWrap:"wrap"}}>
       <span>▶ Clique na família para filtrar TSS</span>
       <span>🔢 Clique nos números para ver as OS</span>
@@ -690,9 +701,9 @@ const GAS_STREETS_RAW = [
   "GIUSEPPE TARTINI","RUBEM SOUTO DE ARAÚJO","RUBEN DARIO","PERIPERI",
   "SANTA TERESINHA","AMARO LEITE",
 ];
+const GAS_EXCLUDED_FAMILIES = ["OUTROS SERVIÇOS DE CAVALETE","REPOSIÇÃO","OUTROS SERVIÇOS DE REPOSIÇÃO","HIDRÔMETRO","CAVALETE"];
 
 function normalizar(str){return(str||"").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim();}
-
 function loadIgnoredGas(){try{const d=localStorage.getItem("gas-ignored-v1");return d?new Set(JSON.parse(d)):new Set();}catch{return new Set();}}
 function saveIgnoredGas(s){try{localStorage.setItem("gas-ignored-v1",JSON.stringify([...s]));}catch{}}
 
@@ -705,10 +716,8 @@ function matchGasStreet(endereco){
   return null;
 }
 
-function GasAlertPanel({rows}){
+function useGasAlerts(rows){
   const [ignored,setIgnored]=useState(()=>loadIgnoredGas());
-  const [expanded,setExpanded]=useState(true);
-
   const alerts = useMemo(()=>{
     if(!rows) return [];
     const result = [];
@@ -716,6 +725,8 @@ function GasAlertPanel({rows}){
     rows.forEach(r=>{
       const numOS = String(r["Número OS"]||"").trim();
       if(!numOS || ignored.has(numOS) || seen.has(numOS)) return;
+      const familia = String(r["Família"]||"").trim();
+      if(GAS_EXCLUDED_FAMILIES.includes(familia)) return;
       const endereco = String(r["Endereço"]||"").trim();
       const matched = matchGasStreet(endereco);
       if(matched){
@@ -723,13 +734,11 @@ function GasAlertPanel({rows}){
         const numero = String(r["Número"]||"").trim();
         const comp = String(r["Complemento"]||"").trim();
         const fullAddr = endereco + (numero?", "+numero:"") + (comp?" - "+comp:"");
-        const comgasSearch = encodeURIComponent(endereco + (numero?" "+numero:""));
         result.push({
           numOS, endereco, numero, fullAddr, matched,
-          familia: String(r["Família"]||"").trim(),
+          familia,
           tss: String(r["TSS"]||"").trim(),
           bairro: String(r["Bairro"]||"").trim(),
-          comgasUrl: "https://onetouch.comgas.com.br",
           searchAddr: endereco + (numero?" "+numero:""),
         });
       }
@@ -744,50 +753,106 @@ function GasAlertPanel({rows}){
     saveIgnoredGas(n);
   };
 
-  if(!alerts.length) return null;
+  return { alerts, ignored, doIgnore };
+}
 
-  return <div style={{background:"rgba(245,158,11,0.06)",borderRadius:14,border:`1px solid rgba(245,158,11,0.3)`,marginBottom:16,overflow:"hidden"}}>
-    <div onClick={()=>setExpanded(!expanded)} style={{padding:"12px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",borderBottom:expanded?`1px solid rgba(245,158,11,0.2)`:"none"}}
-      onMouseEnter={e=>(e.currentTarget.style.background="rgba(245,158,11,0.08)")} onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
-      <div style={{display:"flex",alignItems:"center",gap:10}}>
-        <span style={{fontSize:10,color:C.textDim,transition:"transform 0.15s",display:"inline-block",transform:expanded?"rotate(90deg)":"rotate(0deg)"}}>▶</span>
-        <span style={{fontSize:18}}>🔥</span>
-        <span style={{fontSize:13,fontWeight:700,color:C.amber}}>Rede de Gás — {alerts.length} OS em ruas com tubulação</span>
-      </div>
-      <span style={{fontSize:11,color:C.textDim}}>{ignored.size>0?`${ignored.size} ignorada(s)`:""}</span>
-    </div>
-    {expanded&&<div style={{padding:"8px 12px 12px"}}>
-      {alerts.map(a=>(
-        <div key={a.numOS} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",margin:"4px 0",borderRadius:8,background:C.card,border:`1px solid ${C.border}`}}>
-          <div style={{flex:1,minWidth:0}}>
-            <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-              <span style={{fontSize:13,fontWeight:700,color:C.accent,fontVariantNumeric:"tabular-nums"}}>{a.numOS}</span>
-              <span style={{fontSize:11,padding:"1px 8px",borderRadius:6,background:C.amberBg,color:C.amber,border:"1px solid rgba(245,158,11,0.25)",fontWeight:600}}>{a.matched}</span>
-              <span style={{fontSize:11,color:C.textDim}}>{a.familia}</span>
-            </div>
-            <div style={{fontSize:12,color:C.textMuted,marginTop:3}}>{a.fullAddr}{a.bairro?" — "+a.bairro:""}</div>
-            <div style={{fontSize:11,color:C.textDim,marginTop:1}}>{a.tss}</div>
-          </div>
-          <div style={{display:"flex",gap:6,flexShrink:0}}>
-            <a href={a.comgasUrl} target="_blank" rel="noopener noreferrer"
-              onClick={(e)=>{
-                // Copiar endereço para a área de transferência ao clicar
-                navigator.clipboard.writeText(a.searchAddr).catch(()=>{});
-              }}
-              style={{fontSize:11,color:"#fff",fontWeight:600,padding:"6px 12px",borderRadius:6,background:"linear-gradient(135deg,#f59e0b,#d97706)",border:"none",cursor:"pointer",textDecoration:"none",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:4}}>
-              🔥 Comgás
-            </a>
-            <button onClick={()=>doIgnore(a.numOS)}
-              style={{fontSize:11,color:C.textDim,fontWeight:600,padding:"6px 10px",borderRadius:6,background:"transparent",border:`1px solid ${C.border}`,cursor:"pointer",whiteSpace:"nowrap"}}>
-              Ignorar
-            </button>
+function openComgas(addr){
+  const w = window.open("https://onetouch.comgas.com.br","_blank");
+  // Tenta preencher o campo de busca após o site carregar
+  const tryFill = () => {
+    try {
+      const input = w.document.querySelector('#query');
+      if(input){
+        input.value = addr;
+        input.dispatchEvent(new Event('input',{bubbles:true}));
+        input.dispatchEvent(new Event('change',{bubbles:true}));
+        input.focus();
+      } else {
+        setTimeout(tryFill, 500);
+      }
+    } catch(e) {
+      // Cross-origin: copia pro clipboard como fallback
+      navigator.clipboard.writeText(addr).catch(()=>{});
+    }
+  };
+  setTimeout(tryFill, 2000);
+}
+
+function GasAlertModal({alerts,onIgnore,onClose}){
+  const [sortCol,setSortCol]=useState("matched");
+  const [sortAsc,setSortAsc]=useState(true);
+  const toggleSort=(col)=>{if(sortCol===col)setSortAsc(!sortAsc);else{setSortCol(col);setSortAsc(true);}};
+
+  const sorted = useMemo(()=>{
+    return [...alerts].sort((a,b)=>{
+      let va=a[sortCol]||"",vb=b[sortCol]||"";
+      if(typeof va==="string"){va=va.toLowerCase();vb=vb.toLowerCase();}
+      const cmp=va<vb?-1:va>vb?1:0;
+      return sortAsc?cmp:-cmp;
+    });
+  },[alerts,sortCol,sortAsc]);
+
+  const byStreet = useMemo(()=>{
+    const m={};alerts.forEach(a=>{if(!m[a.matched])m[a.matched]=0;m[a.matched]++;});
+    return Object.entries(m).sort((a,b)=>b[1]-a[1]);
+  },[alerts]);
+
+  return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(4px)"}}>
+    <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:16,border:`1px solid rgba(245,158,11,0.3)`,width:"100%",maxWidth:1100,maxHeight:"85vh",display:"flex",flexDirection:"column",overflow:"hidden",animation:"modalIn 0.2s ease"}}>
+      <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontSize:22}}>🔥</span>
+          <div>
+            <div style={{fontSize:16,fontWeight:700,color:C.amber}}>Rede de Gás — Alerta Comgás</div>
+            <div style={{fontSize:12,color:C.textDim,marginTop:2}}>{alerts.length} OS em ruas com tubulação de gás</div>
           </div>
         </div>
-      ))}
-      <div style={{fontSize:10,color:C.textDim,marginTop:6,paddingLeft:4}}>
-        O botão Comgás abre o site e copia o endereço para colar na busca
+        <button onClick={onClose} style={{background:"transparent",border:"none",color:C.textDim,fontSize:22,cursor:"pointer",padding:"4px 8px"}}>✕</button>
       </div>
-    </div>}
+
+      {/* Resumo por rua */}
+      <div style={{padding:"10px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",gap:6,flexWrap:"wrap",background:C.cardAlt}}>
+        {byStreet.map(([street,count])=>(
+          <span key={street} style={{fontSize:10,padding:"3px 8px",borderRadius:6,background:C.amberBg,color:C.amber,border:"1px solid rgba(245,158,11,0.25)",fontWeight:600}}>
+            {street}: {count}
+          </span>
+        ))}
+      </div>
+
+      <div style={{overflowY:"auto",flex:1}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+          <thead><tr style={{background:C.headerBg,position:"sticky",top:0,zIndex:1}}>
+            {[{key:"numOS",label:"Nº OS"},{key:"matched",label:"Rua com Gás"},{key:"familia",label:"Família"},{key:"tss",label:"TSS"},{key:"fullAddr",label:"Endereço"}].map(col=>
+              <th key={col.key} onClick={()=>toggleSort(col.key)} style={{padding:"10px 12px",textAlign:"left",fontSize:11,fontWeight:700,color:sortCol===col.key?C.accent:C.textDim,textTransform:"uppercase",letterSpacing:0.5,borderBottom:`1px solid ${C.border}`,cursor:"pointer",userSelect:"none"}}>{col.label}{sortCol===col.key?(sortAsc?" ↑":" ↓"):""}</th>
+            )}
+            <th style={{padding:"10px 12px",textAlign:"center",fontSize:11,fontWeight:700,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>Ações</th>
+          </tr></thead>
+          <tbody>{sorted.map((a,i)=>(
+            <tr key={a.numOS} style={{background:i%2?C.cardAlt:"transparent",borderLeft:`3px solid ${C.amber}`}} onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background=i%2?C.cardAlt:"transparent")}>
+              <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,fontWeight:600,color:C.accent,fontVariantNumeric:"tabular-nums"}}>{a.numOS}</td>
+              <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`}}>
+                <span style={{fontSize:11,padding:"2px 8px",borderRadius:6,background:C.amberBg,color:C.amber,border:"1px solid rgba(245,158,11,0.25)",fontWeight:600}}>{a.matched}</span>
+              </td>
+              <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,fontWeight:600}}>{a.familia}</td>
+              <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,color:C.textMuted,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.tss}</td>
+              <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,color:C.textMuted,whiteSpace:"nowrap"}}>{a.fullAddr}</td>
+              <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,textAlign:"center",whiteSpace:"nowrap"}}>
+                <div style={{display:"flex",gap:4,justifyContent:"center"}}>
+                  <button onClick={()=>openComgas(a.searchAddr)}
+                    style={{fontSize:10,color:"#fff",fontWeight:600,padding:"4px 10px",borderRadius:6,background:"linear-gradient(135deg,#f59e0b,#d97706)",border:"none",cursor:"pointer"}}>
+                    🔥 Comgás
+                  </button>
+                  <button onClick={()=>onIgnore(a.numOS)}
+                    style={{fontSize:10,color:C.textDim,fontWeight:600,padding:"4px 8px",borderRadius:6,background:"transparent",border:`1px solid ${C.border}`,cursor:"pointer"}}>
+                    Ignorar
+                  </button>
+                </div>
+              </td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+    </div>
   </div>;
 }
 
@@ -804,6 +869,7 @@ export default function App(){
   const [activeUnit,setActiveUnit]=useState("geral");
   const [sideCollapsed,setSideCollapsed]=useState(false);
   const [historico,setHistorico]=useState(null);
+  const [showGasModal,setShowGasModal]=useState(false);
   const inputRef=useRef();
 
   const flash=(msg)=>{setToast(msg);setTimeout(()=>setToast(""),4000);};
@@ -854,13 +920,16 @@ export default function App(){
 
   const onDrop=useCallback(e=>{e.preventDefault();setDragOver(false);handleFile(e.dataTransfer.files[0]);},[handleFile]);
 
+  // Gas alerts (usa rawRows sem filtro de unidade)
+  const gas = useGasAlerts(rawRows);
+
   if(loading)return<div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",color:C.textDim,fontFamily:"'Inter',sans-serif",flexDirection:"column",gap:12}}>
     <div style={{width:32,height:32,border:`3px solid ${C.border}`,borderTop:`3px solid ${C.accent}`,borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>
     <span>Carregando dados do Supabase…</span><style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
   </div>;
 
   return <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"'Inter',-apple-system,sans-serif",display:"flex"}}>
-    {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed}/>}
+    {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed} gasCount={gas.alerts.length} onGasClick={()=>setShowGasModal(true)}/>}
     <div style={{flex:1,padding:"24px 16px",overflowY:"auto",minHeight:"100vh"}}>
       <div style={{maxWidth:960,margin:"0 auto"}}>
         <div style={{marginBottom:24,textAlign:"center"}}>
@@ -888,6 +957,7 @@ export default function App(){
           <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label} historico={historico} activeUnit={activeUnit}/>
         </div>}
         <div style={{textAlign:"center",padding:"32px 16px 16px",color:C.textDim,fontSize:11,letterSpacing:0.3,opacity:0.6}}>Criado por Bryan Mendes Deodato, todos os direitos reservados</div>
+        {showGasModal&&gas.alerts.length>0&&<GasAlertModal alerts={gas.alerts} onIgnore={gas.doIgnore} onClose={()=>setShowGasModal(false)}/>}
       </div>
     </div>
     <style>{`@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@keyframes modalIn{from{opacity:0;transform:scale(0.95)}to{opacity:1;transform:scale(1)}}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}`}</style>
