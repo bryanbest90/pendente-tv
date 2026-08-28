@@ -648,6 +648,7 @@ function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitL
       <Bar prazo={totalPrazo} fora={totalFora} total={total}/>
     </div>
     {historico&&historico.length>0&&<HistoricoChart historico={historico} activeUnit={activeUnit}/>}
+    <GasAlertPanel rows={rows}/>
     <div style={{fontSize:12,color:C.textDim,marginBottom:10,padding:"0 4px",display:"flex",gap:16,flexWrap:"wrap"}}>
       <span>▶ Clique na família para filtrar TSS</span>
       <span>🔢 Clique nos números para ver as OS</span>
@@ -665,6 +666,129 @@ function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitL
       </div>
     </div>
   </>;
+}
+
+/* ── Ruas com rede de gás (Comgás) ── */
+const GAS_STREETS_RAW = [
+  "ALEXANDRE DE GUSMAO","FERREIRA VIANA","PTOLOMEU","LAGRANGE","SETE DE JULHO",
+  "AV GUARAPIRANGA","AUGUSTO FERREIRA DE MORAIS","NORA NEY","JOSE RAFAELI","AIMORES",
+  "TAPUIAS","MORAIS NAVARRO","SERVIA","NOSSA SENHORA DO SOCORRO","MARCÍLIO DIAS",
+  "AV DE PINEDO","AV ATLANTICA","EUCLYDES DA CUNHA","ANTÔNIO FRANCISCO FRANCA",
+  "RODRIGUES DAS NEVES","AMARO LUZ","AV DO RIO BONITO","DR BRASILIO MACHADO NETO",
+  "OLIVIA GUEDES PENTEADO","AV DANTON JOBIM","AV DR LUIS ARROBA MARTINS",
+  "OLAVIO VERGILIO DOS SANTOS","WALDEMAR GOMES LINGOANOTI","MANOEL SOARES SEBASTIAO",
+  "JOAO DE PAULO FRANCO","ENG JOSE SALLES","ANGELO BADA","ANGELO SANTI",
+  "AV JOAO PAULO DA SILVA","AV INTERLAGOS","MANUEL DE TEFFE","PEDRO SANTALUCIA",
+  "AV FELICIANO CORREIA","PLINIO SCHMIDT","AV JAIR RIBEIRO DA SILVA","ARMANDO VIEIRA",
+  "AV GREGORIO BEZERRA","AV MATIAS BECK","AV LOURENÇO CABREIRA","MANUEL CALDEIRA",
+  "AV PRESIDENTE JOAO GOULART","IZABEL KLEIN ZETTLER","AV PROFESSOR PAPINI",
+  "MARTINÓPOLIS","NOSSA SENHORA DO OUTEIRO","PÇA BATISTA BOTELHO",
+  "AV SENADOR TEOTÔNIO VILELA","ANTÔNIO LE VOCI","MANUEL MENDES",
+  "PROFESSOR ROLDAO DE BARROS","JOAQUIM RODRIGUES DE MORAES","DOMINGOS TARROSO",
+  "AV DO ARVOREIRO","ARCHOTE DO PERU","MAMONEIRA","DONA BELMIRA MARIN",
+  "AV GRANDE SÃO PAULO","AV PIETRO NARDINI","QUESADA","AV PREFEITO PAULO LAURO",
+  "GIUSEPPE TARTINI","RUBEM SOUTO DE ARAÚJO","RUBEN DARIO","PERIPERI",
+  "SANTA TERESINHA","AMARO LEITE",
+];
+
+function normalizar(str){return(str||"").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim();}
+
+function loadIgnoredGas(){try{const d=localStorage.getItem("gas-ignored-v1");return d?new Set(JSON.parse(d)):new Set();}catch{return new Set();}}
+function saveIgnoredGas(s){try{localStorage.setItem("gas-ignored-v1",JSON.stringify([...s]));}catch{}}
+
+function matchGasStreet(endereco){
+  const norm = normalizar(endereco);
+  for(const street of GAS_STREETS_RAW){
+    const ns = normalizar(street);
+    if(norm.includes(ns) || ns.includes(norm)) return street;
+  }
+  return null;
+}
+
+function GasAlertPanel({rows}){
+  const [ignored,setIgnored]=useState(()=>loadIgnoredGas());
+  const [expanded,setExpanded]=useState(true);
+
+  const alerts = useMemo(()=>{
+    if(!rows) return [];
+    const result = [];
+    const seen = new Set();
+    rows.forEach(r=>{
+      const numOS = String(r["Número OS"]||"").trim();
+      if(!numOS || ignored.has(numOS) || seen.has(numOS)) return;
+      const endereco = String(r["Endereço"]||"").trim();
+      const matched = matchGasStreet(endereco);
+      if(matched){
+        seen.add(numOS);
+        const numero = String(r["Número"]||"").trim();
+        const comp = String(r["Complemento"]||"").trim();
+        const fullAddr = endereco + (numero?", "+numero:"") + (comp?" - "+comp:"");
+        const comgasSearch = encodeURIComponent(endereco + (numero?" "+numero:""));
+        result.push({
+          numOS, endereco, numero, fullAddr, matched,
+          familia: String(r["Família"]||"").trim(),
+          tss: String(r["TSS"]||"").trim(),
+          bairro: String(r["Bairro"]||"").trim(),
+          comgasUrl: "https://onetouch.comgas.com.br",
+          searchAddr: endereco + (numero?" "+numero:""),
+        });
+      }
+    });
+    return result;
+  },[rows,ignored]);
+
+  const doIgnore = (numOS)=>{
+    const n = new Set(ignored);
+    n.add(numOS);
+    setIgnored(n);
+    saveIgnoredGas(n);
+  };
+
+  if(!alerts.length) return null;
+
+  return <div style={{background:"rgba(245,158,11,0.06)",borderRadius:14,border:`1px solid rgba(245,158,11,0.3)`,marginBottom:16,overflow:"hidden"}}>
+    <div onClick={()=>setExpanded(!expanded)} style={{padding:"12px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",borderBottom:expanded?`1px solid rgba(245,158,11,0.2)`:"none"}}
+      onMouseEnter={e=>(e.currentTarget.style.background="rgba(245,158,11,0.08)")} onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
+      <div style={{display:"flex",alignItems:"center",gap:10}}>
+        <span style={{fontSize:10,color:C.textDim,transition:"transform 0.15s",display:"inline-block",transform:expanded?"rotate(90deg)":"rotate(0deg)"}}>▶</span>
+        <span style={{fontSize:18}}>🔥</span>
+        <span style={{fontSize:13,fontWeight:700,color:C.amber}}>Rede de Gás — {alerts.length} OS em ruas com tubulação</span>
+      </div>
+      <span style={{fontSize:11,color:C.textDim}}>{ignored.size>0?`${ignored.size} ignorada(s)`:""}</span>
+    </div>
+    {expanded&&<div style={{padding:"8px 12px 12px"}}>
+      {alerts.map(a=>(
+        <div key={a.numOS} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",margin:"4px 0",borderRadius:8,background:C.card,border:`1px solid ${C.border}`}}>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+              <span style={{fontSize:13,fontWeight:700,color:C.accent,fontVariantNumeric:"tabular-nums"}}>{a.numOS}</span>
+              <span style={{fontSize:11,padding:"1px 8px",borderRadius:6,background:C.amberBg,color:C.amber,border:"1px solid rgba(245,158,11,0.25)",fontWeight:600}}>{a.matched}</span>
+              <span style={{fontSize:11,color:C.textDim}}>{a.familia}</span>
+            </div>
+            <div style={{fontSize:12,color:C.textMuted,marginTop:3}}>{a.fullAddr}{a.bairro?" — "+a.bairro:""}</div>
+            <div style={{fontSize:11,color:C.textDim,marginTop:1}}>{a.tss}</div>
+          </div>
+          <div style={{display:"flex",gap:6,flexShrink:0}}>
+            <a href={a.comgasUrl} target="_blank" rel="noopener noreferrer"
+              onClick={(e)=>{
+                // Copiar endereço para a área de transferência ao clicar
+                navigator.clipboard.writeText(a.searchAddr).catch(()=>{});
+              }}
+              style={{fontSize:11,color:"#fff",fontWeight:600,padding:"6px 12px",borderRadius:6,background:"linear-gradient(135deg,#f59e0b,#d97706)",border:"none",cursor:"pointer",textDecoration:"none",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:4}}>
+              🔥 Comgás
+            </a>
+            <button onClick={()=>doIgnore(a.numOS)}
+              style={{fontSize:11,color:C.textDim,fontWeight:600,padding:"6px 10px",borderRadius:6,background:"transparent",border:`1px solid ${C.border}`,cursor:"pointer",whiteSpace:"nowrap"}}>
+              Ignorar
+            </button>
+          </div>
+        </div>
+      ))}
+      <div style={{fontSize:10,color:C.textDim,marginTop:6,paddingLeft:4}}>
+        O botão Comgás abre o site e copia o endereço para colar na busca
+      </div>
+    </div>}
+  </div>;
 }
 
 /* ── Main ── */
