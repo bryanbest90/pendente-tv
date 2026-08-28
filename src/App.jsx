@@ -599,7 +599,7 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx}){
 const btnTiny={padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:600,border:`1px solid ${C.border}`,background:"transparent",color:C.textDim,cursor:"pointer"};
 
 /* ── Sidebar ── */
-function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,gasCount,onGasClick}){
+function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed}){
   return <div style={{width:collapsed?56:210,minWidth:collapsed?56:210,background:C.sidebar,borderRight:`1px solid ${C.border}`,display:"flex",flexDirection:"column",transition:"width 0.25s ease,min-width 0.25s ease",overflow:"hidden",flexShrink:0}}>
     <div style={{padding:collapsed?"16px 0":"16px 16px",display:"flex",alignItems:"center",justifyContent:collapsed?"center":"space-between",borderBottom:`1px solid ${C.border}`,minHeight:56}}>
       {!collapsed&&<span style={{fontSize:13,fontWeight:800,color:C.accent,letterSpacing:0.5,textTransform:"uppercase",whiteSpace:"nowrap"}}>Unidades</span>}
@@ -618,18 +618,6 @@ function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,gas
           </div>}
         </div>;})}
     </div>
-    {/* Botão Rede de Gás */}
-    {gasCount>0&&<div style={{padding:"8px",borderTop:`1px solid ${C.border}`}}>
-      <div onClick={onGasClick} style={{padding:collapsed?"10px 0":"10px 14px",borderRadius:10,cursor:"pointer",background:C.amberBg,border:"1px solid rgba(245,158,11,0.25)",display:"flex",alignItems:"center",justifyContent:collapsed?"center":"flex-start",gap:10,transition:"all 0.15s"}}
-        onMouseEnter={e=>(e.currentTarget.style.background="rgba(245,158,11,0.15)")} onMouseLeave={e=>(e.currentTarget.style.background=C.amberBg)}>
-        <span style={{fontSize:collapsed?20:17}}>🔥</span>
-        {!collapsed&&<div style={{flex:1,minWidth:0}}>
-          <div style={{fontSize:12,fontWeight:700,color:C.amber,whiteSpace:"nowrap"}}>Rede de Gás</div>
-          <div style={{fontSize:11,color:C.amber,opacity:0.7}}>{gasCount} alerta{gasCount>1?"s":""}</div>
-        </div>}
-        {collapsed&&<span style={{position:"absolute",top:-4,right:-4,fontSize:10,fontWeight:700,color:"#fff",background:"#d97706",borderRadius:"50%",width:18,height:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{gasCount}</span>}
-      </div>
-    </div>}
   </div>;
 }
 
@@ -726,7 +714,13 @@ function useGasAlerts(rows){
       const numOS = String(r["Número OS"]||"").trim();
       if(!numOS || ignored.has(numOS) || seen.has(numOS)) return;
       const familia = String(r["Família"]||"").trim();
+      const tss = String(r["TSS"]||"").trim();
+      // Aplicar mesmos filtros do dashboard
+      if(EXCLUDED_DISPLAY.includes(familia)) return;
+      if(EXCLUDED_TSS.includes(tss)) return;
       if(GAS_EXCLUDED_FAMILIES.includes(familia)) return;
+      const atc = Number(r["ATC"]);
+      if(!VALID_ATCS.includes(atc)) return;
       const endereco = String(r["Endereço"]||"").trim();
       const matched = matchGasStreet(endereco);
       if(matched){
@@ -929,7 +923,7 @@ export default function App(){
   </div>;
 
   return <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"'Inter',-apple-system,sans-serif",display:"flex"}}>
-    {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed} gasCount={gas.alerts.length} onGasClick={()=>setShowGasModal(true)}/>}
+    {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed}/>}
     <div style={{flex:1,padding:"24px 16px",overflowY:"auto",minHeight:"100vh"}}>
       <div style={{maxWidth:960,margin:"0 auto"}}>
         <div style={{marginBottom:24,textAlign:"center"}}>
@@ -951,6 +945,10 @@ export default function App(){
               <span style={{fontSize:12,color:C.textDim}}>Atualizado: {fmtDate(updatedAt)}</span>
             </div>
             <div style={{display:"flex",gap:8}}>
+              {gas.alerts.length>0&&<button onClick={()=>setShowGasModal(true)}
+                style={{fontSize:12,color:C.amber,cursor:"pointer",fontWeight:700,padding:"4px 14px",borderRadius:6,border:"1px solid rgba(245,158,11,0.4)",background:C.amberBg,display:"flex",alignItems:"center",gap:6,animation:"gasPulse 2s infinite"}}>
+                🔥 Gás ({gas.alerts.length})
+              </button>}
               <button onClick={refresh} style={{fontSize:12,color:C.accent,cursor:"pointer",fontWeight:600,padding:"4px 12px",borderRadius:6,border:"1px solid rgba(59,130,246,0.3)",background:C.accentBg}}>↻ Atualizar</button>
             </div>
           </div>
@@ -960,6 +958,6 @@ export default function App(){
         {showGasModal&&gas.alerts.length>0&&<GasAlertModal alerts={gas.alerts} onIgnore={gas.doIgnore} onClose={()=>setShowGasModal(false)}/>}
       </div>
     </div>
-    <style>{`@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@keyframes modalIn{from{opacity:0;transform:scale(0.95)}to{opacity:1;transform:scale(1)}}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}`}</style>
+    <style>{`@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@keyframes modalIn{from{opacity:0;transform:scale(0.95)}to{opacity:1;transform:scale(1)}}@keyframes gasPulse{0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,0.3)}50%{box-shadow:0 0 12px 4px rgba(245,158,11,0.15)}}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}`}</style>
   </div>;
 }
