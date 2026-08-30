@@ -39,20 +39,45 @@ const norm = s => s.normalize("NFD").replace(/[̀-ͯ]/g,"").toUpperCase();
 const LIGACAO_AGUA_TSS_NORM = LIGACAO_AGUA_TSS.map(norm);
 const matchTssLigacao = tss => LIGACAO_AGUA_TSS_NORM.includes(norm(tss||""));
 
-// Famílias que compõem a frente VAZAMENTO
+// Famílias que compõem cada frente
 const VAZAMENTO_FAMILIAS = [
   'OUTROS SERVIÇOS DE ÁGUA',
   'RAMAL DE ÁGUA',
   'REDE DE ÁGUA',
   'VAZAMENTO DE ÁGUA',
 ];
+const CAVALETE_FAMILIAS = [
+  'CAVALETE',
+  'HIDRÔMETRO',
+  'OUTROS SERVIÇOS DE CAVALETE',
+  'REATIV/RELIG/RESTAB',
+  'SUPRESSÃO A PEDIDO',
+];
+const ESGOTO_FAMILIAS = [
+  'CONSERTO DE ESGOTO',
+  'LIGAÇÃO DE ESGOTO',
+  'OUTROS SERVIÇOS DE ESGOTO',
+  'PI, PV, TL',
+];
+
 const VAZAMENTO_FAMILIAS_NORM = VAZAMENTO_FAMILIAS.map(norm);
+const CAVALETE_FAMILIAS_NORM = CAVALETE_FAMILIAS.map(norm);
+const ESGOTO_FAMILIAS_NORM = ESGOTO_FAMILIAS.map(norm);
 const matchFamiliaVazamento = fam => VAZAMENTO_FAMILIAS_NORM.includes(norm(fam||""));
+const matchFamiliaCavalete = fam => CAVALETE_FAMILIAS_NORM.includes(norm(fam||""));
+const matchFamiliaEsgoto = fam => ESGOTO_FAMILIAS_NORM.includes(norm(fam||""));
+
+// Mapa frente → famílias (para familiaBreakdown)
+const FRENTE_FAMILIAS = {
+  "VAZAMENTO": VAZAMENTO_FAMILIAS,
+  "CAVALETE": CAVALETE_FAMILIAS,
+  "MANUTENÇÃO ESGOTO": ESGOTO_FAMILIAS,
+};
 
 const FRENTES = {
   "VAZAMENTO":       r => matchFamiliaVazamento(r.familia),
-  "CAVALETE":        r => (r.familia||"").toUpperCase().includes("CAVALETE") && !matchTssLigacao(r.tss),
-  "MANUTENÇÃO ESGOTO": r => (r.familia||"").toUpperCase().includes("ESGOTO"),
+  "CAVALETE":        r => matchFamiliaCavalete(r.familia) && !matchTssLigacao(r.tss),
+  "MANUTENÇÃO ESGOTO": r => matchFamiliaEsgoto(r.familia),
   "LIGAÇÃO ÁGUA":    r => matchTssLigacao(r.tss),
 };
 const FRENTE_ORDER = ["VAZAMENTO","CAVALETE","MANUTENÇÃO ESGOTO","LIGAÇÃO ÁGUA"];
@@ -1044,6 +1069,12 @@ function CarteiraView(){
 
   // Compute carteira data by frente/TSS
   const carteiraData=useMemo(()=>{
+    // Mapa global TSS→família a partir dos dados pendente (para classificar EM RUA que não tem campo familia)
+    const globalTssToFamilia={};
+    [...osD2,...osD1].forEach(r=>{
+      if(r.tss&&r.familia) globalTssToFamilia[norm(r.tss)]=r.familia;
+    });
+
     // For each frente, compute metrics
     return FRENTE_ORDER.map(frenteName=>{
       const matchFn=FRENTES[frenteName];
@@ -1060,8 +1091,12 @@ function CarteiraView(){
       const executadas=osD2Frente.filter(r=>!setD1Frente.has(r.numero_os)).length;
       const carteiraD1Count=osD1Frente.length;
 
-      // Equipes/OS em campo: classifica pelo TSS do próprio EM RUA
-      const emRuaFrente=emRuaData.filter(r=>matchFn({familia:"",tss:r.tss||"",numero_os:r.numero_os}));
+      // Equipes/OS em campo: classifica pelo TSS→família do pendente para frentes baseadas em família,
+      // e pelo TSS direto para LIGAÇÃO ÁGUA
+      const emRuaFrente=emRuaData.filter(r=>{
+        const mappedFamilia=globalTssToFamilia[norm(r.tss||"")]||"";
+        return matchFn({familia:mappedFamilia,tss:r.tss||"",numero_os:r.numero_os});
+      });
       const equipesSet=new Set(emRuaFrente.map(r=>r.equipe).filter(Boolean));
       const equipes=equipesSet.size;
 
@@ -1090,16 +1125,17 @@ function CarteiraView(){
         }).filter(t=>t.carteiraD2>0||t.carteiraD1>0||t.osCampo>0);
       }
 
-      // Família breakdown com TSS aninhado (para VAZAMENTO)
+      // Família breakdown com TSS aninhado (para frentes com famílias definidas)
       let familiaBreakdown=null;
-      if(frenteName==="VAZAMENTO"){
+      const frenteFamilias=FRENTE_FAMILIAS[frenteName];
+      if(frenteFamilias){
         // Mapa TSS→família a partir dos dados pendente (para classificar EM RUA que não tem campo familia)
         const tssToFamilia={};
         [...osD2Frente,...osD1Frente].forEach(r=>{
           if(r.tss&&r.familia) tssToFamilia[norm(r.tss)]=norm(r.familia);
         });
 
-        familiaBreakdown=VAZAMENTO_FAMILIAS.map(famName=>{
+        familiaBreakdown=frenteFamilias.map(famName=>{
           const famNorm=norm(famName);
           const d2Fam=osD2.filter(r=>norm(r.familia)===famNorm);
           const d1Fam=osD1.filter(r=>norm(r.familia)===famNorm);
@@ -1221,9 +1257,10 @@ function CarteiraView(){
           </tr></thead>
           <tbody>
             {carteiraData.map((row,i)=>{
-              const hasChildren=row.frente==="LIGAÇÃO ÁGUA"||row.frente==="VAZAMENTO";
+              const hasFamilias=!!row.familiaBreakdown;
+              const hasTssOnly=!!row.tssBreakdown&&!hasFamilias;
+              const hasChildren=hasFamilias||hasTssOnly;
               const expanded=expandedFrente===row.frente;
-              const isVazamento=row.frente==="VAZAMENTO";
               return <React.Fragment key={row.frente}>
                 <tr style={{background:i%2?C.cardAlt:"transparent",cursor:hasChildren?"pointer":"default"}}
                   onClick={()=>{if(hasChildren){setExpandedFrente(expanded?null:row.frente);if(expanded)setExpandedFamilia(null);}}}
@@ -1249,7 +1286,7 @@ function CarteiraView(){
                   </td>
                 </tr>
                 {/* LIGAÇÃO ÁGUA: sub-rows por TSS (nível 2) */}
-                {expanded&&!isVazamento&&row.tssBreakdown&&row.tssBreakdown.map((t,j)=>
+                {expanded&&hasTssOnly&&row.tssBreakdown.map((t,j)=>
                   <tr key={t.tss} style={{background:"rgba(15,23,42,0.5)"}}>
                     <td style={{padding:"8px 16px 8px 44px",borderBottom:`1px solid ${C.border}`,borderRight:colDiv,fontSize:12,color:C.textMuted}}>{t.tss}</td>
                     <td style={{...cellStyle,fontSize:12,color:C.textMuted,background:grpD2.bg,borderRight:colDiv}}>{t.carteiraD2}</td>
@@ -1266,8 +1303,8 @@ function CarteiraView(){
                     </td>
                   </tr>
                 )}
-                {/* VAZAMENTO: sub-rows por Família (nível 2) com TSS aninhado (nível 3) */}
-                {expanded&&isVazamento&&row.familiaBreakdown&&row.familiaBreakdown.map((fam,fi)=>{
+                {/* Frentes com famílias: sub-rows por Família (nível 2) com TSS aninhado (nível 3) */}
+                {expanded&&hasFamilias&&row.familiaBreakdown.map((fam,fi)=>{
                   const famExpanded=expandedFamilia===fam.familia;
                   const hasTss=fam.tssBreakdown&&fam.tssBreakdown.length>0;
                   return <React.Fragment key={fam.familia}>
