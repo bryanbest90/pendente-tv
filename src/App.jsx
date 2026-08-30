@@ -38,8 +38,19 @@ const LIGACAO_AGUA_TSS = [
 const norm = s => s.normalize("NFD").replace(/[̀-ͯ]/g,"").toUpperCase();
 const LIGACAO_AGUA_TSS_NORM = LIGACAO_AGUA_TSS.map(norm);
 const matchTssLigacao = tss => LIGACAO_AGUA_TSS_NORM.includes(norm(tss||""));
+
+// Famílias que compõem a frente VAZAMENTO
+const VAZAMENTO_FAMILIAS = [
+  'OUTROS SERVIÇOS DE ÁGUA',
+  'RAMAL DE ÁGUA',
+  'REDE DE ÁGUA',
+  'VAZAMENTO DE ÁGUA',
+];
+const VAZAMENTO_FAMILIAS_NORM = VAZAMENTO_FAMILIAS.map(norm);
+const matchFamiliaVazamento = fam => VAZAMENTO_FAMILIAS_NORM.includes(norm(fam||""));
+
 const FRENTES = {
-  "VAZAMENTO":       r => (r.familia||"").toUpperCase().includes("VAZAMENTO"),
+  "VAZAMENTO":       r => matchFamiliaVazamento(r.familia),
   "CAVALETE":        r => (r.familia||"").toUpperCase().includes("CAVALETE") && !matchTssLigacao(r.tss),
   "MANUTENÇÃO ESGOTO": r => (r.familia||"").toUpperCase().includes("ESGOTO"),
   "LIGAÇÃO ÁGUA":    r => matchTssLigacao(r.tss),
@@ -993,6 +1004,7 @@ function CarteiraView(){
   const [uploadingEmRua,setUploadingEmRua]=useState(false);
   const [emRuaToast,setEmRuaToast]=useState("");
   const [expandedFrente,setExpandedFrente]=useState(null);
+  const [expandedFamilia,setExpandedFamilia]=useState(null);
   const emRuaInputRef=useRef();
 
   const flashEmRua=(msg)=>{setEmRuaToast(msg);setTimeout(()=>setEmRuaToast(""),4000);};
@@ -1078,7 +1090,62 @@ function CarteiraView(){
         }).filter(t=>t.carteiraD2>0||t.carteiraD1>0||t.osCampo>0);
       }
 
-      return{frente:frenteName,carteiraD2:carteiraD2Count,novas,executadas,carteiraD1:carteiraD1Count,equipes,osCampo:osEmCampo,pctCampo:pctEmCampo,tssBreakdown};
+      // Família breakdown com TSS aninhado (para VAZAMENTO)
+      let familiaBreakdown=null;
+      if(frenteName==="VAZAMENTO"){
+        // Mapa TSS→família a partir dos dados pendente (para classificar EM RUA que não tem campo familia)
+        const tssToFamilia={};
+        [...osD2Frente,...osD1Frente].forEach(r=>{
+          if(r.tss&&r.familia) tssToFamilia[norm(r.tss)]=norm(r.familia);
+        });
+
+        familiaBreakdown=VAZAMENTO_FAMILIAS.map(famName=>{
+          const famNorm=norm(famName);
+          const d2Fam=osD2.filter(r=>norm(r.familia)===famNorm);
+          const d1Fam=osD1.filter(r=>norm(r.familia)===famNorm);
+          const d2Count=d2Fam.length;
+          const d1Count=d1Fam.length;
+          const setD2Fam=new Set(d2Fam.map(r=>r.numero_os));
+          const setD1Fam=new Set(d1Fam.map(r=>r.numero_os));
+          const famNovas=d1Fam.filter(r=>!setD2Fam.has(r.numero_os)).length;
+          const famExec=d2Fam.filter(r=>!setD1Fam.has(r.numero_os)).length;
+          // EM RUA: classifica pelo mapa TSS→família
+          const emRuaFam=emRuaData.filter(r=>{
+            const tFam=tssToFamilia[norm(r.tss||"")];
+            return tFam===famNorm;
+          });
+          const famEquipes=new Set(emRuaFam.map(r=>r.equipe).filter(Boolean)).size;
+          const famOsCampo=emRuaFam.length;
+          const famPct=d1Count>0?((famOsCampo/d1Count)*100):0;
+
+          // TSS dentro desta família
+          const tssSet=new Set();
+          [...d2Fam,...d1Fam,...emRuaFam].forEach(r=>{if(r.tss)tssSet.add(norm(r.tss));});
+          const tssNames=[...tssSet].sort();
+          const famTssBreakdown=tssNames.map(tssNorm=>{
+            const d2Tss=d2Fam.filter(r=>norm(r.tss)===tssNorm);
+            const d1Tss=d1Fam.filter(r=>norm(r.tss)===tssNorm);
+            const td2=d2Tss.length;
+            const td1=d1Tss.length;
+            const sD2=new Set(d2Tss.map(r=>r.numero_os));
+            const sD1=new Set(d1Tss.map(r=>r.numero_os));
+            const tNovas=d1Tss.filter(r=>!sD2.has(r.numero_os)).length;
+            const tExec=d2Tss.filter(r=>!sD1.has(r.numero_os)).length;
+            const tEmRua=emRuaFam.filter(r=>norm(r.tss||"")===tssNorm);
+            const tEquipes=new Set(tEmRua.map(r=>r.equipe).filter(Boolean)).size;
+            const tOsCampo=tEmRua.length;
+            const tPct=td1>0?((tOsCampo/td1)*100):0;
+            // Nome original do TSS (pega do primeiro registro encontrado)
+            const origRec=[...d2Fam,...d1Fam,...emRuaFam].find(r=>norm(r.tss)===tssNorm);
+            const tssLabel=origRec?origRec.tss:tssNorm;
+            return{tss:tssLabel,carteiraD2:td2,novas:tNovas,executadas:tExec,carteiraD1:td1,equipes:tEquipes,osCampo:tOsCampo,pctCampo:tPct};
+          }).filter(t=>t.carteiraD2>0||t.carteiraD1>0||t.osCampo>0);
+
+          return{familia:famName,carteiraD2:d2Count,novas:famNovas,executadas:famExec,carteiraD1:d1Count,equipes:famEquipes,osCampo:famOsCampo,pctCampo:famPct,tssBreakdown:famTssBreakdown};
+        }).filter(f=>f.carteiraD2>0||f.carteiraD1>0||f.osCampo>0);
+      }
+
+      return{frente:frenteName,carteiraD2:carteiraD2Count,novas,executadas,carteiraD1:carteiraD1Count,equipes,osCampo:osEmCampo,pctCampo:pctEmCampo,tssBreakdown,familiaBreakdown};
     });
   },[osD2,osD1,emRuaData]);
 
@@ -1148,15 +1215,16 @@ function CarteiraView(){
           </tr></thead>
           <tbody>
             {carteiraData.map((row,i)=>{
-              const isLigAgua=row.frente==="LIGAÇÃO ÁGUA";
+              const hasChildren=row.frente==="LIGAÇÃO ÁGUA"||row.frente==="VAZAMENTO";
               const expanded=expandedFrente===row.frente;
+              const isVazamento=row.frente==="VAZAMENTO";
               return <React.Fragment key={row.frente}>
-                <tr style={{background:i%2?C.cardAlt:"transparent",cursor:isLigAgua?"pointer":"default"}}
-                  onClick={()=>isLigAgua&&setExpandedFrente(expanded?null:row.frente)}
+                <tr style={{background:i%2?C.cardAlt:"transparent",cursor:hasChildren?"pointer":"default"}}
+                  onClick={()=>{if(hasChildren){setExpandedFrente(expanded?null:row.frente);if(expanded)setExpandedFamilia(null);}}}
                   onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background=i%2?C.cardAlt:"transparent")}>
                   <td style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,fontWeight:700,fontSize:14}}>
                     <div style={{display:"flex",alignItems:"center",gap:8}}>
-                      {isLigAgua&&<span style={{fontSize:10,color:C.textDim,transition:"transform 0.15s",display:"inline-block",transform:expanded?"rotate(90deg)":"rotate(0deg)"}}>▶</span>}
+                      {hasChildren&&<span style={{fontSize:10,color:C.textDim,transition:"transform 0.15s",display:"inline-block",transform:expanded?"rotate(90deg)":"rotate(0deg)"}}>▶</span>}
                       {row.frente}
                     </div>
                   </td>
@@ -1174,7 +1242,8 @@ function CarteiraView(){
                     }}>{row.pctCampo.toFixed(1)}%</span>
                   </td>
                 </tr>
-                {expanded&&row.tssBreakdown&&row.tssBreakdown.map((t,j)=>
+                {/* LIGAÇÃO ÁGUA: sub-rows por TSS (nível 2) */}
+                {expanded&&!isVazamento&&row.tssBreakdown&&row.tssBreakdown.map((t,j)=>
                   <tr key={t.tss} style={{background:"rgba(15,23,42,0.5)"}}>
                     <td style={{padding:"8px 16px 8px 44px",borderBottom:`1px solid ${C.border}`,fontSize:12,color:C.textMuted}}>{t.tss}</td>
                     <td style={{...cellStyle,fontSize:12,color:C.textMuted}}>{t.carteiraD2}</td>
@@ -1191,6 +1260,53 @@ function CarteiraView(){
                     </td>
                   </tr>
                 )}
+                {/* VAZAMENTO: sub-rows por Família (nível 2) com TSS aninhado (nível 3) */}
+                {expanded&&isVazamento&&row.familiaBreakdown&&row.familiaBreakdown.map((fam,fi)=>{
+                  const famExpanded=expandedFamilia===fam.familia;
+                  const hasTss=fam.tssBreakdown&&fam.tssBreakdown.length>0;
+                  return <React.Fragment key={fam.familia}>
+                    <tr style={{background:"rgba(15,23,42,0.5)",cursor:hasTss?"pointer":"default"}}
+                      onClick={e=>{e.stopPropagation();if(hasTss)setExpandedFamilia(famExpanded?null:fam.familia);}}
+                      onMouseEnter={e=>(e.currentTarget.style.background="rgba(30,41,59,0.7)")} onMouseLeave={e=>(e.currentTarget.style.background="rgba(15,23,42,0.5)")}>
+                      <td style={{padding:"8px 16px 8px 36px",borderBottom:`1px solid ${C.border}`,fontSize:13,fontWeight:600,color:C.text}}>
+                        <div style={{display:"flex",alignItems:"center",gap:6}}>
+                          {hasTss&&<span style={{fontSize:9,color:C.textDim,transition:"transform 0.15s",display:"inline-block",transform:famExpanded?"rotate(90deg)":"rotate(0deg)"}}>▶</span>}
+                          {fam.familia}
+                        </div>
+                      </td>
+                      <td style={{...cellStyle,fontSize:12}}>{fam.carteiraD2}</td>
+                      <td style={{...cellStyle,fontSize:12,color:fam.novas>0?C.amber:C.textDim}}>{fam.novas>0?"+"+fam.novas:"0"}</td>
+                      <td style={{...cellStyle,fontSize:12,color:fam.executadas>0?C.green:C.textDim}}>{fam.executadas>0?"-"+fam.executadas:"0"}</td>
+                      <td style={{...cellStyle,fontSize:12,fontWeight:600}}>{fam.carteiraD1}</td>
+                      <td style={{...cellStyle,fontSize:12,color:"#8b5cf6"}}>{fam.equipes||"—"}</td>
+                      <td style={{...cellStyle,fontSize:12,color:C.green}}>{fam.osCampo||"—"}</td>
+                      <td style={{...cellStyle,fontSize:12}}>
+                        <span style={{padding:"2px 8px",borderRadius:5,fontSize:11,fontWeight:600,
+                          color:fam.pctCampo>=70?C.green:fam.pctCampo>=40?C.amber:C.red,
+                          background:fam.pctCampo>=70?C.greenBg:fam.pctCampo>=40?C.amberBg:C.redBg,
+                        }}>{fam.pctCampo.toFixed(1)}%</span>
+                      </td>
+                    </tr>
+                    {/* Nível 3: TSS dentro da família */}
+                    {famExpanded&&fam.tssBreakdown&&fam.tssBreakdown.map(t=>
+                      <tr key={t.tss} style={{background:"rgba(10,15,30,0.6)"}}>
+                        <td style={{padding:"6px 16px 6px 64px",borderBottom:`1px solid ${C.border}`,fontSize:11,color:C.textDim}}>{t.tss}</td>
+                        <td style={{...cellStyle,fontSize:11,color:C.textDim}}>{t.carteiraD2}</td>
+                        <td style={{...cellStyle,fontSize:11,color:t.novas>0?C.amber:C.textDim}}>{t.novas>0?"+"+t.novas:"0"}</td>
+                        <td style={{...cellStyle,fontSize:11,color:t.executadas>0?C.green:C.textDim}}>{t.executadas>0?"-"+t.executadas:"0"}</td>
+                        <td style={{...cellStyle,fontSize:11,fontWeight:600}}>{t.carteiraD1}</td>
+                        <td style={{...cellStyle,fontSize:11,color:"#8b5cf6"}}>{t.equipes||"—"}</td>
+                        <td style={{...cellStyle,fontSize:11,color:C.green}}>{t.osCampo||"—"}</td>
+                        <td style={{...cellStyle,fontSize:11}}>
+                          <span style={{padding:"2px 6px",borderRadius:4,fontSize:10,fontWeight:600,
+                            color:t.pctCampo>=70?C.green:t.pctCampo>=40?C.amber:C.red,
+                            background:t.pctCampo>=70?C.greenBg:t.pctCampo>=40?C.amberBg:C.redBg,
+                          }}>{t.pctCampo.toFixed(1)}%</span>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>;
+                })}
               </React.Fragment>;
             })}
             {/* Total row */}
