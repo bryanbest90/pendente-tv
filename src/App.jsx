@@ -39,11 +39,7 @@ const FRENTES = {
   "VAZAMENTO":       r => (r.familia||"").toUpperCase().includes("VAZAMENTO"),
   "CAVALETE":        r => (r.familia||"").toUpperCase().includes("CAVALETE") && !LIGACAO_AGUA_TSS_UPPER.includes((r.tss||"").toUpperCase()),
   "MANUTENÇÃO ESGOTO": r => (r.familia||"").toUpperCase().includes("ESGOTO"),
-  "LIGAÇÃO ÁGUA":    r => {
-    const fam = (r.familia||"").toUpperCase();
-    const tss = (r.tss||"").toUpperCase();
-    return LIGACAO_AGUA_TSS_UPPER.includes(tss) || (fam.includes("LIGAÇÃO") || fam.includes("LIGACAO"));
-  },
+  "LIGAÇÃO ÁGUA":    r => LIGACAO_AGUA_TSS_UPPER.includes((r.tss||"").toUpperCase()),
 };
 const FRENTE_ORDER = ["VAZAMENTO","CAVALETE","MANUTENÇÃO ESGOTO","LIGAÇÃO ÁGUA"];
 
@@ -1033,6 +1029,10 @@ function CarteiraView(){
 
   // Compute carteira data by frente/TSS
   const carteiraData=useMemo(()=>{
+    // Mapa numero_os → registro D-1 para cruzar EM RUA com família/tss do pendente
+    const osD1Map=new Map();
+    osD1.forEach(r=>{if(r.numero_os)osD1Map.set(r.numero_os,r);});
+
     // For each frente, compute metrics
     return FRENTE_ORDER.map(frenteName=>{
       const matchFn=FRENTES[frenteName];
@@ -1049,8 +1049,14 @@ function CarteiraView(){
       const executadas=osD2Frente.filter(r=>!setD1Frente.has(r.numero_os)).length;
       const carteiraD1Count=osD1Frente.length;
 
-      // Equipes from em_rua matching this frente's TSS list
-      const emRuaFrente=emRuaData.filter(r=>matchFn({familia:"",tss:r.tss||"",numero_os:r.numero_os}));
+      // Equipes/OS em campo: cruzar EM RUA com pendente D-1 para obter família
+      const emRuaFrente=emRuaData.filter(r=>{
+        // Primeiro tenta achar a OS no pendente D-1 para pegar a família real
+        const pendente=osD1Map.get(r.numero_os);
+        if(pendente) return matchFn(pendente);
+        // Se não achou no pendente, usa só o TSS do próprio em_rua
+        return matchFn({familia:"",tss:r.tss||"",numero_os:r.numero_os});
+      });
       const equipesSet=new Set(emRuaFrente.map(r=>r.equipe).filter(Boolean));
       const equipes=equipesSet.size;
 
