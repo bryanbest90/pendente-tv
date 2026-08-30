@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useMemo, useEffect } from "react";
+import React, { useState, useCallback, useRef, useMemo, useEffect } from "react";
 import * as XLSX from "xlsx";
 import { XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Area, AreaChart } from "recharts";
 
@@ -22,6 +22,25 @@ const UNITS = [
   { id:"embu", label:"Embu-Guaçu", atc:299, icon:"🌿" },
 ];
 const UNIT_TO_HISTORICO = { geral: null, interlagos: "Interlagos", grajau: "Grajau", embu: "Embu-Guacu" };
+
+const LIGACAO_AGUA_TSS = [
+  'INCLUIR LIG DE ÁGUA EM CAV MÚLTIPLO S/V',
+  'LIGAÇÃO DE ÁGUA DIMENSIONADA S/V',
+  'LIGAÇÃO DE ÁGUA EM CAVALETE MULTIPLO',
+  'LIGAÇÃO DE ÁGUA S/V',
+  'SUBSTITUIR LIGAÇÃO DE AGUA',
+  'TRANSFORMAÇÃO LIG EXIST COM APROV RAMAL',
+  'TRANSFORMAÇÃO LIG EXIST SEM APROV RAMAL',
+  'TRANSFORMAÇÃO LIG NOVA COM APROV RAMAL',
+  'TRANSFORMAÇÃO LIG NOVA SEM APROV RAMAL',
+];
+const FRENTES = {
+  "VAZAMENTO":       r => (r.familia||"").toUpperCase().includes("VAZAMENTO"),
+  "CAVALETE":        r => (r.familia||"").toUpperCase().includes("CAVALETE") && !LIGACAO_AGUA_TSS.map(t=>t.toUpperCase()).includes((r.tss||"").toUpperCase()),
+  "MANUTENÇÃO ESGOTO": r => (r.familia||"").toUpperCase().includes("ESGOTO"),
+  "LIGAÇÃO ÁGUA":    r => LIGACAO_AGUA_TSS.map(t=>t.toUpperCase()).includes((r.tss||"").toUpperCase()),
+};
+const FRENTE_ORDER = ["VAZAMENTO","CAVALETE","MANUTENÇÃO ESGOTO","LIGAÇÃO ÁGUA"];
 
 const C = {
   bg:"#0a0f1a",card:"#111827",cardAlt:"#0d1321",border:"#1e293b",
@@ -88,6 +107,111 @@ async function uploadRows(rows){
   const now=new Date().toISOString();
   await fetch(SUPABASE_URL+"/rest/v1/pendente_meta?id=eq.1",{method:"PATCH",headers:{...HEADERS,"Prefer":"return=minimal"},body:JSON.stringify({updated_at:now,total_rows:rows.length})});
   return{count:rows.length,updatedAt:now};
+}
+
+/* ── EM RUA API ── */
+async function uploadEmRua(dia, records){
+  // Limpar dia antes de importar
+  await fetch(SUPABASE_URL+"/rest/v1/rpc/limpar_em_rua",{method:"POST",headers:{...HEADERS,"Prefer":"return=minimal"},body:JSON.stringify({p_dia:dia})});
+  const bs=500;
+  for(let i=0;i<records.length;i+=bs){
+    const batch=records.slice(i,i+bs);
+    const res=await fetch(SUPABASE_URL+"/rest/v1/em_rua",{method:"POST",headers:{...HEADERS,"Prefer":"return=minimal"},body:JSON.stringify(batch)});
+    if(!res.ok) throw new Error("Erro lote em_rua "+(Math.floor(i/bs)+1)+": "+await res.text());
+  }
+  return records.length;
+}
+async function fetchEmRua(dia){
+  const allRows=[];let from=0;const ps=1000;
+  while(true){
+    const res=await fetch(SUPABASE_URL+`/rest/v1/em_rua?dia=eq.${dia}&select=equipe,lider,numero_os,tss,status_os,resultado,causa_resultado,endereco,bairro,municipio`,{headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
+    if(!res.ok&&res.status!==206) break;
+    const data=await res.json();
+    if(!data?.length)break;
+    allRows.push(...data);
+    if(data.length<ps)break;
+    from+=ps;
+  }
+  return allRows;
+}
+
+/* ── Parse EM RUA xlsx ── */
+function parseEmRuaFile(file){
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onload=e=>{
+      try{
+        const wb=XLSX.read(e.target.result,{type:"array",cellDates:true});
+        const ws=wb.Sheets[wb.SheetNames[0]];
+        const raw=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
+        if(raw.length<4){reject(new Error("Arquivo EM RUA com poucas linhas"));return;}
+        // Row 1 (index 1): "Data" | "DD/MM/YYYY" or date object
+        let dia=null;
+        const dateRow=raw[1];
+        for(let c=0;c<dateRow.length;c++){
+          const v=dateRow[c];
+          if(v instanceof Date){
+            dia=v.toISOString().split("T")[0];break;
+          }
+          const m=String(v).match(/(\d{2})\/(\d{2})\/(\d{4})/);
+          if(m){dia=`${m[3]}-${m[2]}-${m[1]}`;break;}
+        }
+        if(!dia){reject(new Error("Data não encontrada na linha 2"));return;}
+        // Row 2 (index 2): headers — find column indices
+        const hdr=raw[2].map(h=>String(h||"").trim().toUpperCase());
+        const colIdx={};
+        const mapping={"EQUIPE":0,"LÍDER":1,"LIDER":1,"NÚMERO OS":3,"NUMERO OS":3,"Nº OS":3,"DESCRIÇÃO TSS":4,"DESCRICAO TSS":4,"TSS":4,"MUNICÍPIO":null,"MUNICIPIO":null,"ENDEREÇO":null,"ENDERECO":null,"BAIRRO":null,"STATUS DA OS":null,"RESULTADO":null,"CAUSA RESULTADO":null};
+        hdr.forEach((h,i)=>{
+          if(h.includes("EQUIPE")&&!("equipe" in colIdx)) colIdx.equipe=i;
+          else if(h.includes("LIDER")||h.includes("LÍDER")) colIdx.lider=i;
+          else if(h.includes("NÚMERO OS")||h.includes("NUMERO OS")||h==="Nº OS") colIdx.numero_os=i;
+          else if(h.includes("DESCRIÇÃO TSS")||h.includes("DESCRICAO TSS")||(h==="TSS"&&!("tss" in colIdx))) colIdx.tss=i;
+          else if(h.includes("MUNICÍPIO")||h.includes("MUNICIPIO")) colIdx.municipio=i;
+          else if(h.includes("ENDEREÇO")||h.includes("ENDERECO")) colIdx.endereco=i;
+          else if(h==="BAIRRO") colIdx.bairro=i;
+          else if(h.includes("STATUS DA OS")||h.includes("STATUS OS")) colIdx.status_os=i;
+          else if(h==="RESULTADO"&&!("resultado" in colIdx)) colIdx.resultado=i;
+          else if(h.includes("CAUSA")) colIdx.causa_resultado=i;
+        });
+        // Fallback: use fixed positions if not found
+        if(!("equipe" in colIdx)) colIdx.equipe=0;
+        if(!("lider" in colIdx)) colIdx.lider=1;
+        if(!("numero_os" in colIdx)) colIdx.numero_os=3;
+        if(!("tss" in colIdx)) colIdx.tss=4;
+        // Parse data rows with equipe fill-down
+        const records=[];
+        let lastEquipe="";
+        let lastLider="";
+        for(let r=3;r<raw.length;r++){
+          const row=raw[r];
+          if(!row||row.length===0) continue;
+          const eq=String(row[colIdx.equipe]||"").trim();
+          const lid=String(row[colIdx.lider!=null?colIdx.lider:1]||"").trim();
+          if(eq) lastEquipe=eq;
+          if(lid) lastLider=lid;
+          const numOS=String(row[colIdx.numero_os]||"").trim();
+          const tss=String(row[colIdx.tss]||"").trim();
+          if(!numOS&&!tss) continue; // skip empty rows
+          records.push({
+            dia,
+            equipe:lastEquipe,
+            lider:lastLider,
+            numero_os:numOS,
+            tss,
+            status_os:colIdx.status_os!=null?String(row[colIdx.status_os]||"").trim():"",
+            resultado:colIdx.resultado!=null?String(row[colIdx.resultado]||"").trim():"",
+            causa_resultado:colIdx.causa_resultado!=null?String(row[colIdx.causa_resultado]||"").trim():"",
+            endereco:colIdx.endereco!=null?String(row[colIdx.endereco]||"").trim():"",
+            bairro:colIdx.bairro!=null?String(row[colIdx.bairro]||"").trim():"",
+            municipio:colIdx.municipio!=null?String(row[colIdx.municipio]||"").trim():"",
+          });
+        }
+        resolve({dia,records});
+      }catch(err){reject(err);}
+    };
+    reader.onerror=reject;
+    reader.readAsArrayBuffer(file);
+  });
 }
 
 /* ── Helpers ── */
@@ -850,6 +974,241 @@ function GasAlertModal({alerts,onIgnore,onClose}){
   </div>;
 }
 
+/* ── Carteira View ── */
+function CarteiraView(){
+  const today=new Date();
+  const fmt=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  const daysAgo=(n)=>{const d=new Date(today);d.setDate(d.getDate()-n);return fmt(d);};
+
+  const [diaD1,setDiaD1]=useState(daysAgo(1));
+  const [diaD2,setDiaD2]=useState(daysAgo(2));
+  const [emRuaData,setEmRuaData]=useState([]);
+  const [osD1,setOsD1]=useState([]);
+  const [osD2,setOsD2]=useState([]);
+  const [loadingCarteira,setLoadingCarteira]=useState(true);
+  const [uploadingEmRua,setUploadingEmRua]=useState(false);
+  const [emRuaToast,setEmRuaToast]=useState("");
+  const [expandedFrente,setExpandedFrente]=useState(null);
+  const emRuaInputRef=useRef();
+
+  const flashEmRua=(msg)=>{setEmRuaToast(msg);setTimeout(()=>setEmRuaToast(""),4000);};
+
+  // Load data
+  useEffect(()=>{
+    (async()=>{
+      setLoadingCarteira(true);
+      try{
+        const [d2,d1,er]=await Promise.all([
+          fetchDiarioOS(diaD2),
+          fetchDiarioOS(diaD1),
+          fetchEmRua(diaD1),
+        ]);
+        setOsD2(d2);setOsD1(d1);setEmRuaData(er);
+      }catch(e){console.error("Erro carteira:",e);flashEmRua("Erro ao carregar dados: "+e.message);}
+      setLoadingCarteira(false);
+    })();
+  },[diaD1,diaD2]);
+
+  // Handle EM RUA file import
+  const handleEmRuaFile=useCallback(async(file)=>{
+    if(!file)return;
+    setUploadingEmRua(true);
+    try{
+      flashEmRua("Processando EM RUA...");
+      const{dia,records}=await parseEmRuaFile(file);
+      flashEmRua(`Enviando ${records.length} registros (${fmtDiaFull(dia)})...`);
+      const count=await uploadEmRua(dia,records);
+      flashEmRua(`EM RUA importado ✓ (${count} registros, dia ${fmtDiaFull(dia)})`);
+      // Reload em_rua for the current D-1
+      const er=await fetchEmRua(diaD1);
+      setEmRuaData(er);
+    }catch(e){flashEmRua("Erro: "+e.message);}
+    setUploadingEmRua(false);
+  },[diaD1]);
+
+  // Compute carteira data by frente/TSS
+  const carteiraData=useMemo(()=>{
+    const setD2=new Set(osD2.map(r=>r.numero_os));
+    const setD1=new Set(osD1.map(r=>r.numero_os));
+
+    // For each frente, compute metrics
+    return FRENTE_ORDER.map(frenteName=>{
+      const matchFn=FRENTES[frenteName];
+      // Filter OS by frente
+      const osD2Frente=osD2.filter(matchFn);
+      const osD1Frente=osD1.filter(matchFn);
+      const carteiraD2Count=osD2Frente.length;
+      // Novas = OS in D-1 that were NOT in D-2
+      const novas=osD1Frente.filter(r=>!setD2.has(r.numero_os)).length;
+      // Executadas = OS in D-2 that are NOT in D-1
+      const executadas=osD2Frente.filter(r=>!setD1.has(r.numero_os)).length;
+      const carteiraD1Count=osD1Frente.length;
+
+      // Equipes from em_rua matching this frente's TSS list
+      const emRuaFrente=emRuaData.filter(r=>matchFn({familia:"",tss:r.tss||"",numero_os:r.numero_os}));
+      const equipesSet=new Set(emRuaFrente.map(r=>r.equipe).filter(Boolean));
+      const equipes=equipesSet.size;
+
+      // OS em campo = OS from em_rua that match this frente
+      const osEmCampo=emRuaFrente.length;
+      const pctEmCampo=carteiraD1Count>0?((osEmCampo/carteiraD1Count)*100):0;
+
+      // TSS breakdown (for ligação água)
+      let tssBreakdown=null;
+      if(frenteName==="LIGAÇÃO ÁGUA"){
+        tssBreakdown=LIGACAO_AGUA_TSS.map(tssName=>{
+          const tssUpper=tssName.toUpperCase();
+          const d2Count=osD2.filter(r=>(r.tss||"").toUpperCase()===tssUpper).length;
+          const d1Count=osD1.filter(r=>(r.tss||"").toUpperCase()===tssUpper).length;
+          const tssNovas=osD1.filter(r=>(r.tss||"").toUpperCase()===tssUpper&&!setD2.has(r.numero_os)).length;
+          const tssExec=osD2.filter(r=>(r.tss||"").toUpperCase()===tssUpper&&!setD1.has(r.numero_os)).length;
+          const tssEmRua=emRuaData.filter(r=>(r.tss||"").toUpperCase()===tssUpper);
+          const tssEquipes=new Set(tssEmRua.map(r=>r.equipe).filter(Boolean)).size;
+          const tssOsCampo=tssEmRua.length;
+          const tssPct=d1Count>0?((tssOsCampo/d1Count)*100):0;
+          return{tss:tssName,carteiraD2:d2Count,novas:tssNovas,executadas:tssExec,carteiraD1:d1Count,equipes:tssEquipes,osCampo:tssOsCampo,pctCampo:tssPct};
+        }).filter(t=>t.carteiraD2>0||t.carteiraD1>0||t.osCampo>0);
+      }
+
+      return{frente:frenteName,carteiraD2:carteiraD2Count,novas,executadas,carteiraD1:carteiraD1Count,equipes,osCampo:osEmCampo,pctCampo:pctEmCampo,tssBreakdown};
+    });
+  },[osD2,osD1,emRuaData]);
+
+  // Totals
+  const totals=useMemo(()=>carteiraData.reduce((acc,r)=>({
+    carteiraD2:acc.carteiraD2+r.carteiraD2,novas:acc.novas+r.novas,executadas:acc.executadas+r.executadas,
+    carteiraD1:acc.carteiraD1+r.carteiraD1,equipes:acc.equipes+r.equipes,osCampo:acc.osCampo+r.osCampo,
+  }),{carteiraD2:0,novas:0,executadas:0,carteiraD1:0,equipes:0,osCampo:0}),[carteiraData]);
+  const totalPct=totals.carteiraD1>0?((totals.osCampo/totals.carteiraD1)*100):0;
+
+  const cellStyle={padding:"12px 14px",borderBottom:`1px solid ${C.border}`,textAlign:"center",fontVariantNumeric:"tabular-nums",fontSize:14};
+  const hdrCell={padding:"10px 14px",textAlign:"center",fontSize:11,fontWeight:700,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"};
+
+  return <div style={{animation:"fadeIn 0.35s ease"}}>
+    {/* Toast */}
+    {emRuaToast&&<div style={{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",zIndex:2000,padding:"10px 24px",borderRadius:10,fontSize:13,fontWeight:600,maxWidth:"90vw",wordBreak:"break-word",background:emRuaToast.includes("Erro")?"rgba(239,68,68,0.15)":"rgba(16,185,129,0.15)",color:emRuaToast.includes("Erro")?C.red:C.green,border:`1px solid ${emRuaToast.includes("Erro")?C.redBorder:C.greenBorder}`,backdropFilter:"blur(8px)",animation:"fadeIn 0.2s ease"}}>{emRuaToast}</div>}
+
+    {/* Header com seleção de datas e importação */}
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 16px",background:C.card,borderRadius:10,border:`1px solid ${C.border}`,marginBottom:16,flexWrap:"wrap",gap:10}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+        <span style={{fontSize:12,color:C.textDim,fontWeight:600}}>D-2:</span>
+        <input type="date" value={diaD2} onChange={e=>setDiaD2(e.target.value)} style={dateInputStyle}/>
+        <span style={{fontSize:12,color:C.textDim,fontWeight:600}}>D-1:</span>
+        <input type="date" value={diaD1} onChange={e=>setDiaD1(e.target.value)} style={dateInputStyle}/>
+      </div>
+      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+        <span style={{fontSize:11,color:C.textDim}}>EM RUA: {emRuaData.length>0?<span style={{color:C.green,fontWeight:600}}>{emRuaData.length} OS</span>:<span style={{color:C.amber}}>não importado</span>}</span>
+        <input ref={emRuaInputRef} type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={e=>{handleEmRuaFile(e.target.files[0]);e.target.value="";}}/>
+        <button onClick={()=>emRuaInputRef.current?.click()} disabled={uploadingEmRua}
+          style={{fontSize:12,color:"#fff",fontWeight:600,padding:"6px 16px",borderRadius:8,background:uploadingEmRua?"#475569":"linear-gradient(135deg,#3b82f6,#6366f1)",border:"none",cursor:uploadingEmRua?"wait":"pointer",display:"flex",alignItems:"center",gap:6}}>
+          {uploadingEmRua?"Importando...":"📥 Importar EM RUA"}
+        </button>
+      </div>
+    </div>
+
+    {/* Summary cards */}
+    <div style={{display:"flex",gap:12,marginBottom:16,flexWrap:"wrap"}}>
+      <SummaryCard label={`Carteira ${fmtDiaShort(diaD2)}`} value={totals.carteiraD2} color={C.accent} icon="📋"/>
+      <SummaryCard label="OS Novas" value={totals.novas} color={C.amber} icon="🆕"/>
+      <SummaryCard label="Executadas" value={totals.executadas} color={C.green} icon="✅"/>
+      <SummaryCard label={`Carteira ${fmtDiaShort(diaD1)}`} value={totals.carteiraD1} color={C.accent} icon="📊"/>
+    </div>
+    <div style={{display:"flex",gap:12,marginBottom:16,flexWrap:"wrap"}}>
+      <SummaryCard label="Equipes" value={totals.equipes} color="#8b5cf6" icon="👷"/>
+      <SummaryCard label="OS em Campo" value={totals.osCampo} color={C.green} icon="🚧"/>
+      <div style={{flex:1,minWidth:120,background:C.card,borderRadius:14,padding:"16px 18px",border:`1px solid ${C.border}`,display:"flex",flexDirection:"column",gap:4}}>
+        <span style={{fontSize:11,color:C.textDim,letterSpacing:0.5,textTransform:"uppercase"}}>% em Campo</span>
+        <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+          <span style={{fontSize:28,fontWeight:800,color:totalPct>=70?C.green:totalPct>=40?C.amber:C.red,fontVariantNumeric:"tabular-nums"}}>{totalPct.toFixed(1)}%</span>
+        </div>
+      </div>
+    </div>
+
+    {loadingCarteira?<div style={{padding:40,textAlign:"center",color:C.textDim}}>Carregando dados da carteira...</div>:
+    <div style={{background:C.card,borderRadius:14,border:`1px solid ${C.border}`,overflow:"hidden"}}>
+      <div style={{overflowX:"auto"}}>
+        <table style={{width:"100%",borderCollapse:"collapse",minWidth:800}}>
+          <thead><tr style={{background:C.headerBg}}>
+            <th style={{...hdrCell,textAlign:"left",paddingLeft:16}}>Frente / TSS</th>
+            <th style={hdrCell}>Cart. {fmtDiaShort(diaD2)}</th>
+            <th style={hdrCell}>Novas</th>
+            <th style={hdrCell}>Executadas</th>
+            <th style={hdrCell}>Cart. {fmtDiaShort(diaD1)}</th>
+            <th style={hdrCell}>Equipes</th>
+            <th style={hdrCell}>OS Campo</th>
+            <th style={hdrCell}>% Campo</th>
+          </tr></thead>
+          <tbody>
+            {carteiraData.map((row,i)=>{
+              const isLigAgua=row.frente==="LIGAÇÃO ÁGUA";
+              const expanded=expandedFrente===row.frente;
+              return <React.Fragment key={row.frente}>
+                <tr style={{background:i%2?C.cardAlt:"transparent",cursor:isLigAgua?"pointer":"default"}}
+                  onClick={()=>isLigAgua&&setExpandedFrente(expanded?null:row.frente)}
+                  onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background=i%2?C.cardAlt:"transparent")}>
+                  <td style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,fontWeight:700,fontSize:14}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      {isLigAgua&&<span style={{fontSize:10,color:C.textDim,transition:"transform 0.15s",display:"inline-block",transform:expanded?"rotate(90deg)":"rotate(0deg)"}}>▶</span>}
+                      {row.frente}
+                    </div>
+                  </td>
+                  <td style={cellStyle}>{row.carteiraD2}</td>
+                  <td style={{...cellStyle,color:row.novas>0?C.amber:C.textDim,fontWeight:row.novas>0?700:400}}>{row.novas>0?"+"+row.novas:"0"}</td>
+                  <td style={{...cellStyle,color:row.executadas>0?C.green:C.textDim,fontWeight:row.executadas>0?700:400}}>{row.executadas>0?"-"+row.executadas:"0"}</td>
+                  <td style={{...cellStyle,fontWeight:700}}>{row.carteiraD1}</td>
+                  <td style={{...cellStyle,color:"#8b5cf6",fontWeight:600}}>{row.equipes||"—"}</td>
+                  <td style={{...cellStyle,color:C.green,fontWeight:600}}>{row.osCampo||"—"}</td>
+                  <td style={cellStyle}>
+                    <span style={{padding:"3px 10px",borderRadius:6,fontSize:12,fontWeight:700,
+                      color:row.pctCampo>=70?C.green:row.pctCampo>=40?C.amber:C.red,
+                      background:row.pctCampo>=70?C.greenBg:row.pctCampo>=40?C.amberBg:C.redBg,
+                      border:`1px solid ${row.pctCampo>=70?C.greenBorder:row.pctCampo>=40?"rgba(245,158,11,0.25)":C.redBorder}`
+                    }}>{row.pctCampo.toFixed(1)}%</span>
+                  </td>
+                </tr>
+                {expanded&&row.tssBreakdown&&row.tssBreakdown.map((t,j)=>
+                  <tr key={t.tss} style={{background:"rgba(15,23,42,0.5)"}}>
+                    <td style={{padding:"8px 16px 8px 44px",borderBottom:`1px solid ${C.border}`,fontSize:12,color:C.textMuted}}>{t.tss}</td>
+                    <td style={{...cellStyle,fontSize:12,color:C.textMuted}}>{t.carteiraD2}</td>
+                    <td style={{...cellStyle,fontSize:12,color:t.novas>0?C.amber:C.textDim}}>{t.novas>0?"+"+t.novas:"0"}</td>
+                    <td style={{...cellStyle,fontSize:12,color:t.executadas>0?C.green:C.textDim}}>{t.executadas>0?"-"+t.executadas:"0"}</td>
+                    <td style={{...cellStyle,fontSize:12,fontWeight:600}}>{t.carteiraD1}</td>
+                    <td style={{...cellStyle,fontSize:12,color:"#8b5cf6"}}>{t.equipes||"—"}</td>
+                    <td style={{...cellStyle,fontSize:12,color:C.green}}>{t.osCampo||"—"}</td>
+                    <td style={{...cellStyle,fontSize:12}}>
+                      <span style={{padding:"2px 8px",borderRadius:5,fontSize:11,fontWeight:600,
+                        color:t.pctCampo>=70?C.green:t.pctCampo>=40?C.amber:C.red,
+                        background:t.pctCampo>=70?C.greenBg:t.pctCampo>=40?C.amberBg:C.redBg,
+                      }}>{t.pctCampo.toFixed(1)}%</span>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>;
+            })}
+            {/* Total row */}
+            <tr style={{background:C.headerBg,fontWeight:800}}>
+              <td style={{padding:"14px 16px",borderTop:`2px solid ${C.accent}`,fontSize:14}}>TOTAL</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800}}>{totals.carteiraD2}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.amber}}>{totals.novas>0?"+"+totals.novas:"0"}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.green}}>{totals.executadas>0?"-"+totals.executadas:"0"}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800}}>{totals.carteiraD1}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:"#8b5cf6"}}>{totals.equipes}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.green}}>{totals.osCampo}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`}}>
+                <span style={{padding:"3px 12px",borderRadius:6,fontSize:13,fontWeight:800,
+                  color:totalPct>=70?C.green:totalPct>=40?C.amber:C.red,
+                  background:totalPct>=70?C.greenBg:totalPct>=40?C.amberBg:C.redBg,
+                  border:`1px solid ${totalPct>=70?C.greenBorder:totalPct>=40?"rgba(245,158,11,0.25)":C.redBorder}`
+                }}>{totalPct.toFixed(1)}%</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>}
+  </div>;
+}
+
 /* ── Main ── */
 export default function App(){
   const [rawRows,setRawRows]=useState(null);
@@ -864,6 +1223,7 @@ export default function App(){
   const [sideCollapsed,setSideCollapsed]=useState(false);
   const [historico,setHistorico]=useState(null);
   const [showGasModal,setShowGasModal]=useState(false);
+  const [activeTab,setActiveTab]=useState("pendente");
   const inputRef=useRef();
 
   const flash=(msg)=>{setToast(msg);setTimeout(()=>setToast(""),4000);};
@@ -927,18 +1287,35 @@ export default function App(){
     <div style={{flex:1,padding:"24px 16px",overflowY:"auto",minHeight:"100vh"}}>
       <div style={{maxWidth:960,margin:"0 auto"}}>
         <div style={{marginBottom:24,textAlign:"center"}}>
-          <h1 style={{fontSize:22,fontWeight:800,margin:0,letterSpacing:-0.5,background:"linear-gradient(135deg,#60a5fa,#3b82f6,#818cf8)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>Controle de Prazos — OS Pendentes</h1>
-          <p style={{color:C.textDim,margin:"6px 0 0",fontSize:13}}>Análise por família de serviço</p>
+          <h1 style={{fontSize:22,fontWeight:800,margin:0,letterSpacing:-0.5,background:"linear-gradient(135deg,#60a5fa,#3b82f6,#818cf8)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>
+            {activeTab==="pendente"?"Controle de Prazos — OS Pendentes":"Acompanhamento de Carteira"}
+          </h1>
+          <p style={{color:C.textDim,margin:"6px 0 0",fontSize:13}}>
+            {activeTab==="pendente"?"Análise por família de serviço":"Carteira diária por frente de serviço"}
+          </p>
+          {/* Tabs */}
+          <div style={{display:"flex",justifyContent:"center",gap:4,marginTop:14}}>
+            {[{id:"pendente",label:"Pendente",icon:"📋"},{id:"carteira",label:"Carteira",icon:"📊"}].map(tab=>
+              <button key={tab.id} onClick={()=>setActiveTab(tab.id)}
+                style={{padding:"8px 24px",borderRadius:8,fontSize:13,fontWeight:700,cursor:"pointer",border:activeTab===tab.id?`1px solid rgba(59,130,246,0.4)`:`1px solid ${C.border}`,
+                  background:activeTab===tab.id?C.accentBg:"transparent",color:activeTab===tab.id?C.accent:C.textMuted,transition:"all 0.15s",display:"flex",alignItems:"center",gap:6}}
+                onMouseEnter={e=>{if(activeTab!==tab.id)e.currentTarget.style.background=C.rowHover;}}
+                onMouseLeave={e=>{if(activeTab!==tab.id)e.currentTarget.style.background="transparent";}}>
+                {tab.icon} {tab.label}
+              </button>
+            )}
+          </div>
         </div>
         {toast&&<div style={{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",zIndex:2000,padding:"10px 24px",borderRadius:10,fontSize:13,fontWeight:600,maxWidth:"90vw",wordBreak:"break-word",background:toast.includes("Erro")?"rgba(239,68,68,0.15)":"rgba(16,185,129,0.15)",color:toast.includes("Erro")?C.red:C.green,border:`1px solid ${toast.includes("Erro")?C.redBorder:C.greenBorder}`,backdropFilter:"blur(8px)",animation:"fadeIn 0.2s ease"}}>{toast}</div>}
-        {!rawRows&&<div onDragOver={e=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)} onDrop={onDrop}
+        {activeTab==="carteira"&&<CarteiraView/>}
+        {activeTab==="pendente"&&!rawRows&&<div onDragOver={e=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)} onDrop={onDrop}
           onClick={()=>inputRef.current?.click()} style={{border:`2px dashed ${dragOver?C.accent:C.border}`,borderRadius:16,padding:"60px 20px",textAlign:"center",cursor:"pointer",background:dragOver?C.accentBg:C.card,transition:"all 0.2s"}}>
           <input ref={inputRef} type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
           <div style={{fontSize:40,marginBottom:12,opacity:0.7}}>📂</div>
           <p style={{fontSize:16,fontWeight:600,margin:0}}>Nenhum pendente no servidor</p>
           <p style={{fontSize:14,color:C.textDim,margin:"8px 0 0"}}>Importe o primeiro arquivo .xlsx</p>
         </div>}
-        {rawRows&&<div style={{animation:"fadeIn 0.35s ease"}}>
+        {activeTab==="pendente"&&rawRows&&<div style={{animation:"fadeIn 0.35s ease"}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 16px",background:C.card,borderRadius:10,border:`1px solid ${C.border}`,marginBottom:16,flexWrap:"wrap",gap:8}}>
             <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
               <span style={{fontSize:12,padding:"2px 10px",borderRadius:8,background:C.accentBg,color:C.accent,border:"1px solid rgba(59,130,246,0.2)",fontWeight:700}}>{currentUnit.icon} {currentUnit.label}</span>
@@ -954,8 +1331,8 @@ export default function App(){
           </div>
           <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label} historico={historico} activeUnit={activeUnit}/>
         </div>}
+        {activeTab==="pendente"&&showGasModal&&gas.alerts.length>0&&<GasAlertModal alerts={gas.alerts} onIgnore={gas.doIgnore} onClose={()=>setShowGasModal(false)}/>}
         <div style={{textAlign:"center",padding:"32px 16px 16px",color:C.textDim,fontSize:11,letterSpacing:0.3,opacity:0.6}}>Criado por Bryan Mendes Deodato, todos os direitos reservados</div>
-        {showGasModal&&gas.alerts.length>0&&<GasAlertModal alerts={gas.alerts} onIgnore={gas.doIgnore} onClose={()=>setShowGasModal(false)}/>}
       </div>
     </div>
     <style>{`@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@keyframes modalIn{from{opacity:0;transform:scale(0.95)}to{opacity:1;transform:scale(1)}}@keyframes gasPulse{0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,0.3)}50%{box-shadow:0 0 12px 4px rgba(245,158,11,0.15)}}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}`}</style>
