@@ -34,11 +34,16 @@ const LIGACAO_AGUA_TSS = [
   'TRANSFORMAÇÃO LIG NOVA COM APROV RAMAL',
   'TRANSFORMAÇÃO LIG NOVA SEM APROV RAMAL',
 ];
+const LIGACAO_AGUA_TSS_UPPER = LIGACAO_AGUA_TSS.map(t=>t.toUpperCase());
 const FRENTES = {
   "VAZAMENTO":       r => (r.familia||"").toUpperCase().includes("VAZAMENTO"),
-  "CAVALETE":        r => (r.familia||"").toUpperCase().includes("CAVALETE") && !LIGACAO_AGUA_TSS.map(t=>t.toUpperCase()).includes((r.tss||"").toUpperCase()),
+  "CAVALETE":        r => (r.familia||"").toUpperCase().includes("CAVALETE") && !LIGACAO_AGUA_TSS_UPPER.includes((r.tss||"").toUpperCase()),
   "MANUTENÇÃO ESGOTO": r => (r.familia||"").toUpperCase().includes("ESGOTO"),
-  "LIGAÇÃO ÁGUA":    r => LIGACAO_AGUA_TSS.map(t=>t.toUpperCase()).includes((r.tss||"").toUpperCase()),
+  "LIGAÇÃO ÁGUA":    r => {
+    const fam = (r.familia||"").toUpperCase();
+    const tss = (r.tss||"").toUpperCase();
+    return LIGACAO_AGUA_TSS_UPPER.includes(tss) || (fam.includes("LIGAÇÃO") || fam.includes("LIGACAO"));
+  },
 };
 const FRENTE_ORDER = ["VAZAMENTO","CAVALETE","MANUTENÇÃO ESGOTO","LIGAÇÃO ÁGUA"];
 
@@ -1028,9 +1033,6 @@ function CarteiraView(){
 
   // Compute carteira data by frente/TSS
   const carteiraData=useMemo(()=>{
-    const setD2=new Set(osD2.map(r=>r.numero_os));
-    const setD1=new Set(osD1.map(r=>r.numero_os));
-
     // For each frente, compute metrics
     return FRENTE_ORDER.map(frenteName=>{
       const matchFn=FRENTES[frenteName];
@@ -1038,10 +1040,13 @@ function CarteiraView(){
       const osD2Frente=osD2.filter(matchFn);
       const osD1Frente=osD1.filter(matchFn);
       const carteiraD2Count=osD2Frente.length;
-      // Novas = OS in D-1 that were NOT in D-2
-      const novas=osD1Frente.filter(r=>!setD2.has(r.numero_os)).length;
-      // Executadas = OS in D-2 that are NOT in D-1
-      const executadas=osD2Frente.filter(r=>!setD1.has(r.numero_os)).length;
+      // Sets PER FRENTE (não global) para que a matemática feche
+      const setD2Frente=new Set(osD2Frente.map(r=>r.numero_os));
+      const setD1Frente=new Set(osD1Frente.map(r=>r.numero_os));
+      // Novas = OS in D-1 desta frente que NÃO estavam nesta frente em D-2
+      const novas=osD1Frente.filter(r=>!setD2Frente.has(r.numero_os)).length;
+      // Executadas = OS in D-2 desta frente que NÃO estão nesta frente em D-1
+      const executadas=osD2Frente.filter(r=>!setD1Frente.has(r.numero_os)).length;
       const carteiraD1Count=osD1Frente.length;
 
       // Equipes from em_rua matching this frente's TSS list
@@ -1058,10 +1063,14 @@ function CarteiraView(){
       if(frenteName==="LIGAÇÃO ÁGUA"){
         tssBreakdown=LIGACAO_AGUA_TSS.map(tssName=>{
           const tssUpper=tssName.toUpperCase();
-          const d2Count=osD2.filter(r=>(r.tss||"").toUpperCase()===tssUpper).length;
-          const d1Count=osD1.filter(r=>(r.tss||"").toUpperCase()===tssUpper).length;
-          const tssNovas=osD1.filter(r=>(r.tss||"").toUpperCase()===tssUpper&&!setD2.has(r.numero_os)).length;
-          const tssExec=osD2.filter(r=>(r.tss||"").toUpperCase()===tssUpper&&!setD1.has(r.numero_os)).length;
+          const d2Tss=osD2.filter(r=>(r.tss||"").toUpperCase()===tssUpper);
+          const d1Tss=osD1.filter(r=>(r.tss||"").toUpperCase()===tssUpper);
+          const d2Count=d2Tss.length;
+          const d1Count=d1Tss.length;
+          const setD2Tss=new Set(d2Tss.map(r=>r.numero_os));
+          const setD1Tss=new Set(d1Tss.map(r=>r.numero_os));
+          const tssNovas=d1Tss.filter(r=>!setD2Tss.has(r.numero_os)).length;
+          const tssExec=d2Tss.filter(r=>!setD1Tss.has(r.numero_os)).length;
           const tssEmRua=emRuaData.filter(r=>(r.tss||"").toUpperCase()===tssUpper);
           const tssEquipes=new Set(tssEmRua.map(r=>r.equipe).filter(Boolean)).size;
           const tssOsCampo=tssEmRua.length;
