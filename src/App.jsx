@@ -34,12 +34,15 @@ const LIGACAO_AGUA_TSS = [
   'TRANSFORMAÇÃO LIG NOVA COM APROV RAMAL',
   'TRANSFORMAÇÃO LIG NOVA SEM APROV RAMAL',
 ];
-const LIGACAO_AGUA_TSS_UPPER = LIGACAO_AGUA_TSS.map(t=>t.toUpperCase());
+// Normaliza acentos para comparação segura (ÁGUA = AGUA, MÚLTIPLO = MULTIPLO)
+const norm = s => s.normalize("NFD").replace(/[̀-ͯ]/g,"").toUpperCase();
+const LIGACAO_AGUA_TSS_NORM = LIGACAO_AGUA_TSS.map(norm);
+const matchTssLigacao = tss => LIGACAO_AGUA_TSS_NORM.includes(norm(tss||""));
 const FRENTES = {
   "VAZAMENTO":       r => (r.familia||"").toUpperCase().includes("VAZAMENTO"),
-  "CAVALETE":        r => (r.familia||"").toUpperCase().includes("CAVALETE") && !LIGACAO_AGUA_TSS_UPPER.includes((r.tss||"").toUpperCase()),
+  "CAVALETE":        r => (r.familia||"").toUpperCase().includes("CAVALETE") && !matchTssLigacao(r.tss),
   "MANUTENÇÃO ESGOTO": r => (r.familia||"").toUpperCase().includes("ESGOTO"),
-  "LIGAÇÃO ÁGUA":    r => LIGACAO_AGUA_TSS_UPPER.includes((r.tss||"").toUpperCase()),
+  "LIGAÇÃO ÁGUA":    r => matchTssLigacao(r.tss),
 };
 const FRENTE_ORDER = ["VAZAMENTO","CAVALETE","MANUTENÇÃO ESGOTO","LIGAÇÃO ÁGUA"];
 
@@ -1002,7 +1005,7 @@ function CarteiraView(){
         const [d2,d1,er]=await Promise.all([
           fetchDiarioOS(diaD2),
           fetchDiarioOS(diaD1),
-          fetchEmRua(diaD1),
+          fetchEmRua(fmt(today)),  // EM RUA é sempre do dia atual
         ]);
         setOsD2(d2);setOsD1(d1);setEmRuaData(er);
       }catch(e){console.error("Erro carteira:",e);flashEmRua("Erro ao carregar dados: "+e.message);}
@@ -1020,8 +1023,8 @@ function CarteiraView(){
       flashEmRua(`Enviando ${records.length} registros (${fmtDiaFull(dia)})...`);
       const count=await uploadEmRua(dia,records);
       flashEmRua(`EM RUA importado ✓ (${count} registros, dia ${fmtDiaFull(dia)})`);
-      // Reload em_rua for the current D-1
-      const er=await fetchEmRua(diaD1);
+      // Reload em_rua do dia importado
+      const er=await fetchEmRua(dia);
       setEmRuaData(er);
     }catch(e){flashEmRua("Erro: "+e.message);}
     setUploadingEmRua(false);
@@ -1029,10 +1032,6 @@ function CarteiraView(){
 
   // Compute carteira data by frente/TSS
   const carteiraData=useMemo(()=>{
-    // Mapa numero_os → registro D-1 para cruzar EM RUA com família/tss do pendente
-    const osD1Map=new Map();
-    osD1.forEach(r=>{if(r.numero_os)osD1Map.set(r.numero_os,r);});
-
     // For each frente, compute metrics
     return FRENTE_ORDER.map(frenteName=>{
       const matchFn=FRENTES[frenteName];
@@ -1049,14 +1048,8 @@ function CarteiraView(){
       const executadas=osD2Frente.filter(r=>!setD1Frente.has(r.numero_os)).length;
       const carteiraD1Count=osD1Frente.length;
 
-      // Equipes/OS em campo: cruzar EM RUA com pendente D-1 para obter família
-      const emRuaFrente=emRuaData.filter(r=>{
-        // Primeiro tenta achar a OS no pendente D-1 para pegar a família real
-        const pendente=osD1Map.get(r.numero_os);
-        if(pendente) return matchFn(pendente);
-        // Se não achou no pendente, usa só o TSS do próprio em_rua
-        return matchFn({familia:"",tss:r.tss||"",numero_os:r.numero_os});
-      });
+      // Equipes/OS em campo: classifica pelo TSS do próprio EM RUA
+      const emRuaFrente=emRuaData.filter(r=>matchFn({familia:"",tss:r.tss||"",numero_os:r.numero_os}));
       const equipesSet=new Set(emRuaFrente.map(r=>r.equipe).filter(Boolean));
       const equipes=equipesSet.size;
 
@@ -1068,16 +1061,16 @@ function CarteiraView(){
       let tssBreakdown=null;
       if(frenteName==="LIGAÇÃO ÁGUA"){
         tssBreakdown=LIGACAO_AGUA_TSS.map(tssName=>{
-          const tssUpper=tssName.toUpperCase();
-          const d2Tss=osD2.filter(r=>(r.tss||"").toUpperCase()===tssUpper);
-          const d1Tss=osD1.filter(r=>(r.tss||"").toUpperCase()===tssUpper);
+          const tssNorm=norm(tssName);
+          const d2Tss=osD2.filter(r=>norm(r.tss)===tssNorm);
+          const d1Tss=osD1.filter(r=>norm(r.tss)===tssNorm);
           const d2Count=d2Tss.length;
           const d1Count=d1Tss.length;
           const setD2Tss=new Set(d2Tss.map(r=>r.numero_os));
           const setD1Tss=new Set(d1Tss.map(r=>r.numero_os));
           const tssNovas=d1Tss.filter(r=>!setD2Tss.has(r.numero_os)).length;
           const tssExec=d2Tss.filter(r=>!setD1Tss.has(r.numero_os)).length;
-          const tssEmRua=emRuaData.filter(r=>(r.tss||"").toUpperCase()===tssUpper);
+          const tssEmRua=emRuaData.filter(r=>norm(r.tss)===tssNorm);
           const tssEquipes=new Set(tssEmRua.map(r=>r.equipe).filter(Boolean)).size;
           const tssOsCampo=tssEmRua.length;
           const tssPct=d1Count>0?((tssOsCampo/d1Count)*100):0;
