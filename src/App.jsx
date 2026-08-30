@@ -1157,7 +1157,13 @@ function CarteiraView(){
   const totalPct=totals.carteiraD1>0?((totals.osCampo/totals.carteiraD1)*100):0;
 
   const cellStyle={padding:"12px 14px",borderBottom:`1px solid ${C.border}`,textAlign:"center",fontVariantNumeric:"tabular-nums",fontSize:14};
-  const hdrCell={padding:"10px 14px",textAlign:"center",fontSize:11,fontWeight:700,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"};
+  const hdrCell={padding:"10px 14px",textAlign:"center",fontSize:11,fontWeight:700,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,borderBottom:`2px solid rgba(100,116,139,0.4)`,whiteSpace:"nowrap"};
+  // Divisores espessos entre grupos de colunas
+  const colDiv="2px solid rgba(100,116,139,0.4)";
+  // Tints sutis por grupo (dark theme friendly)
+  const grpD2={bg:"rgba(220,80,80,0.04)",hdr:"rgba(220,80,80,0.10)"};
+  const grpMov={bg:"rgba(245,158,11,0.04)",hdr:"rgba(245,158,11,0.10)"};
+  const grpCampo={bg:"rgba(16,185,129,0.04)",hdr:"rgba(16,185,129,0.10)"};
 
   return <div style={{animation:"fadeIn 0.35s ease"}}>
     {/* Toast */}
@@ -1204,14 +1210,14 @@ function CarteiraView(){
       <div style={{overflowX:"auto"}}>
         <table style={{width:"100%",borderCollapse:"collapse",minWidth:800}}>
           <thead><tr style={{background:C.headerBg}}>
-            <th style={{...hdrCell,textAlign:"left",paddingLeft:16}}>Frente / TSS</th>
-            <th style={hdrCell}>Cart. {fmtDiaShort(diaD2)}</th>
-            <th style={hdrCell}>Novas</th>
-            <th style={hdrCell}>Executadas</th>
-            <th style={hdrCell}>Cart. {fmtDiaShort(diaD1)}</th>
-            <th style={hdrCell}>Equipes</th>
-            <th style={hdrCell}>OS Campo</th>
-            <th style={hdrCell}>% Campo</th>
+            <th style={{...hdrCell,textAlign:"left",paddingLeft:16,borderRight:colDiv}}>Frente / TSS</th>
+            <th style={{...hdrCell,background:grpD2.hdr,borderRight:colDiv}}>Cart. {fmtDiaShort(diaD2)}</th>
+            <th style={{...hdrCell,background:grpMov.hdr}}>Novas</th>
+            <th style={{...hdrCell,background:grpMov.hdr}}>Executadas</th>
+            <th style={{...hdrCell,background:grpMov.hdr,borderRight:colDiv}}>Cart. {fmtDiaShort(diaD1)}</th>
+            <th style={{...hdrCell,background:grpCampo.hdr}}>Equipes</th>
+            <th style={{...hdrCell,background:grpCampo.hdr}}>OS Campo</th>
+            <th style={{...hdrCell,background:grpCampo.hdr}}>% Campo</th>
           </tr></thead>
           <tbody>
             {carteiraData.map((row,i)=>{
@@ -1222,19 +1228,19 @@ function CarteiraView(){
                 <tr style={{background:i%2?C.cardAlt:"transparent",cursor:hasChildren?"pointer":"default"}}
                   onClick={()=>{if(hasChildren){setExpandedFrente(expanded?null:row.frente);if(expanded)setExpandedFamilia(null);}}}
                   onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background=i%2?C.cardAlt:"transparent")}>
-                  <td style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,fontWeight:700,fontSize:14}}>
+                  <td style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,borderRight:colDiv,fontWeight:700,fontSize:14}}>
                     <div style={{display:"flex",alignItems:"center",gap:8}}>
                       {hasChildren&&<span style={{fontSize:10,color:C.textDim,transition:"transform 0.15s",display:"inline-block",transform:expanded?"rotate(90deg)":"rotate(0deg)"}}>▶</span>}
                       {row.frente}
                     </div>
                   </td>
-                  <td style={cellStyle}>{row.carteiraD2}</td>
-                  <td style={{...cellStyle,color:row.novas>0?C.amber:C.textDim,fontWeight:row.novas>0?700:400}}>{row.novas>0?"+"+row.novas:"0"}</td>
-                  <td style={{...cellStyle,color:row.executadas>0?C.green:C.textDim,fontWeight:row.executadas>0?700:400}}>{row.executadas>0?"-"+row.executadas:"0"}</td>
-                  <td style={{...cellStyle,fontWeight:700}}>{row.carteiraD1}</td>
-                  <td style={{...cellStyle,color:"#8b5cf6",fontWeight:600}}>{row.equipes||"—"}</td>
-                  <td style={{...cellStyle,color:C.green,fontWeight:600}}>{row.osCampo||"—"}</td>
-                  <td style={cellStyle}>
+                  <td style={{...cellStyle,background:grpD2.bg,borderRight:colDiv}}>{row.carteiraD2}</td>
+                  <td style={{...cellStyle,background:grpMov.bg,color:row.novas>0?C.amber:C.textDim,fontWeight:row.novas>0?700:400}}>{row.novas>0?"+"+row.novas:"0"}</td>
+                  <td style={{...cellStyle,background:grpMov.bg,color:row.executadas>0?C.green:C.textDim,fontWeight:row.executadas>0?700:400}}>{row.executadas>0?"-"+row.executadas:"0"}</td>
+                  <td style={{...cellStyle,background:grpMov.bg,fontWeight:700,borderRight:colDiv}}>{row.carteiraD1}</td>
+                  <td style={{...cellStyle,background:grpCampo.bg,color:"#8b5cf6",fontWeight:600}}>{row.equipes||"—"}</td>
+                  <td style={{...cellStyle,background:grpCampo.bg,color:C.green,fontWeight:600}}>{row.osCampo||"—"}</td>
+                  <td style={{...cellStyle,background:grpCampo.bg}}>
                     <span style={{padding:"3px 10px",borderRadius:6,fontSize:12,fontWeight:700,
                       color:row.pctCampo>=70?C.green:row.pctCampo>=40?C.amber:C.red,
                       background:row.pctCampo>=70?C.greenBg:row.pctCampo>=40?C.amberBg:C.redBg,
@@ -1245,14 +1251,14 @@ function CarteiraView(){
                 {/* LIGAÇÃO ÁGUA: sub-rows por TSS (nível 2) */}
                 {expanded&&!isVazamento&&row.tssBreakdown&&row.tssBreakdown.map((t,j)=>
                   <tr key={t.tss} style={{background:"rgba(15,23,42,0.5)"}}>
-                    <td style={{padding:"8px 16px 8px 44px",borderBottom:`1px solid ${C.border}`,fontSize:12,color:C.textMuted}}>{t.tss}</td>
-                    <td style={{...cellStyle,fontSize:12,color:C.textMuted}}>{t.carteiraD2}</td>
-                    <td style={{...cellStyle,fontSize:12,color:t.novas>0?C.amber:C.textDim}}>{t.novas>0?"+"+t.novas:"0"}</td>
-                    <td style={{...cellStyle,fontSize:12,color:t.executadas>0?C.green:C.textDim}}>{t.executadas>0?"-"+t.executadas:"0"}</td>
-                    <td style={{...cellStyle,fontSize:12,fontWeight:600}}>{t.carteiraD1}</td>
-                    <td style={{...cellStyle,fontSize:12,color:"#8b5cf6"}}>{t.equipes||"—"}</td>
-                    <td style={{...cellStyle,fontSize:12,color:C.green}}>{t.osCampo||"—"}</td>
-                    <td style={{...cellStyle,fontSize:12}}>
+                    <td style={{padding:"8px 16px 8px 44px",borderBottom:`1px solid ${C.border}`,borderRight:colDiv,fontSize:12,color:C.textMuted}}>{t.tss}</td>
+                    <td style={{...cellStyle,fontSize:12,color:C.textMuted,background:grpD2.bg,borderRight:colDiv}}>{t.carteiraD2}</td>
+                    <td style={{...cellStyle,fontSize:12,color:t.novas>0?C.amber:C.textDim,background:grpMov.bg}}>{t.novas>0?"+"+t.novas:"0"}</td>
+                    <td style={{...cellStyle,fontSize:12,color:t.executadas>0?C.green:C.textDim,background:grpMov.bg}}>{t.executadas>0?"-"+t.executadas:"0"}</td>
+                    <td style={{...cellStyle,fontSize:12,fontWeight:600,background:grpMov.bg,borderRight:colDiv}}>{t.carteiraD1}</td>
+                    <td style={{...cellStyle,fontSize:12,color:"#8b5cf6",background:grpCampo.bg}}>{t.equipes||"—"}</td>
+                    <td style={{...cellStyle,fontSize:12,color:C.green,background:grpCampo.bg}}>{t.osCampo||"—"}</td>
+                    <td style={{...cellStyle,fontSize:12,background:grpCampo.bg}}>
                       <span style={{padding:"2px 8px",borderRadius:5,fontSize:11,fontWeight:600,
                         color:t.pctCampo>=70?C.green:t.pctCampo>=40?C.amber:C.red,
                         background:t.pctCampo>=70?C.greenBg:t.pctCampo>=40?C.amberBg:C.redBg,
@@ -1268,19 +1274,19 @@ function CarteiraView(){
                     <tr style={{background:"rgba(15,23,42,0.5)",cursor:hasTss?"pointer":"default"}}
                       onClick={e=>{e.stopPropagation();if(hasTss)setExpandedFamilia(famExpanded?null:fam.familia);}}
                       onMouseEnter={e=>(e.currentTarget.style.background="rgba(30,41,59,0.7)")} onMouseLeave={e=>(e.currentTarget.style.background="rgba(15,23,42,0.5)")}>
-                      <td style={{padding:"8px 16px 8px 36px",borderBottom:`1px solid ${C.border}`,fontSize:13,fontWeight:600,color:C.text}}>
+                      <td style={{padding:"8px 16px 8px 36px",borderBottom:`1px solid ${C.border}`,borderRight:colDiv,fontSize:13,fontWeight:600,color:C.text}}>
                         <div style={{display:"flex",alignItems:"center",gap:6}}>
                           {hasTss&&<span style={{fontSize:9,color:C.textDim,transition:"transform 0.15s",display:"inline-block",transform:famExpanded?"rotate(90deg)":"rotate(0deg)"}}>▶</span>}
                           {fam.familia}
                         </div>
                       </td>
-                      <td style={{...cellStyle,fontSize:12}}>{fam.carteiraD2}</td>
-                      <td style={{...cellStyle,fontSize:12,color:fam.novas>0?C.amber:C.textDim}}>{fam.novas>0?"+"+fam.novas:"0"}</td>
-                      <td style={{...cellStyle,fontSize:12,color:fam.executadas>0?C.green:C.textDim}}>{fam.executadas>0?"-"+fam.executadas:"0"}</td>
-                      <td style={{...cellStyle,fontSize:12,fontWeight:600}}>{fam.carteiraD1}</td>
-                      <td style={{...cellStyle,fontSize:12,color:"#8b5cf6"}}>{fam.equipes||"—"}</td>
-                      <td style={{...cellStyle,fontSize:12,color:C.green}}>{fam.osCampo||"—"}</td>
-                      <td style={{...cellStyle,fontSize:12}}>
+                      <td style={{...cellStyle,fontSize:12,background:grpD2.bg,borderRight:colDiv}}>{fam.carteiraD2}</td>
+                      <td style={{...cellStyle,fontSize:12,color:fam.novas>0?C.amber:C.textDim,background:grpMov.bg}}>{fam.novas>0?"+"+fam.novas:"0"}</td>
+                      <td style={{...cellStyle,fontSize:12,color:fam.executadas>0?C.green:C.textDim,background:grpMov.bg}}>{fam.executadas>0?"-"+fam.executadas:"0"}</td>
+                      <td style={{...cellStyle,fontSize:12,fontWeight:600,background:grpMov.bg,borderRight:colDiv}}>{fam.carteiraD1}</td>
+                      <td style={{...cellStyle,fontSize:12,color:"#8b5cf6",background:grpCampo.bg}}>{fam.equipes||"—"}</td>
+                      <td style={{...cellStyle,fontSize:12,color:C.green,background:grpCampo.bg}}>{fam.osCampo||"—"}</td>
+                      <td style={{...cellStyle,fontSize:12,background:grpCampo.bg}}>
                         <span style={{padding:"2px 8px",borderRadius:5,fontSize:11,fontWeight:600,
                           color:fam.pctCampo>=70?C.green:fam.pctCampo>=40?C.amber:C.red,
                           background:fam.pctCampo>=70?C.greenBg:fam.pctCampo>=40?C.amberBg:C.redBg,
@@ -1290,14 +1296,14 @@ function CarteiraView(){
                     {/* Nível 3: TSS dentro da família */}
                     {famExpanded&&fam.tssBreakdown&&fam.tssBreakdown.map(t=>
                       <tr key={t.tss} style={{background:"rgba(10,15,30,0.6)"}}>
-                        <td style={{padding:"6px 16px 6px 64px",borderBottom:`1px solid ${C.border}`,fontSize:11,color:C.textDim}}>{t.tss}</td>
-                        <td style={{...cellStyle,fontSize:11,color:C.textDim}}>{t.carteiraD2}</td>
-                        <td style={{...cellStyle,fontSize:11,color:t.novas>0?C.amber:C.textDim}}>{t.novas>0?"+"+t.novas:"0"}</td>
-                        <td style={{...cellStyle,fontSize:11,color:t.executadas>0?C.green:C.textDim}}>{t.executadas>0?"-"+t.executadas:"0"}</td>
-                        <td style={{...cellStyle,fontSize:11,fontWeight:600}}>{t.carteiraD1}</td>
-                        <td style={{...cellStyle,fontSize:11,color:"#8b5cf6"}}>{t.equipes||"—"}</td>
-                        <td style={{...cellStyle,fontSize:11,color:C.green}}>{t.osCampo||"—"}</td>
-                        <td style={{...cellStyle,fontSize:11}}>
+                        <td style={{padding:"6px 16px 6px 64px",borderBottom:`1px solid ${C.border}`,borderRight:colDiv,fontSize:11,color:C.textDim}}>{t.tss}</td>
+                        <td style={{...cellStyle,fontSize:11,color:C.textDim,background:grpD2.bg,borderRight:colDiv}}>{t.carteiraD2}</td>
+                        <td style={{...cellStyle,fontSize:11,color:t.novas>0?C.amber:C.textDim,background:grpMov.bg}}>{t.novas>0?"+"+t.novas:"0"}</td>
+                        <td style={{...cellStyle,fontSize:11,color:t.executadas>0?C.green:C.textDim,background:grpMov.bg}}>{t.executadas>0?"-"+t.executadas:"0"}</td>
+                        <td style={{...cellStyle,fontSize:11,fontWeight:600,background:grpMov.bg,borderRight:colDiv}}>{t.carteiraD1}</td>
+                        <td style={{...cellStyle,fontSize:11,color:"#8b5cf6",background:grpCampo.bg}}>{t.equipes||"—"}</td>
+                        <td style={{...cellStyle,fontSize:11,color:C.green,background:grpCampo.bg}}>{t.osCampo||"—"}</td>
+                        <td style={{...cellStyle,fontSize:11,background:grpCampo.bg}}>
                           <span style={{padding:"2px 6px",borderRadius:4,fontSize:10,fontWeight:600,
                             color:t.pctCampo>=70?C.green:t.pctCampo>=40?C.amber:C.red,
                             background:t.pctCampo>=70?C.greenBg:t.pctCampo>=40?C.amberBg:C.redBg,
@@ -1311,14 +1317,14 @@ function CarteiraView(){
             })}
             {/* Total row */}
             <tr style={{background:C.headerBg,fontWeight:800}}>
-              <td style={{padding:"14px 16px",borderTop:`2px solid ${C.accent}`,fontSize:14}}>TOTAL</td>
-              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800}}>{totals.carteiraD2}</td>
-              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.amber}}>{totals.novas>0?"+"+totals.novas:"0"}</td>
-              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.green}}>{totals.executadas>0?"-"+totals.executadas:"0"}</td>
-              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800}}>{totals.carteiraD1}</td>
-              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:"#8b5cf6"}}>{totals.equipes}</td>
-              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.green}}>{totals.osCampo}</td>
-              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`}}>
+              <td style={{padding:"14px 16px",borderTop:`2px solid ${C.accent}`,borderRight:colDiv,fontSize:14}}>TOTAL</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,background:grpD2.bg,borderRight:colDiv}}>{totals.carteiraD2}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.amber,background:grpMov.bg}}>{totals.novas>0?"+"+totals.novas:"0"}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.green,background:grpMov.bg}}>{totals.executadas>0?"-"+totals.executadas:"0"}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,background:grpMov.bg,borderRight:colDiv}}>{totals.carteiraD1}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:"#8b5cf6",background:grpCampo.bg}}>{totals.equipes}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.green,background:grpCampo.bg}}>{totals.osCampo}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,background:grpCampo.bg}}>
                 <span style={{padding:"3px 12px",borderRadius:6,fontSize:13,fontWeight:800,
                   color:totalPct>=70?C.green:totalPct>=40?C.amber:C.red,
                   background:totalPct>=70?C.greenBg:totalPct>=40?C.amberBg:C.redBg,
