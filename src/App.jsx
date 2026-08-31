@@ -130,6 +130,23 @@ async function fetchHistorico(){
   if(!res.ok) throw new Error("Erro historico "+res.status);
   return await res.json();
 }
+// Busca mapeamento global TSS→família de TODOS os dados históricos (não só D-2/D-1)
+async function fetchTssToFamiliaMap(){
+  // Busca do dia mais recente disponível para pegar todos os TSS possíveis
+  const map={};
+  const allRows=[];let from=0;const ps=1000;
+  while(true){
+    const res=await fetch(SUPABASE_URL+`/rest/v1/pendente_diario_os?select=tss,familia&order=dia.desc&limit=${ps}&offset=${from}`,{headers:{...HEADERS}});
+    if(!res.ok) break;
+    const data=await res.json();
+    if(!data?.length) break;
+    data.forEach(r=>{if(r.tss&&r.familia&&!map[norm(r.tss)]) map[norm(r.tss)]=r.familia;});
+    // Se já temos bastante diversidade de TSS, paramos (otimização)
+    if(Object.keys(map).length>200||data.length<ps) break;
+    from+=ps;
+  }
+  return map;
+}
 async function fetchDiarioOS(dia){
   const allRows=[];let from=0;const ps=1000;
   while(true){
@@ -1033,6 +1050,7 @@ function CarteiraView(){
   const [emRuaData,setEmRuaData]=useState([]);
   const [osD1,setOsD1]=useState([]);
   const [osD2,setOsD2]=useState([]);
+  const [globalTssMap,setGlobalTssMap]=useState({}); // TSS→família de todo histórico
   const [loadingCarteira,setLoadingCarteira]=useState(true);
   const [uploadingEmRua,setUploadingEmRua]=useState(false);
   const [emRuaToast,setEmRuaToast]=useState("");
@@ -1059,12 +1077,13 @@ function CarteiraView(){
     (async()=>{
       setLoadingCarteira(true);
       try{
-        const [d2,d1,er]=await Promise.all([
+        const [d2,d1,er,tssMap]=await Promise.all([
           fetchDiarioOS(diaD2),
           fetchDiarioOS(diaD1),
           fetchEmRua(fmt(today)),  // EM RUA é sempre do dia atual
+          fetchTssToFamiliaMap(),
         ]);
-        setOsD2(d2);setOsD1(d1);setEmRuaData(er);
+        setOsD2(d2);setOsD1(d1);setEmRuaData(er);setGlobalTssMap(tssMap);
       }catch(e){console.error("Erro carteira:",e);flashEmRua("Erro ao carregar dados: "+e.message);}
       setLoadingCarteira(false);
     })();
@@ -1089,8 +1108,8 @@ function CarteiraView(){
 
   // Compute carteira data by frente/TSS
   const carteiraData=useMemo(()=>{
-    // Mapa global TSS→família a partir dos dados pendente (para classificar EM RUA que não tem campo familia)
-    const globalTssToFamilia={};
+    // Mapa TSS→família: usa globalTssMap (todo histórico) + complementa com D-2/D-1
+    const globalTssToFamilia={...globalTssMap};
     [...osD2,...osD1].forEach(r=>{
       if(r.tss&&r.familia) globalTssToFamilia[norm(r.tss)]=r.familia;
     });
@@ -1247,7 +1266,7 @@ function CarteiraView(){
 
       return{frente:frenteName,carteiraD2:carteiraD2Count,novas,executadas,carteiraD1:carteiraD1Count,equipes,equipesNomes,osCampo:osEmCampo,pctCampo:pctEmCampo,tssBreakdown,familiaBreakdown};
     });
-  },[osD2,osD1,emRuaData,excludedCarteira]);
+  },[osD2,osD1,emRuaData,excludedCarteira,globalTssMap]);
 
   // Totals
   const totals=useMemo(()=>carteiraData.reduce((acc,r)=>({
