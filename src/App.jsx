@@ -294,8 +294,8 @@ function Pill({value,color,bg,border,onClick,clickable}){
 function Bar({prazo,fora,total}){if(!total)return null;const pP=(prazo/total)*100,pF=(fora/total)*100;
   return <div style={{display:"flex",alignItems:"center",gap:10,width:"100%"}}><div style={{flex:1,height:8,borderRadius:4,background:C.border,overflow:"hidden",display:"flex"}}><div style={{width:`${pP}%`,background:`linear-gradient(90deg,${C.green},#34d399)`,transition:"width 0.5s"}}/><div style={{width:`${pF}%`,background:`linear-gradient(90deg,#f87171,${C.red})`,transition:"width 0.5s"}}/></div><span style={{fontSize:12,color:C.textDim,minWidth:36,textAlign:"right"}}>{pF.toFixed(0)}%</span></div>;
 }
-function SummaryCard({label,value,color,icon}){
-  return <div style={{flex:1,minWidth:120,background:C.card,borderRadius:14,padding:"16px 18px",border:`1px solid ${C.border}`,display:"flex",flexDirection:"column",gap:4}}>
+function SummaryCard({label,value,color,icon,onClick}){
+  return <div onClick={onClick} style={{flex:1,minWidth:120,background:C.card,borderRadius:14,padding:"16px 18px",border:`1px solid ${C.border}`,display:"flex",flexDirection:"column",gap:4,cursor:onClick?"pointer":"default"}}>
     <span style={{fontSize:11,color:C.textDim,letterSpacing:0.5,textTransform:"uppercase"}}>{label}</span>
     <div style={{display:"flex",alignItems:"baseline",gap:6}}><span style={{fontSize:28,fontWeight:800,color,fontVariantNumeric:"tabular-nums"}}>{value.toLocaleString("pt-BR")}</span><span style={{fontSize:15}}>{icon}</span></div>
   </div>;
@@ -1040,6 +1040,7 @@ function CarteiraView(){
   const [expandedFamilia,setExpandedFamilia]=useState(null);
   const [excludedCarteira,setExcludedCarteira]=useState(new Set());
   const [equipeModal,setEquipeModal]=useState(null); // {frente, equipes:[]}
+  const [showAllEquipesModal,setShowAllEquipesModal]=useState(false);
   const emRuaInputRef=useRef();
 
   const toggleExcluded=useCallback((name)=>{
@@ -1294,7 +1295,7 @@ function CarteiraView(){
       <SummaryCard label={`Carteira ${fmtDiaShort(diaD1)}`} value={totals.carteiraD1} color={C.accent} icon="📊"/>
     </div>
     <div style={{display:"flex",gap:12,marginBottom:16,flexWrap:"wrap"}}>
-      <SummaryCard label="Equipes" value={totals.equipes} color="#8b5cf6" icon="👷"/>
+      <SummaryCard label="Equipes" value={totals.equipes} color="#8b5cf6" icon="👷" onClick={()=>setShowAllEquipesModal(true)}/>
       <SummaryCard label="OS em Campo" value={totals.osCampo} color={C.green} icon="🚧"/>
       <div style={{flex:1,minWidth:120,background:C.card,borderRadius:14,padding:"16px 18px",border:`1px solid ${C.border}`,display:"flex",flexDirection:"column",gap:4}}>
         <span style={{fontSize:11,color:C.textDim,letterSpacing:0.5,textTransform:"uppercase"}}>% em Campo</span>
@@ -1316,6 +1317,26 @@ function CarteiraView(){
           equipeModal.equipes.map((eq,i)=><div key={i} style={{padding:"8px 12px",borderRadius:8,background:i%2?"rgba(15,23,42,0.4)":"transparent",fontSize:13,fontWeight:500,color:C.text}}>{eq}</div>)}
         </div>
         <div style={{fontSize:11,color:C.textDim,textAlign:"right"}}>{equipeModal.equipes.length} equipe{equipeModal.equipes.length!==1?"s":""}</div>
+      </div>
+    </div>}
+
+    {/* Modal Todas as Equipes (por frente) */}
+    {showAllEquipesModal&&<div onClick={()=>setShowAllEquipesModal(false)} style={{position:"fixed",inset:0,zIndex:3000,background:"rgba(0,0,0,0.6)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",animation:"fadeIn 0.15s ease"}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:14,border:`1px solid ${C.border}`,padding:"24px 28px",minWidth:340,maxWidth:520,maxHeight:"80vh",display:"flex",flexDirection:"column",gap:16,boxShadow:"0 20px 60px rgba(0,0,0,0.5)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <h3 style={{margin:0,fontSize:16,fontWeight:700}}>Todas as Equipes ({totals.equipes})</h3>
+          <button onClick={()=>setShowAllEquipesModal(false)} style={{background:"none",border:"none",color:C.textDim,fontSize:20,cursor:"pointer",padding:"0 4px",lineHeight:1}}>✕</button>
+        </div>
+        <div style={{overflowY:"auto",flex:1}}>
+          {carteiraData.filter(r=>r.equipesNomes&&r.equipesNomes.length>0).map(r=>
+            <div key={r.frente} style={{marginBottom:12}}>
+              <div style={{fontSize:12,fontWeight:700,color:"#8b5cf6",textTransform:"uppercase",letterSpacing:0.5,marginBottom:6,paddingBottom:4,borderBottom:`1px solid ${C.border}`}}>{r.frente} ({r.equipesNomes.length})</div>
+              {r.equipesNomes.map((eq,i)=>
+                <div key={i} style={{padding:"6px 12px",fontSize:13,color:C.text,background:i%2?"rgba(15,23,42,0.4)":"transparent",borderRadius:6}}>{eq}</div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </div>}
 
