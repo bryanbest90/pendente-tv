@@ -13,6 +13,9 @@ const EXCLUDED_TSS = [
   "INSTALAR CAIXA D'ÁGUA","INSTALAR CAIXA UMA (PARTE CIVIL)","PREPARAR INSTALAÇÃO PARA CAIXA D'AGUA",
   "RESTABELECER LIGAÇÃO SERVIÇOS ADICIONAIS","LIGAÇÃO DE ESGOTO - PROG AGUA LEGAL",
   "LIGAÇÃO DE ESGOTO - PROG SE LIGA NA REDE","TESTE DE CORANTE OP","SUPRIMIR LIGAÇÃO DE POÇO",
+  "LAVAR REDE DE ESGOTO PREVENTIVA","LIMPAR POÇO INSPEÇÃO/VISITA A VACUO",
+  "MANUTENÇÃO EM INSTALAÇÕES ESGOTO SABESP","PROLONGAR REDE DE ESGOTO",
+  "REMANEJAR REDE DE ESGOTO","HIDRANTE VAZANDO",
 ];
 const VALID_ATCS = [923, 929, 299];
 const UNITS = [
@@ -89,6 +92,18 @@ const FRENTES = {
   "REPOSIÇÃO":       r => matchFamiliaReposicao(r.familia),
 };
 const FRENTE_ORDER = ["VAZAMENTO","CAVALETE","MANUTENÇÃO ESGOTO","LIGAÇÃO ÁGUA","REPOSIÇÃO"];
+
+// TSS globalmente excluídas — removidas de TODOS os cálculos (pendente + carteira)
+const EXCLUDED_TSS_GLOBAL = [
+  'LAVAR REDE DE ESGOTO PREVENTIVA',
+  'LIMPAR POÇO INSPEÇÃO/VISITA A VACUO',
+  'MANUTENÇÃO EM INSTALAÇÕES ESGOTO SABESP',
+  'PROLONGAR REDE DE ESGOTO',
+  'REMANEJAR REDE DE ESGOTO',
+  'HIDRANTE VAZANDO',
+];
+const EXCLUDED_TSS_GLOBAL_NORM = new Set(EXCLUDED_TSS_GLOBAL.map(norm));
+const isGloballyExcludedTss = tss => EXCLUDED_TSS_GLOBAL_NORM.has(norm(tss||""));
 
 const C = {
   bg:"#0a0f1a",card:"#111827",cardAlt:"#0d1321",border:"#1e293b",
@@ -527,7 +542,7 @@ function OSExitModal({diaA,diaB,activeUnit,familyFilter,onClose}){
       try{
         const [osA,osB] = await Promise.all([fetchDiarioOS(diaA),fetchDiarioOS(diaB)]);
         const setB = new Set(osB.map(r=>r.numero_os));
-        let exited = osA.filter(r=>!setB.has(r.numero_os));
+        let exited = osA.filter(r=>!setB.has(r.numero_os)&&!isGloballyExcludedTss(r.tss));
         // Aplicar filtros
         if(unidadeFilter) exited=exited.filter(r=>r.unidade===unidadeFilter);
         if(familyFilter.size>0) exited=exited.filter(r=>familyFilter.has(r.familia));
@@ -1083,7 +1098,11 @@ function CarteiraView(){
           fetchEmRua(fmt(today)),  // EM RUA é sempre do dia atual
           fetchTssToFamiliaMap(),
         ]);
-        setOsD2(d2);setOsD1(d1);setEmRuaData(er);setGlobalTssMap(tssMap);
+        // Filtrar TSS globalmente excluídas de todos os conjuntos
+        setOsD2(d2.filter(r=>!isGloballyExcludedTss(r.tss)));
+        setOsD1(d1.filter(r=>!isGloballyExcludedTss(r.tss)));
+        setEmRuaData(er.filter(r=>!isGloballyExcludedTss(r.tss)));
+        setGlobalTssMap(tssMap);
       }catch(e){console.error("Erro carteira:",e);flashEmRua("Erro ao carregar dados: "+e.message);}
       setLoadingCarteira(false);
     })();
@@ -1101,7 +1120,7 @@ function CarteiraView(){
       flashEmRua(`EM RUA importado ✓ (${count} registros, dia ${fmtDiaFull(dia)})`);
       // Reload em_rua do dia importado
       const er=await fetchEmRua(dia);
-      setEmRuaData(er);
+      setEmRuaData(er.filter(r=>!isGloballyExcludedTss(r.tss)));
     }catch(e){flashEmRua("Erro: "+e.message);}
     setUploadingEmRua(false);
   },[diaD1]);
@@ -1630,7 +1649,7 @@ export default function App(){
           <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label} historico={historico} activeUnit={activeUnit}/>
         </div>}
         {activeTab==="pendente"&&showGasModal&&gas.alerts.length>0&&<GasAlertModal alerts={gas.alerts} onIgnore={gas.doIgnore} onClose={()=>setShowGasModal(false)}/>}
-        <div style={{textAlign:"center",padding:"32px 16px 16px",color:C.textDim,fontSize:11,letterSpacing:0.3,opacity:0.6}}>Desenvolvido por Bryan Mendes Deodato, todos os direitos reservados</div>
+        <div style={{textAlign:"center",padding:"32px 16px 16px",color:C.textDim,fontSize:11,letterSpacing:0.3,opacity:0.6}}>Criado por Bryan Mendes Deodato, todos os direitos reservados</div>
       </div>
     </div>
     <style>{`@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@keyframes modalIn{from{opacity:0;transform:scale(0.95)}to{opacity:1;transform:scale(1)}}@keyframes gasPulse{0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,0.3)}50%{box-shadow:0 0 12px 4px rgba(245,158,11,0.15)}}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}`}</style>
