@@ -1163,9 +1163,15 @@ function CarteiraView(){
       const osD2Frente=osD2.filter(matchFn);
       const osD1Frente=osD1.filter(matchFn);
 
+      // Coletar numero_os excluídos em QUALQUER dia — se a OS tem família/TSS excluído
+      // em D-2 OU D-1, remove de AMBOS os conjuntos para não distorcer novas/executadas
+      const excludedOsNumbers=new Set();
+      [...osD2Frente,...osD1Frente].forEach(r=>{
+        if(isOsExcluded(r)) excludedOsNumbers.add(r.numero_os);
+      });
       // FILTERED OS sets (excluindo famílias/TSS ocultos) para métricas da frente
-      const osD2Filtered=osD2Frente.filter(r=>!isOsExcluded(r));
-      const osD1Filtered=osD1Frente.filter(r=>!isOsExcluded(r));
+      const osD2Filtered=osD2Frente.filter(r=>!excludedOsNumbers.has(r.numero_os));
+      const osD1Filtered=osD1Frente.filter(r=>!excludedOsNumbers.has(r.numero_os));
       const carteiraD2Count=osD2Filtered.length;
       const setD2Frente=new Set(osD2Filtered.map(r=>r.numero_os));
       const setD1Frente=new Set(osD1Filtered.map(r=>r.numero_os));
