@@ -1055,16 +1055,18 @@ function GasAlertModal({alerts,onIgnore,onClose}){
 }
 
 /* ── Carteira View ── */
-function CarteiraView(){
+function CarteiraView({rawRows}){
   const today=new Date();
   const fmt=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
   const daysAgo=(n)=>{const d=new Date(today);d.setDate(d.getDate()-n);return fmt(d);};
 
   const [diaD1,setDiaD1]=useState(daysAgo(1));
   const [diaD2,setDiaD2]=useState(daysAgo(2));
+  const [diaD3,setDiaD3]=useState(daysAgo(3));
   const [emRuaData,setEmRuaData]=useState([]);
   const [osD1,setOsD1]=useState([]);
   const [osD2,setOsD2]=useState([]);
+  const [osD3,setOsD3]=useState([]);
   const [globalTssMap,setGlobalTssMap]=useState({}); // TSS→família de todo histórico
   const [loadingCarteira,setLoadingCarteira]=useState(true);
   const [uploadingEmRua,setUploadingEmRua]=useState(false);
@@ -1074,6 +1076,7 @@ function CarteiraView(){
   const [excludedCarteira,setExcludedCarteira]=useState(new Set());
   const [equipeModal,setEquipeModal]=useState(null); // {frente, equipes:[]}
   const [showAllEquipesModal,setShowAllEquipesModal]=useState(false);
+  const [naRuaModal,setNaRuaModal]=useState(null); // {label, rows:[{numero_os,tss,endereco,bairro,equipe}]}
   const emRuaInputRef=useRef();
 
   const toggleExcluded=useCallback((name)=>{
@@ -1092,13 +1095,15 @@ function CarteiraView(){
     (async()=>{
       setLoadingCarteira(true);
       try{
-        const [d2,d1,er,tssMap]=await Promise.all([
+        const [d3,d2,d1,er,tssMap]=await Promise.all([
+          fetchDiarioOS(diaD3),
           fetchDiarioOS(diaD2),
           fetchDiarioOS(diaD1),
           fetchEmRua(fmt(today)),  // EM RUA é sempre do dia atual
           fetchTssToFamiliaMap(),
         ]);
         // Filtrar TSS globalmente excluídas de todos os conjuntos
+        setOsD3(d3.filter(r=>!isGloballyExcludedTss(r.tss)));
         setOsD2(d2.filter(r=>!isGloballyExcludedTss(r.tss)));
         setOsD1(d1.filter(r=>!isGloballyExcludedTss(r.tss)));
         setEmRuaData(er.filter(r=>!isGloballyExcludedTss(r.tss)));
@@ -1106,7 +1111,7 @@ function CarteiraView(){
       }catch(e){console.error("Erro carteira:",e);flashEmRua("Erro ao carregar dados: "+e.message);}
       setLoadingCarteira(false);
     })();
-  },[diaD1,diaD2]);
+  },[diaD1,diaD2,diaD3]);
 
   // Handle EM RUA file import
   const handleEmRuaFile=useCallback(async(file)=>{
@@ -1125,11 +1130,30 @@ function CarteiraView(){
     setUploadingEmRua(false);
   },[diaD1]);
 
+  // Converter rawRows (pendente_os, campos do Excel) para formato normalizado (D-0)
+  const osD0=useMemo(()=>{
+    if(!rawRows) return [];
+    return rawRows.filter(r=>{
+      const tss=String(r["TSS"]||"").trim();
+      const fam=String(r["Família"]||"").trim();
+      if(EXCLUDED_DISPLAY.includes(fam)) return false;
+      if(EXCLUDED_TSS.includes(tss)) return false;
+      if(isGloballyExcludedTss(tss)) return false;
+      const atc=Number(r["ATC"]);
+      if(!VALID_ATCS.includes(atc)) return false;
+      return true;
+    }).map(r=>({
+      numero_os:String(r["Número OS"]||"").trim(),
+      familia:String(r["Família"]||"").trim(),
+      tss:String(r["TSS"]||"").trim(),
+    }));
+  },[rawRows]);
+
   // Compute carteira data by frente/TSS
   const carteiraData=useMemo(()=>{
-    // Mapa TSS→família: usa globalTssMap (todo histórico) + complementa com D-2/D-1
+    // Mapa TSS→família: usa globalTssMap (todo histórico) + complementa com D-3/D-2/D-1
     const globalTssToFamilia={...globalTssMap};
-    [...osD2,...osD1].forEach(r=>{
+    [...osD3,...osD2,...osD1].forEach(r=>{
       if(r.tss&&r.familia) globalTssToFamilia[norm(r.tss)]=r.familia;
     });
 
@@ -1179,24 +1203,38 @@ function CarteiraView(){
       };
 
       // FULL OS sets (para breakdowns com números completos)
+      const osD3Frente=osD3.filter(matchFn);
       const osD2Frente=osD2.filter(matchFn);
       const osD1Frente=osD1.filter(matchFn);
 
       // Coletar numero_os excluídos em QUALQUER dia — se a OS tem família/TSS excluído
-      // em D-2 OU D-1, remove de AMBOS os conjuntos para não distorcer novas/executadas
+      // em D-3, D-2 OU D-1, remove de TODOS os conjuntos para não distorcer novas/executadas
       const excludedOsNumbers=new Set();
-      [...osD2Frente,...osD1Frente].forEach(r=>{
+      [...osD3Frente,...osD2Frente,...osD1Frente].forEach(r=>{
         if(isOsExcluded(r)) excludedOsNumbers.add(r.numero_os);
       });
       // FILTERED OS sets (excluindo famílias/TSS ocultos) para métricas da frente
+      const osD3Filtered=osD3Frente.filter(r=>!excludedOsNumbers.has(r.numero_os));
       const osD2Filtered=osD2Frente.filter(r=>!excludedOsNumbers.has(r.numero_os));
       const osD1Filtered=osD1Frente.filter(r=>!excludedOsNumbers.has(r.numero_os));
+      const carteiraD3Count=osD3Filtered.length;
+      const setD3Frente=new Set(osD3Filtered.map(r=>r.numero_os));
       const carteiraD2Count=osD2Filtered.length;
       const setD2Frente=new Set(osD2Filtered.map(r=>r.numero_os));
       const setD1Frente=new Set(osD1Filtered.map(r=>r.numero_os));
+      // Novas/Exec D-3→D-2
+      const novasD3=osD2Filtered.filter(r=>!setD3Frente.has(r.numero_os)).length;
+      const execD3=osD3Filtered.filter(r=>!setD2Frente.has(r.numero_os)).length;
+      // Novas/Exec D-2→D-1
       const novas=osD1Filtered.filter(r=>!setD2Frente.has(r.numero_os)).length;
       const executadas=osD2Filtered.filter(r=>!setD1Frente.has(r.numero_os)).length;
       const carteiraD1Count=osD1Filtered.length;
+
+      // D-0 (pendente atual — mesmos dados da aba Pendentes)
+      const osD0Frente=osD0.filter(matchFn);
+      const osD0Filtered=osD0Frente.filter(r=>!excludedOsNumbers.has(r.numero_os)&&!isOsExcluded(r));
+      const carteiraD0Count=osD0Filtered.length;
+      const setD0Frente=new Set(osD0Filtered.map(r=>r.numero_os));
 
       // EM RUA FILTERED (para métricas da frente)
       const emRuaFrente=emRuaData.filter(r=>{
@@ -1211,7 +1249,11 @@ function CarteiraView(){
       const equipes=equipesSet.size;
       const equipesNomes=[...equipesSet].sort();
       const osEmCampo=emRuaFrente.length;
-      const pctEmCampo=carteiraD1Count>0?((osEmCampo/carteiraD1Count)*100):0;
+      // Separar EM RUA: OS que estão na Cart. D-0 vs extras
+      const naRuaRows=emRuaFrente.filter(r=>setD0Frente.has(r.numero_os));
+      const naRuaCarteira=naRuaRows.length;
+      const naRuaExtras=osEmCampo-naRuaCarteira;
+      const pctEmCampo=carteiraD0Count>0?((naRuaCarteira/carteiraD0Count)*100):0;
 
       // TSS breakdown (for ligação água) — usa dados FULL, marca excluídos
       let tssBreakdown=null;
@@ -1219,94 +1261,130 @@ function CarteiraView(){
         tssBreakdown=LIGACAO_AGUA_TSS.map(tssName=>{
           const tssNorm=norm(tssName);
           const excluded=excludedCarteira.has(tssNorm);
+          const d3Tss=osD3.filter(r=>norm(r.tss)===tssNorm);
           const d2Tss=osD2.filter(r=>norm(r.tss)===tssNorm);
           const d1Tss=osD1.filter(r=>norm(r.tss)===tssNorm);
+          const d3Count=d3Tss.length;
           const d2Count=d2Tss.length;
           const d1Count=d1Tss.length;
+          const setD3Tss=new Set(d3Tss.map(r=>r.numero_os));
           const setD2Tss=new Set(d2Tss.map(r=>r.numero_os));
           const setD1Tss=new Set(d1Tss.map(r=>r.numero_os));
+          const tssNovasD3=d2Tss.filter(r=>!setD3Tss.has(r.numero_os)).length;
+          const tssExecD3=d3Tss.filter(r=>!setD2Tss.has(r.numero_os)).length;
           const tssNovas=d1Tss.filter(r=>!setD2Tss.has(r.numero_os)).length;
           const tssExec=d2Tss.filter(r=>!setD1Tss.has(r.numero_os)).length;
+          const d0Tss=osD0.filter(r=>norm(r.tss)===tssNorm);
+          const d0Count=d0Tss.length;
+          const setD0Tss=new Set(d0Tss.map(r=>r.numero_os));
           const tssEmRua=emRuaData.filter(r=>norm(r.tss)===tssNorm);
           const tssEquipes=new Set(tssEmRua.map(r=>r.equipe).filter(Boolean)).size;
           const tssOsCampo=tssEmRua.length;
-          const tssPct=d1Count>0?((tssOsCampo/d1Count)*100):0;
-          return{tss:tssName,excluded,carteiraD2:d2Count,novas:tssNovas,executadas:tssExec,carteiraD1:d1Count,equipes:tssEquipes,osCampo:tssOsCampo,pctCampo:tssPct};
-        }).filter(t=>t.carteiraD2>0||t.carteiraD1>0||t.osCampo>0);
+          const tssNaRuaRows=tssEmRua.filter(r=>setD0Tss.has(r.numero_os));
+          const tssNaRuaCart=tssNaRuaRows.length;
+          const tssNaRuaExtras=tssOsCampo-tssNaRuaCart;
+          const tssPct=d0Count>0?((tssNaRuaCart/d0Count)*100):0;
+          return{tss:tssName,excluded,carteiraD3:d3Count,novasD3:tssNovasD3,execD3:tssExecD3,carteiraD2:d2Count,novas:tssNovas,executadas:tssExec,carteiraD1:d1Count,carteiraD0:d0Count,equipes:tssEquipes,osCampo:tssOsCampo,naRuaCarteira:tssNaRuaCart,naRuaRows:tssNaRuaRows,naRuaExtras:tssNaRuaExtras,pctCampo:tssPct};
+        }).filter(t=>t.carteiraD3>0||t.carteiraD2>0||t.carteiraD1>0||t.osCampo>0);
       }
 
       // Família breakdown com TSS aninhado (para frentes com famílias definidas) — usa dados FULL
       let familiaBreakdown=null;
       if(frenteFamilias){
         const tssToFamilia={};
-        [...osD2Frente,...osD1Frente].forEach(r=>{
+        [...osD3Frente,...osD2Frente,...osD1Frente].forEach(r=>{
           if(r.tss&&r.familia) tssToFamilia[norm(r.tss)]=norm(r.familia);
         });
 
         familiaBreakdown=frenteFamilias.map(famName=>{
           const famNorm=norm(famName);
           const famExcluded=excludedCarteira.has(famNorm);
+          const d3Fam=osD3.filter(r=>norm(r.familia)===famNorm);
           const d2Fam=osD2.filter(r=>norm(r.familia)===famNorm);
           const d1Fam=osD1.filter(r=>norm(r.familia)===famNorm);
+          const d3Count=d3Fam.length;
           const d2Count=d2Fam.length;
           const d1Count=d1Fam.length;
+          const setD3Fam=new Set(d3Fam.map(r=>r.numero_os));
           const setD2Fam=new Set(d2Fam.map(r=>r.numero_os));
           const setD1Fam=new Set(d1Fam.map(r=>r.numero_os));
+          const famNovasD3=d2Fam.filter(r=>!setD3Fam.has(r.numero_os)).length;
+          const famExecD3=d3Fam.filter(r=>!setD2Fam.has(r.numero_os)).length;
           const famNovas=d1Fam.filter(r=>!setD2Fam.has(r.numero_os)).length;
           const famExec=d2Fam.filter(r=>!setD1Fam.has(r.numero_os)).length;
+          const d0Fam=osD0.filter(r=>norm(r.familia)===famNorm);
+          const d0Count=d0Fam.length;
+          const setD0Fam=new Set(d0Fam.map(r=>r.numero_os));
           const emRuaFam=emRuaData.filter(r=>{
             const tFam=tssToFamilia[norm(r.tss||"")];
             return tFam===famNorm;
           });
           const famEquipes=new Set(emRuaFam.map(r=>r.equipe).filter(Boolean)).size;
           const famOsCampo=emRuaFam.length;
-          const famPct=d1Count>0?((famOsCampo/d1Count)*100):0;
+          const famNaRuaRows=emRuaFam.filter(r=>setD0Fam.has(r.numero_os));
+          const famNaRuaCart=famNaRuaRows.length;
+          const famNaRuaExtras=famOsCampo-famNaRuaCart;
+          const famPct=d0Count>0?((famNaRuaCart/d0Count)*100):0;
 
           // TSS dentro desta família
           const tssSet=new Set();
-          [...d2Fam,...d1Fam,...emRuaFam].forEach(r=>{if(r.tss)tssSet.add(norm(r.tss));});
+          [...d3Fam,...d2Fam,...d1Fam,...emRuaFam].forEach(r=>{if(r.tss)tssSet.add(norm(r.tss));});
           const tssNames=[...tssSet].sort();
           const famTssBreakdown=tssNames.map(tssNorm=>{
             const tssExcluded=famExcluded||excludedCarteira.has(tssNorm);
+            const d3Tss=d3Fam.filter(r=>norm(r.tss)===tssNorm);
             const d2Tss=d2Fam.filter(r=>norm(r.tss)===tssNorm);
             const d1Tss=d1Fam.filter(r=>norm(r.tss)===tssNorm);
+            const td3=d3Tss.length;
             const td2=d2Tss.length;
             const td1=d1Tss.length;
+            const sD3=new Set(d3Tss.map(r=>r.numero_os));
             const sD2=new Set(d2Tss.map(r=>r.numero_os));
             const sD1=new Set(d1Tss.map(r=>r.numero_os));
+            const tNovasD3=d2Tss.filter(r=>!sD3.has(r.numero_os)).length;
+            const tExecD3=d3Tss.filter(r=>!sD2.has(r.numero_os)).length;
             const tNovas=d1Tss.filter(r=>!sD2.has(r.numero_os)).length;
             const tExec=d2Tss.filter(r=>!sD1.has(r.numero_os)).length;
+            const td0Tss=d0Fam.filter(r=>norm(r.tss)===tssNorm);
+            const td0=td0Tss.length;
+            const sD0=new Set(td0Tss.map(r=>r.numero_os));
             const tEmRua=emRuaFam.filter(r=>norm(r.tss||"")===tssNorm);
             const tEquipes=new Set(tEmRua.map(r=>r.equipe).filter(Boolean)).size;
             const tOsCampo=tEmRua.length;
-            const tPct=td1>0?((tOsCampo/td1)*100):0;
+            const tNaRuaRows=tEmRua.filter(r=>sD0.has(r.numero_os));
+            const tNaRuaCart=tNaRuaRows.length;
+            const tNaRuaExtras=tOsCampo-tNaRuaCart;
+            const tPct=td0>0?((tNaRuaCart/td0)*100):0;
             const origRec=[...d2Fam,...d1Fam,...emRuaFam].find(r=>norm(r.tss)===tssNorm);
             const tssLabel=origRec?origRec.tss:tssNorm;
-            return{tss:tssLabel,excluded:tssExcluded,carteiraD2:td2,novas:tNovas,executadas:tExec,carteiraD1:td1,equipes:tEquipes,osCampo:tOsCampo,pctCampo:tPct};
-          }).filter(t=>t.carteiraD2>0||t.carteiraD1>0||t.osCampo>0);
+            return{tss:tssLabel,excluded:tssExcluded,carteiraD3:td3,novasD3:tNovasD3,execD3:tExecD3,carteiraD2:td2,novas:tNovas,executadas:tExec,carteiraD1:td1,carteiraD0:td0,equipes:tEquipes,osCampo:tOsCampo,naRuaCarteira:tNaRuaCart,naRuaRows:tNaRuaRows,naRuaExtras:tNaRuaExtras,pctCampo:tPct};
+          }).filter(t=>t.carteiraD3>0||t.carteiraD2>0||t.carteiraD1>0||t.osCampo>0);
 
-          return{familia:famName,excluded:famExcluded,carteiraD2:d2Count,novas:famNovas,executadas:famExec,carteiraD1:d1Count,equipes:famEquipes,osCampo:famOsCampo,pctCampo:famPct,tssBreakdown:famTssBreakdown};
-        }).filter(f=>f.carteiraD2>0||f.carteiraD1>0||f.osCampo>0);
+          return{familia:famName,excluded:famExcluded,carteiraD3:d3Count,novasD3:famNovasD3,execD3:famExecD3,carteiraD2:d2Count,novas:famNovas,executadas:famExec,carteiraD1:d1Count,carteiraD0:d0Count,equipes:famEquipes,osCampo:famOsCampo,naRuaCarteira:famNaRuaCart,naRuaRows:famNaRuaRows,naRuaExtras:famNaRuaExtras,pctCampo:famPct,tssBreakdown:famTssBreakdown};
+        }).filter(f=>f.carteiraD3>0||f.carteiraD2>0||f.carteiraD1>0||f.osCampo>0);
       }
 
-      return{frente:frenteName,carteiraD2:carteiraD2Count,novas,executadas,carteiraD1:carteiraD1Count,equipes,equipesNomes,osCampo:osEmCampo,pctCampo:pctEmCampo,tssBreakdown,familiaBreakdown};
+      return{frente:frenteName,carteiraD3:carteiraD3Count,novasD3,execD3,carteiraD2:carteiraD2Count,novas,executadas,carteiraD1:carteiraD1Count,carteiraD0:carteiraD0Count,equipes,equipesNomes,osCampo:osEmCampo,naRuaCarteira,naRuaRows,naRuaExtras,pctCampo:pctEmCampo,tssBreakdown,familiaBreakdown};
     });
-  },[osD2,osD1,emRuaData,excludedCarteira,globalTssMap]);
+  },[osD3,osD2,osD1,osD0,emRuaData,excludedCarteira,globalTssMap]);
 
   // Totals
   const totals=useMemo(()=>carteiraData.reduce((acc,r)=>({
+    carteiraD3:acc.carteiraD3+r.carteiraD3,novasD3:acc.novasD3+r.novasD3,execD3:acc.execD3+r.execD3,
     carteiraD2:acc.carteiraD2+r.carteiraD2,novas:acc.novas+r.novas,executadas:acc.executadas+r.executadas,
-    carteiraD1:acc.carteiraD1+r.carteiraD1,equipes:acc.equipes+r.equipes,osCampo:acc.osCampo+r.osCampo,
-  }),{carteiraD2:0,novas:0,executadas:0,carteiraD1:0,equipes:0,osCampo:0}),[carteiraData]);
-  const totalPct=totals.carteiraD1>0?((totals.osCampo/totals.carteiraD1)*100):0;
+    carteiraD1:acc.carteiraD1+r.carteiraD1,carteiraD0:acc.carteiraD0+r.carteiraD0,equipes:acc.equipes+r.equipes,
+    osCampo:acc.osCampo+r.osCampo,naRuaCarteira:acc.naRuaCarteira+r.naRuaCarteira,naRuaExtras:acc.naRuaExtras+r.naRuaExtras,
+  }),{carteiraD3:0,novasD3:0,execD3:0,carteiraD2:0,novas:0,executadas:0,carteiraD1:0,carteiraD0:0,equipes:0,osCampo:0,naRuaCarteira:0,naRuaExtras:0}),[carteiraData]);
+  const totalPct=totals.carteiraD0>0?((totals.naRuaCarteira/totals.carteiraD0)*100):0;
 
-  const cellStyle={padding:"12px 14px",borderBottom:`1px solid ${C.border}`,textAlign:"center",fontVariantNumeric:"tabular-nums",fontSize:14};
-  const hdrCell={padding:"10px 14px",textAlign:"center",fontSize:11,fontWeight:700,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,borderBottom:`2px solid rgba(100,116,139,0.4)`,whiteSpace:"nowrap"};
+  const cellStyle={padding:"8px 4px",borderBottom:`1px solid ${C.border}`,textAlign:"center",fontVariantNumeric:"tabular-nums",fontSize:12};
+  const hdrCell={padding:"6px 3px",textAlign:"center",fontSize:9,fontWeight:700,color:C.textDim,textTransform:"uppercase",letterSpacing:0.3,borderBottom:`2px solid rgba(100,116,139,0.4)`,whiteSpace:"nowrap"};
   // Divisores espessos entre grupos de colunas
   const colDiv="2px solid rgba(100,116,139,0.4)";
   // Tints sutis por grupo (dark theme friendly)
-  const grpD2={bg:"rgba(220,80,80,0.04)",hdr:"rgba(220,80,80,0.10)"};
-  const grpMov={bg:"rgba(245,158,11,0.04)",hdr:"rgba(245,158,11,0.10)"};
+  const grpD3={bg:"rgba(148,163,184,0.04)",hdr:"rgba(148,163,184,0.10)"};
+  const grpMov1={bg:"rgba(220,80,80,0.04)",hdr:"rgba(220,80,80,0.10)"}; // D-3→D-2
+  const grpMov2={bg:"rgba(245,158,11,0.04)",hdr:"rgba(245,158,11,0.10)"}; // D-2→D-1
   const grpCampo={bg:"rgba(16,185,129,0.04)",hdr:"rgba(16,185,129,0.10)"};
 
   return <div style={{animation:"fadeIn 0.35s ease"}}>
@@ -1316,6 +1394,8 @@ function CarteiraView(){
     {/* Header com seleção de datas e importação */}
     <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 16px",background:C.card,borderRadius:10,border:`1px solid ${C.border}`,marginBottom:16,flexWrap:"wrap",gap:10}}>
       <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+        <span style={{fontSize:12,color:C.textDim,fontWeight:600}}>D-3:</span>
+        <input type="date" value={diaD3} onChange={e=>setDiaD3(e.target.value)} style={dateInputStyle}/>
         <span style={{fontSize:12,color:C.textDim,fontWeight:600}}>D-2:</span>
         <input type="date" value={diaD2} onChange={e=>setDiaD2(e.target.value)} style={dateInputStyle}/>
         <span style={{fontSize:12,color:C.textDim,fontWeight:600}}>D-1:</span>
@@ -1333,14 +1413,14 @@ function CarteiraView(){
 
     {/* Summary cards */}
     <div style={{display:"flex",gap:12,marginBottom:16,flexWrap:"wrap"}}>
-      <SummaryCard label={`Carteira ${fmtDiaShort(diaD2)}`} value={totals.carteiraD2} color={C.accent} icon="📋"/>
-      <SummaryCard label="OS Novas" value={totals.novas} color={C.amber} icon="🆕"/>
-      <SummaryCard label="Executadas" value={totals.executadas} color={C.green} icon="✅"/>
-      <SummaryCard label={`Carteira ${fmtDiaShort(diaD1)}`} value={totals.carteiraD1} color={C.accent} icon="📊"/>
+      <SummaryCard label={`Cart. ${fmtDiaShort(diaD3)}`} value={totals.carteiraD3} color={C.accent} icon="📋"/>
+      <SummaryCard label={`Cart. ${fmtDiaShort(diaD2)}`} value={totals.carteiraD2} color={C.accent} icon="📊"/>
+      <SummaryCard label={`Cart. ${fmtDiaShort(diaD1)}`} value={totals.carteiraD1} color={C.accent} icon="📈"/>
+      <SummaryCard label="Cart. Atual" value={totals.carteiraD0} color="#6366f1" icon="📌"/>
     </div>
     <div style={{display:"flex",gap:12,marginBottom:16,flexWrap:"wrap"}}>
       <SummaryCard label="Equipes" value={totals.equipes} color="#8b5cf6" icon="👷" onClick={()=>setShowAllEquipesModal(true)}/>
-      <SummaryCard label="OS em Campo" value={totals.osCampo} color={C.green} icon="🚧"/>
+      <SummaryCard label="Na Rua" value={totals.naRuaCarteira} color={C.green} icon="🚧" onClick={()=>{const allRows=carteiraData.flatMap(r=>r.naRuaRows||[]);if(allRows.length>0)setNaRuaModal({label:"TOTAL",rows:allRows});}}/>
       <div style={{flex:1,minWidth:120,background:C.card,borderRadius:14,padding:"16px 18px",border:`1px solid ${C.border}`,display:"flex",flexDirection:"column",gap:4}}>
         <span style={{fontSize:11,color:C.textDim,letterSpacing:0.5,textTransform:"uppercase"}}>% em Campo</span>
         <div style={{display:"flex",alignItems:"baseline",gap:6}}>
@@ -1384,18 +1464,62 @@ function CarteiraView(){
       </div>
     </div>}
 
+    {/* Modal Na Rua (OS em campo) */}
+    {naRuaModal&&<div onClick={()=>setNaRuaModal(null)} style={{position:"fixed",inset:0,zIndex:3000,background:"rgba(0,0,0,0.6)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",animation:"fadeIn 0.15s ease"}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:14,border:`1px solid ${C.border}`,padding:"24px 28px",minWidth:360,maxWidth:"90vw",width:700,maxHeight:"80vh",display:"flex",flexDirection:"column",gap:12,boxShadow:"0 20px 60px rgba(0,0,0,0.5)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <h3 style={{margin:0,fontSize:16,fontWeight:700}}>Na Rua — {naRuaModal.label} <span style={{fontSize:13,fontWeight:400,color:C.textDim}}>({naRuaModal.rows.length} OS)</span></h3>
+          <button onClick={()=>setNaRuaModal(null)} style={{background:"none",border:"none",color:C.textDim,fontSize:20,cursor:"pointer",padding:"0 4px",lineHeight:1}}>✕</button>
+        </div>
+        <div style={{overflowY:"auto",flex:1}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+            <thead><tr style={{background:C.headerBg}}>
+              <th style={{padding:"8px 10px",textAlign:"left",color:C.textDim,fontWeight:700,fontSize:10,textTransform:"uppercase",borderBottom:`2px solid ${C.border}`}}>Nº OS</th>
+              <th style={{padding:"8px 10px",textAlign:"left",color:C.textDim,fontWeight:700,fontSize:10,textTransform:"uppercase",borderBottom:`2px solid ${C.border}`}}>TSS</th>
+              <th style={{padding:"8px 10px",textAlign:"left",color:C.textDim,fontWeight:700,fontSize:10,textTransform:"uppercase",borderBottom:`2px solid ${C.border}`}}>Endereço</th>
+              <th style={{padding:"8px 10px",textAlign:"left",color:C.textDim,fontWeight:700,fontSize:10,textTransform:"uppercase",borderBottom:`2px solid ${C.border}`}}>Equipe</th>
+            </tr></thead>
+            <tbody>{naRuaModal.rows.map((r,i)=><tr key={i} style={{background:i%2?"rgba(15,23,42,0.4)":"transparent"}}>
+              <td style={{padding:"6px 10px",borderBottom:`1px solid ${C.border}`,color:C.text,fontWeight:600,whiteSpace:"nowrap"}}>{r.numero_os}</td>
+              <td style={{padding:"6px 10px",borderBottom:`1px solid ${C.border}`,color:C.textMuted,fontSize:11}}>{r.tss||"—"}</td>
+              <td style={{padding:"6px 10px",borderBottom:`1px solid ${C.border}`,color:C.textMuted,fontSize:11}}>{[r.endereco,r.bairro].filter(Boolean).join(", ")||"—"}</td>
+              <td style={{padding:"6px 10px",borderBottom:`1px solid ${C.border}`,color:"#8b5cf6",fontWeight:600,fontSize:11,whiteSpace:"nowrap"}}>{r.equipe||"—"}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>}
+
     {loadingCarteira?<div style={{padding:40,textAlign:"center",color:C.textDim}}>Carregando dados da carteira...</div>:
     <div style={{background:C.card,borderRadius:14,border:`1px solid ${C.border}`,overflow:"hidden"}}>
-      <div style={{overflowX:"auto"}}>
-        <table style={{width:"100%",borderCollapse:"collapse",minWidth:800}}>
+      <div>
+        <table style={{width:"100%",borderCollapse:"collapse",tableLayout:"fixed"}}>
+          <colgroup>
+            <col style={{width:"16%"}}/>
+            <col style={{width:"7%"}}/>
+            <col style={{width:"5.5%"}}/>
+            <col style={{width:"5.5%"}}/>
+            <col style={{width:"7%"}}/>
+            <col style={{width:"5.5%"}}/>
+            <col style={{width:"5.5%"}}/>
+            <col style={{width:"7%"}}/>
+            <col style={{width:"8%"}}/>
+            <col style={{width:"7%"}}/>
+            <col style={{width:"7%"}}/>
+            <col style={{width:"7%"}}/>
+          </colgroup>
           <thead><tr style={{background:C.headerBg}}>
-            <th style={{...hdrCell,textAlign:"left",paddingLeft:16,borderRight:colDiv}}>Frente / TSS</th>
-            <th style={{...hdrCell,background:grpD2.hdr,borderRight:colDiv}}>Cart. {fmtDiaShort(diaD2)}</th>
-            <th style={{...hdrCell,background:grpMov.hdr}}>Novas</th>
-            <th style={{...hdrCell,background:grpMov.hdr}}>Executadas</th>
-            <th style={{...hdrCell,background:grpMov.hdr,borderRight:colDiv}}>Cart. {fmtDiaShort(diaD1)}</th>
+            <th style={{...hdrCell,textAlign:"left",paddingLeft:10,borderRight:colDiv}}>Frente / TSS</th>
+            <th style={{...hdrCell,background:grpD3.hdr,borderRight:colDiv}}>Cart. {fmtDiaShort(diaD3)}</th>
+            <th style={{...hdrCell,background:grpMov1.hdr}}>Novas</th>
+            <th style={{...hdrCell,background:grpMov1.hdr}}>Exec.</th>
+            <th style={{...hdrCell,background:grpMov1.hdr,borderRight:colDiv}}>Cart. {fmtDiaShort(diaD2)}</th>
+            <th style={{...hdrCell,background:grpMov2.hdr}}>Novas</th>
+            <th style={{...hdrCell,background:grpMov2.hdr}}>Exec.</th>
+            <th style={{...hdrCell,background:grpMov2.hdr,borderRight:colDiv}}>Cart. {fmtDiaShort(diaD1)}</th>
+            <th style={{...hdrCell,background:"rgba(99,102,241,0.10)",borderRight:colDiv}}>Cart. Atual</th>
             <th style={{...hdrCell,background:grpCampo.hdr}}>Equipes</th>
-            <th style={{...hdrCell,background:grpCampo.hdr}}>OS Campo</th>
+            <th style={{...hdrCell,background:grpCampo.hdr}}>Na Rua</th>
             <th style={{...hdrCell,background:grpCampo.hdr}}>% Campo</th>
           </tr></thead>
           <tbody>
@@ -1414,13 +1538,18 @@ function CarteiraView(){
                       {row.frente}
                     </div>
                   </td>
-                  <td style={{...cellStyle,background:grpD2.bg,borderRight:colDiv}}>{row.carteiraD2}</td>
-                  <td style={{...cellStyle,background:grpMov.bg,color:row.novas>0?C.amber:C.textDim,fontWeight:row.novas>0?700:400}}>{row.novas>0?"+"+row.novas:"0"}</td>
-                  <td style={{...cellStyle,background:grpMov.bg,color:row.executadas>0?C.green:C.textDim,fontWeight:row.executadas>0?700:400}}>{row.executadas>0?"-"+row.executadas:"0"}</td>
-                  <td style={{...cellStyle,background:grpMov.bg,fontWeight:700,borderRight:colDiv}}>{row.carteiraD1}</td>
+                  <td style={{...cellStyle,background:grpD3.bg,borderRight:colDiv}}>{row.carteiraD3}</td>
+                  <td style={{...cellStyle,background:grpMov1.bg,color:row.novasD3>0?C.amber:C.textDim,fontWeight:row.novasD3>0?700:400}}>{row.novasD3>0?"+"+row.novasD3:"0"}</td>
+                  <td style={{...cellStyle,background:grpMov1.bg,color:row.execD3>0?C.green:C.textDim,fontWeight:row.execD3>0?700:400}}>{row.execD3>0?"-"+row.execD3:"0"}</td>
+                  <td style={{...cellStyle,background:grpMov1.bg,fontWeight:700,borderRight:colDiv}}>{row.carteiraD2}</td>
+                  <td style={{...cellStyle,background:grpMov2.bg,color:row.novas>0?C.amber:C.textDim,fontWeight:row.novas>0?700:400}}>{row.novas>0?"+"+row.novas:"0"}</td>
+                  <td style={{...cellStyle,background:grpMov2.bg,color:row.executadas>0?C.green:C.textDim,fontWeight:row.executadas>0?700:400}}>{row.executadas>0?"-"+row.executadas:"0"}</td>
+                  <td style={{...cellStyle,background:grpMov2.bg,fontWeight:700,borderRight:colDiv}}>{row.carteiraD1}</td>
+                  <td style={{...cellStyle,background:"rgba(99,102,241,0.04)",fontWeight:700,color:"#6366f1",borderRight:colDiv}}>{row.carteiraD0}</td>
                   <td onClick={e=>{e.stopPropagation();if(row.equipesNomes&&row.equipesNomes.length>0)setEquipeModal({frente:row.frente,equipes:row.equipesNomes});}}
                     style={{...cellStyle,background:grpCampo.bg,color:"#8b5cf6",fontWeight:600,cursor:row.equipes>0?"pointer":"default",textDecoration:row.equipes>0?"underline":"none",textUnderlineOffset:3}}>{row.equipes||"—"}</td>
-                  <td style={{...cellStyle,background:grpCampo.bg,color:C.green,fontWeight:600}}>{row.osCampo||"—"}</td>
+                  <td onClick={e=>{e.stopPropagation();if(row.naRuaRows&&row.naRuaRows.length>0)setNaRuaModal({label:row.frente,rows:row.naRuaRows});}}
+                    style={{...cellStyle,background:grpCampo.bg,color:C.green,fontWeight:600,cursor:row.naRuaCarteira>0?"pointer":"default",textDecoration:row.naRuaCarteira>0?"underline":"none",textUnderlineOffset:3}}>{row.naRuaCarteira||"—"}</td>
                   <td style={{...cellStyle,background:grpCampo.bg}}>
                     <span style={{padding:"3px 10px",borderRadius:6,fontSize:12,fontWeight:700,
                       color:row.pctCampo>=70?C.green:row.pctCampo>=40?C.amber:C.red,
@@ -1435,14 +1564,19 @@ function CarteiraView(){
                     <td onClick={e=>{e.stopPropagation();toggleExcluded(t.tss);}}
                       style={{padding:"8px 16px 8px 44px",borderBottom:`1px solid ${C.border}`,borderRight:colDiv,fontSize:12,color:C.textMuted,cursor:"pointer",textDecoration:t.excluded?"line-through":"none",userSelect:"none"}}
                       title={t.excluded?"Clique para incluir":"Clique para excluir"}>{t.tss}</td>
-                    <td style={{...cellStyle,fontSize:12,color:C.textMuted,background:grpD2.bg,borderRight:colDiv}}>{t.carteiraD2}</td>
-                    <td style={{...cellStyle,fontSize:12,color:t.novas>0?C.amber:C.textDim,background:grpMov.bg}}>{t.novas>0?"+"+t.novas:"0"}</td>
-                    <td style={{...cellStyle,fontSize:12,color:t.executadas>0?C.green:C.textDim,background:grpMov.bg}}>{t.executadas>0?"-"+t.executadas:"0"}</td>
-                    <td style={{...cellStyle,fontSize:12,fontWeight:600,background:grpMov.bg,borderRight:colDiv}}>{t.carteiraD1}</td>
-                    <td style={{...cellStyle,fontSize:12,color:"#8b5cf6",background:grpCampo.bg}}>{t.equipes||"—"}</td>
-                    <td style={{...cellStyle,fontSize:12,color:C.green,background:grpCampo.bg}}>{t.osCampo||"—"}</td>
-                    <td style={{...cellStyle,fontSize:12,background:grpCampo.bg}}>
-                      <span style={{padding:"2px 8px",borderRadius:5,fontSize:11,fontWeight:600,
+                    <td style={{...cellStyle,fontSize:11,color:C.textMuted,background:grpD3.bg,borderRight:colDiv}}>{t.carteiraD3}</td>
+                    <td style={{...cellStyle,fontSize:11,color:t.novasD3>0?C.amber:C.textDim,background:grpMov1.bg}}>{t.novasD3>0?"+"+t.novasD3:"0"}</td>
+                    <td style={{...cellStyle,fontSize:11,color:t.execD3>0?C.green:C.textDim,background:grpMov1.bg}}>{t.execD3>0?"-"+t.execD3:"0"}</td>
+                    <td style={{...cellStyle,fontSize:11,fontWeight:600,background:grpMov1.bg,borderRight:colDiv}}>{t.carteiraD2}</td>
+                    <td style={{...cellStyle,fontSize:11,color:t.novas>0?C.amber:C.textDim,background:grpMov2.bg}}>{t.novas>0?"+"+t.novas:"0"}</td>
+                    <td style={{...cellStyle,fontSize:11,color:t.executadas>0?C.green:C.textDim,background:grpMov2.bg}}>{t.executadas>0?"-"+t.executadas:"0"}</td>
+                    <td style={{...cellStyle,fontSize:11,fontWeight:600,background:grpMov2.bg,borderRight:colDiv}}>{t.carteiraD1}</td>
+                    <td style={{...cellStyle,fontSize:11,fontWeight:600,color:"#6366f1",background:"rgba(99,102,241,0.04)",borderRight:colDiv}}>{t.carteiraD0}</td>
+                    <td style={{...cellStyle,fontSize:11,color:"#8b5cf6",background:grpCampo.bg}}>{t.equipes||"—"}</td>
+                    <td onClick={e=>{e.stopPropagation();if(t.naRuaRows&&t.naRuaRows.length>0)setNaRuaModal({label:t.tss,rows:t.naRuaRows});}}
+                      style={{...cellStyle,fontSize:11,color:C.green,background:grpCampo.bg,cursor:t.naRuaCarteira>0?"pointer":"default",textDecoration:t.naRuaCarteira>0?"underline":"none",textUnderlineOffset:3}}>{t.naRuaCarteira||"—"}</td>
+                    <td style={{...cellStyle,fontSize:11,background:grpCampo.bg}}>
+                      <span style={{padding:"2px 6px",borderRadius:5,fontSize:10,fontWeight:600,
                         color:t.pctCampo>=70?C.green:t.pctCampo>=40?C.amber:C.red,
                         background:t.pctCampo>=70?C.greenBg:t.pctCampo>=40?C.amberBg:C.redBg,
                       }}>{t.pctCampo.toFixed(1)}%</span>
@@ -1465,12 +1599,17 @@ function CarteiraView(){
                             title={fam.excluded?"Clique para incluir":"Clique para excluir"}>{fam.familia}</span>
                         </div>
                       </td>
-                      <td style={{...cellStyle,fontSize:12,background:grpD2.bg,borderRight:colDiv}}>{fam.carteiraD2}</td>
-                      <td style={{...cellStyle,fontSize:12,color:fam.novas>0?C.amber:C.textDim,background:grpMov.bg}}>{fam.novas>0?"+"+fam.novas:"0"}</td>
-                      <td style={{...cellStyle,fontSize:12,color:fam.executadas>0?C.green:C.textDim,background:grpMov.bg}}>{fam.executadas>0?"-"+fam.executadas:"0"}</td>
-                      <td style={{...cellStyle,fontSize:12,fontWeight:600,background:grpMov.bg,borderRight:colDiv}}>{fam.carteiraD1}</td>
+                      <td style={{...cellStyle,fontSize:11,background:grpD3.bg,borderRight:colDiv}}>{fam.carteiraD3}</td>
+                      <td style={{...cellStyle,fontSize:11,color:fam.novasD3>0?C.amber:C.textDim,background:grpMov1.bg}}>{fam.novasD3>0?"+"+fam.novasD3:"0"}</td>
+                      <td style={{...cellStyle,fontSize:11,color:fam.execD3>0?C.green:C.textDim,background:grpMov1.bg}}>{fam.execD3>0?"-"+fam.execD3:"0"}</td>
+                      <td style={{...cellStyle,fontSize:11,fontWeight:600,background:grpMov1.bg,borderRight:colDiv}}>{fam.carteiraD2}</td>
+                      <td style={{...cellStyle,fontSize:11,color:fam.novas>0?C.amber:C.textDim,background:grpMov2.bg}}>{fam.novas>0?"+"+fam.novas:"0"}</td>
+                      <td style={{...cellStyle,fontSize:11,color:fam.executadas>0?C.green:C.textDim,background:grpMov2.bg}}>{fam.executadas>0?"-"+fam.executadas:"0"}</td>
+                      <td style={{...cellStyle,fontSize:11,fontWeight:600,background:grpMov2.bg,borderRight:colDiv}}>{fam.carteiraD1}</td>
+                      <td style={{...cellStyle,fontSize:11,fontWeight:600,color:"#6366f1",background:"rgba(99,102,241,0.04)",borderRight:colDiv}}>{fam.carteiraD0}</td>
                       <td style={{...cellStyle,fontSize:12,color:"#8b5cf6",background:grpCampo.bg}}>{fam.equipes||"—"}</td>
-                      <td style={{...cellStyle,fontSize:12,color:C.green,background:grpCampo.bg}}>{fam.osCampo||"—"}</td>
+                      <td onClick={e=>{e.stopPropagation();if(fam.naRuaRows&&fam.naRuaRows.length>0)setNaRuaModal({label:fam.familia,rows:fam.naRuaRows});}}
+                        style={{...cellStyle,fontSize:12,color:C.green,background:grpCampo.bg,cursor:fam.naRuaCarteira>0?"pointer":"default",textDecoration:fam.naRuaCarteira>0?"underline":"none",textUnderlineOffset:3}}>{fam.naRuaCarteira||"—"}</td>
                       <td style={{...cellStyle,fontSize:12,background:grpCampo.bg}}>
                         <span style={{padding:"2px 8px",borderRadius:5,fontSize:11,fontWeight:600,
                           color:fam.pctCampo>=70?C.green:fam.pctCampo>=40?C.amber:C.red,
@@ -1484,12 +1623,17 @@ function CarteiraView(){
                         <td onClick={e=>{e.stopPropagation();toggleExcluded(t.tss);}}
                           style={{padding:"6px 16px 6px 64px",borderBottom:`1px solid ${C.border}`,borderRight:colDiv,fontSize:11,color:C.textDim,cursor:"pointer",textDecoration:t.excluded?"line-through":"none",userSelect:"none"}}
                           title={t.excluded?"Clique para incluir":"Clique para excluir"}>{t.tss}</td>
-                        <td style={{...cellStyle,fontSize:11,color:C.textDim,background:grpD2.bg,borderRight:colDiv}}>{t.carteiraD2}</td>
-                        <td style={{...cellStyle,fontSize:11,color:t.novas>0?C.amber:C.textDim,background:grpMov.bg}}>{t.novas>0?"+"+t.novas:"0"}</td>
-                        <td style={{...cellStyle,fontSize:11,color:t.executadas>0?C.green:C.textDim,background:grpMov.bg}}>{t.executadas>0?"-"+t.executadas:"0"}</td>
-                        <td style={{...cellStyle,fontSize:11,fontWeight:600,background:grpMov.bg,borderRight:colDiv}}>{t.carteiraD1}</td>
+                        <td style={{...cellStyle,fontSize:11,color:C.textDim,background:grpD3.bg,borderRight:colDiv}}>{t.carteiraD3}</td>
+                        <td style={{...cellStyle,fontSize:11,color:t.novasD3>0?C.amber:C.textDim,background:grpMov1.bg}}>{t.novasD3>0?"+"+t.novasD3:"0"}</td>
+                        <td style={{...cellStyle,fontSize:11,color:t.execD3>0?C.green:C.textDim,background:grpMov1.bg}}>{t.execD3>0?"-"+t.execD3:"0"}</td>
+                        <td style={{...cellStyle,fontSize:11,fontWeight:600,background:grpMov1.bg,borderRight:colDiv}}>{t.carteiraD2}</td>
+                        <td style={{...cellStyle,fontSize:11,color:t.novas>0?C.amber:C.textDim,background:grpMov2.bg}}>{t.novas>0?"+"+t.novas:"0"}</td>
+                        <td style={{...cellStyle,fontSize:11,color:t.executadas>0?C.green:C.textDim,background:grpMov2.bg}}>{t.executadas>0?"-"+t.executadas:"0"}</td>
+                        <td style={{...cellStyle,fontSize:11,fontWeight:600,background:grpMov2.bg,borderRight:colDiv}}>{t.carteiraD1}</td>
+                        <td style={{...cellStyle,fontSize:11,fontWeight:600,color:"#6366f1",background:"rgba(99,102,241,0.04)",borderRight:colDiv}}>{t.carteiraD0}</td>
                         <td style={{...cellStyle,fontSize:11,color:"#8b5cf6",background:grpCampo.bg}}>{t.equipes||"—"}</td>
-                        <td style={{...cellStyle,fontSize:11,color:C.green,background:grpCampo.bg}}>{t.osCampo||"—"}</td>
+                        <td onClick={e=>{e.stopPropagation();if(t.naRuaRows&&t.naRuaRows.length>0)setNaRuaModal({label:t.tss,rows:t.naRuaRows});}}
+                          style={{...cellStyle,fontSize:11,color:C.green,background:grpCampo.bg,cursor:t.naRuaCarteira>0?"pointer":"default",textDecoration:t.naRuaCarteira>0?"underline":"none",textUnderlineOffset:3}}>{t.naRuaCarteira||"—"}</td>
                         <td style={{...cellStyle,fontSize:11,background:grpCampo.bg}}>
                           <span style={{padding:"2px 6px",borderRadius:4,fontSize:10,fontWeight:600,
                             color:t.pctCampo>=70?C.green:t.pctCampo>=40?C.amber:C.red,
@@ -1505,12 +1649,17 @@ function CarteiraView(){
             {/* Total row */}
             <tr style={{background:C.headerBg,fontWeight:800}}>
               <td style={{padding:"14px 16px",borderTop:`2px solid ${C.accent}`,borderRight:colDiv,fontSize:14}}>TOTAL</td>
-              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,background:grpD2.bg,borderRight:colDiv}}>{totals.carteiraD2}</td>
-              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.amber,background:grpMov.bg}}>{totals.novas>0?"+"+totals.novas:"0"}</td>
-              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.green,background:grpMov.bg}}>{totals.executadas>0?"-"+totals.executadas:"0"}</td>
-              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,background:grpMov.bg,borderRight:colDiv}}>{totals.carteiraD1}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,background:grpD3.bg,borderRight:colDiv}}>{totals.carteiraD3}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.amber,background:grpMov1.bg}}>{totals.novasD3>0?"+"+totals.novasD3:"0"}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.green,background:grpMov1.bg}}>{totals.execD3>0?"-"+totals.execD3:"0"}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,background:grpMov1.bg,borderRight:colDiv}}>{totals.carteiraD2}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.amber,background:grpMov2.bg}}>{totals.novas>0?"+"+totals.novas:"0"}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.green,background:grpMov2.bg}}>{totals.executadas>0?"-"+totals.executadas:"0"}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,background:grpMov2.bg,borderRight:colDiv}}>{totals.carteiraD1}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:"#6366f1",background:"rgba(99,102,241,0.04)",borderRight:colDiv}}>{totals.carteiraD0}</td>
               <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:"#8b5cf6",background:grpCampo.bg}}>{totals.equipes}</td>
-              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.green,background:grpCampo.bg}}>{totals.osCampo}</td>
+              <td onClick={()=>{const allRows=carteiraData.flatMap(r=>r.naRuaRows||[]);if(allRows.length>0)setNaRuaModal({label:"TOTAL",rows:allRows});}}
+                style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.green,background:grpCampo.bg,cursor:totals.naRuaCarteira>0?"pointer":"default",textDecoration:totals.naRuaCarteira>0?"underline":"none",textUnderlineOffset:3}}>{totals.naRuaCarteira}</td>
               <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,background:grpCampo.bg}}>
                 <span style={{padding:"3px 12px",borderRadius:6,fontSize:13,fontWeight:800,
                   color:totalPct>=70?C.green:totalPct>=40?C.amber:C.red,
@@ -1624,7 +1773,7 @@ export default function App(){
           </div>
         </div>
         {toast&&<div style={{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",zIndex:2000,padding:"10px 24px",borderRadius:10,fontSize:13,fontWeight:600,maxWidth:"90vw",wordBreak:"break-word",background:toast.includes("Erro")?"rgba(239,68,68,0.15)":"rgba(16,185,129,0.15)",color:toast.includes("Erro")?C.red:C.green,border:`1px solid ${toast.includes("Erro")?C.redBorder:C.greenBorder}`,backdropFilter:"blur(8px)",animation:"fadeIn 0.2s ease"}}>{toast}</div>}
-        {activeTab==="carteira"&&<CarteiraView/>}
+        {activeTab==="carteira"&&<CarteiraView rawRows={rawRows}/>}
         {activeTab==="pendente"&&!rawRows&&<div onDragOver={e=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)} onDrop={onDrop}
           onClick={()=>inputRef.current?.click()} style={{border:`2px dashed ${dragOver?C.accent:C.border}`,borderRadius:16,padding:"60px 20px",textAlign:"center",cursor:"pointer",background:dragOver?C.accentBg:C.card,transition:"all 0.2s"}}>
           <input ref={inputRef} type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
@@ -1649,7 +1798,7 @@ export default function App(){
           <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label} historico={historico} activeUnit={activeUnit}/>
         </div>}
         {activeTab==="pendente"&&showGasModal&&gas.alerts.length>0&&<GasAlertModal alerts={gas.alerts} onIgnore={gas.doIgnore} onClose={()=>setShowGasModal(false)}/>}
-        <div style={{textAlign:"center",padding:"32px 16px 16px",color:C.textDim,fontSize:11,letterSpacing:0.3,opacity:0.6}}>Criado por Bryan Mendes Deodato, todos os direitos reservados</div>
+        <div style={{textAlign:"center",padding:"32px 16px 16px",color:C.textDim,fontSize:11,letterSpacing:0.3,opacity:0.6}}>Desenvolvido por Bryan Mendes Deodato, todos os direitos reservados</div>
       </div>
     </div>
     <style>{`@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@keyframes modalIn{from{opacity:0;transform:scale(0.95)}to{opacity:1;transform:scale(1)}}@keyframes gasPulse{0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,0.3)}50%{box-shadow:0 0 12px 4px rgba(245,158,11,0.15)}}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}`}</style>
