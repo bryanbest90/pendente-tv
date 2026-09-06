@@ -39,6 +39,10 @@ const LIGACAO_AGUA_TSS = [
 ];
 // Normaliza acentos para comparação segura (ÁGUA = AGUA, MÚLTIPLO = MULTIPLO)
 const norm = s => s.normalize("NFD").replace(/[̀-ͯ]/g,"").toUpperCase();
+// Chave real de um item de carteira: a OS sozinha NÃO identifica o trabalho.
+// Uma mesma OS carrega várias TSS (o serviço original gera etapas novas com
+// o mesmo número), e cada par OS+TSS entra e sai da carteira por conta própria.
+const osKey = r => String(r.numero_os||"").trim()+"|"+norm(String(r.tss||"").trim());
 const LIGACAO_AGUA_TSS_NORM = LIGACAO_AGUA_TSS.map(norm);
 const matchTssLigacao = tss => LIGACAO_AGUA_TSS_NORM.includes(norm(tss||""));
 
@@ -175,6 +179,23 @@ async function fetchDiarioOS(dia){
   }
   return allRows;
 }
+// Execuções confirmadas (relatório Dados Operacionais / Registro de Falhas).
+// Fonte da verdade do que foi EXECUTADO — o que sai da carteira sem estar
+// aqui saiu por outro motivo (cancelamento, erro de base, encerramento).
+async function fetchExecucao(diaIni,diaFim){
+  const allRows=[];let from=0;const ps=1000;
+  while(true){
+    const res=await fetch(SUPABASE_URL+`/rest/v1/execucao?dia=gte.${diaIni}&dia=lte.${diaFim}&select=numero_os,tss,dia,tse,equipe`,{headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
+    if(!res.ok&&res.status!==206) break;
+    const data=await res.json();
+    if(!data?.length)break;
+    allRows.push(...data);
+    if(data.length<ps)break;
+    from+=ps;
+  }
+  return allRows;
+}
+
 async function uploadRows(rows){
   const delRes = await fetch(SUPABASE_URL+"/rest/v1/rpc/limpar_pendente",{method:"POST",headers:{...HEADERS,"Prefer":"return=minimal"},body:"{}"});
   if(!delRes.ok) throw new Error("Erro ao limpar: "+await delRes.text());
@@ -541,8 +562,8 @@ function OSExitModal({diaA,diaB,activeUnit,familyFilter,onClose}){
     (async()=>{
       try{
         const [osA,osB] = await Promise.all([fetchDiarioOS(diaA),fetchDiarioOS(diaB)]);
-        const setB = new Set(osB.map(r=>r.numero_os));
-        let exited = osA.filter(r=>!setB.has(r.numero_os)&&!isGloballyExcludedTss(r.tss));
+        const setB = new Set(osB.map(osKey));   // mesma chave (OS,TSS) usada na carteira
+        let exited = osA.filter(r=>!setB.has(osKey(r))&&!isGloballyExcludedTss(r.tss));
         // Aplicar filtros
         if(unidadeFilter) exited=exited.filter(r=>r.unidade===unidadeFilter);
         if(familyFilter.size>0) exited=exited.filter(r=>familyFilter.has(r.familia));
@@ -1067,6 +1088,7 @@ function CarteiraView({rawRows}){
   const [osD1,setOsD1]=useState([]);
   const [osD2,setOsD2]=useState([]);
   const [osD3,setOsD3]=useState([]);
+  const [execSet,setExecSet]=useState(new Set()); // "OS|TSS|dia" das execucoes confirmadas
   const [globalTssMap,setGlobalTssMap]=useState({}); // TSS→família de todo histórico
   const [loadingCarteira,setLoadingCarteira]=useState(true);
   const [uploadingEmRua,setUploadingEmRua]=useState(false);
@@ -1095,13 +1117,20 @@ function CarteiraView({rawRows}){
     (async()=>{
       setLoadingCarteira(true);
       try{
-        const [d3,d2,d1,er,tssMap]=await Promise.all([
+        const [d3,d2,d1,er,tssMap,exe]=await Promise.all([
           fetchDiarioOS(diaD3),
           fetchDiarioOS(diaD2),
           fetchDiarioOS(diaD1),
           fetchEmRua(fmt(today)),  // EM RUA é sempre do dia atual
           fetchTssToFamiliaMap(),
+          fetchExecucao(diaD3,fmt(today)),
         ]);
+        // Regra do casamento, medida sobre 20 dias de histórico: o robô puxa o
+        // pendente no FIM do dia, então o par OS+TSS que está no snapshot de D e
+        // some no de D+1 foi executado em D+1. A janela [D, D+1] cobre os poucos
+        // casos de virada (era 202 contra 4 a favor de D+1 em 16/08, e assim
+        // em todos os 20 dias medidos).
+        setExecSet(new Set(exe.map(r=>osKey(r)+"|"+r.dia)));
         // Filtrar TSS globalmente excluídas de todos os conjuntos
         setOsD3(d3.filter(r=>!isGloballyExcludedTss(r.tss)));
         setOsD2(d2.filter(r=>!isGloballyExcludedTss(r.tss)));
@@ -1156,6 +1185,21 @@ function CarteiraView({rawRows}){
     [...osD3,...osD2,...osD1].forEach(r=>{
       if(r.tss&&r.familia) globalTssToFamilia[norm(r.tss)]=r.familia;
     });
+
+    // Divide um conjunto de baixas em executadas x nao executadas.
+    // "saiu" = par OS+TSS presente no dia anterior e ausente no seguinte.
+    // Se existe execucao confirmada na janela [diaAnt, diaSeg] -> executada.
+    // Senao -> encerrada sem execucao (cancelamento, erro de base, etc).
+    const splitBaixas=(saiuRows,diaAnt,diaSeg)=>{
+      let ex=0;
+      const rowsEx=[],rowsNao=[];
+      saiuRows.forEach(r=>{
+        const k=osKey(r);
+        const hit=execSet.has(k+"|"+diaSeg)||execSet.has(k+"|"+diaAnt);
+        if(hit){ex++;rowsEx.push(r);}else rowsNao.push(r);
+      });
+      return{baixas:saiuRows.length,executadas:ex,naoExecutadas:saiuRows.length-ex,rowsEx,rowsNao};
+    };
 
     // PASSO 1: Atribuição exclusiva de equipes — cada equipe pertence a UMA frente
     // Critério: frente com mais OS da equipe; empate → frente com menos equipes no total
@@ -1214,27 +1258,29 @@ function CarteiraView({rawRows}){
         if(isOsExcluded(r)) excludedOsNumbers.add(r.numero_os);
       });
       // FILTERED OS sets (excluindo famílias/TSS ocultos) para métricas da frente
-      const osD3Filtered=osD3Frente.filter(r=>!excludedOsNumbers.has(r.numero_os));
-      const osD2Filtered=osD2Frente.filter(r=>!excludedOsNumbers.has(r.numero_os));
-      const osD1Filtered=osD1Frente.filter(r=>!excludedOsNumbers.has(r.numero_os));
+      const osD3Filtered=osD3Frente.filter(r=>!excludedOsNumbers.has(osKey(r)));
+      const osD2Filtered=osD2Frente.filter(r=>!excludedOsNumbers.has(osKey(r)));
+      const osD1Filtered=osD1Frente.filter(r=>!excludedOsNumbers.has(osKey(r)));
       const carteiraD3Count=osD3Filtered.length;
-      const setD3Frente=new Set(osD3Filtered.map(r=>r.numero_os));
+      const setD3Frente=new Set(osD3Filtered.map(osKey));
       const carteiraD2Count=osD2Filtered.length;
-      const setD2Frente=new Set(osD2Filtered.map(r=>r.numero_os));
-      const setD1Frente=new Set(osD1Filtered.map(r=>r.numero_os));
+      const setD2Frente=new Set(osD2Filtered.map(osKey));
+      const setD1Frente=new Set(osD1Filtered.map(osKey));
       // Novas/Exec D-3→D-2
-      const novasD3=osD2Filtered.filter(r=>!setD3Frente.has(r.numero_os)).length;
-      const execD3=osD3Filtered.filter(r=>!setD2Frente.has(r.numero_os)).length;
+      const novasD3=osD2Filtered.filter(r=>!setD3Frente.has(osKey(r))).length;
+      const bxD3=splitBaixas(osD3Filtered.filter(r=>!setD2Frente.has(osKey(r))),diaD3,diaD2);
+      const execD3=bxD3.baixas;
       // Novas/Exec D-2→D-1
-      const novas=osD1Filtered.filter(r=>!setD2Frente.has(r.numero_os)).length;
-      const executadas=osD2Filtered.filter(r=>!setD1Frente.has(r.numero_os)).length;
+      const novas=osD1Filtered.filter(r=>!setD2Frente.has(osKey(r))).length;
+      const bxD2=splitBaixas(osD2Filtered.filter(r=>!setD1Frente.has(osKey(r))),diaD2,diaD1);
+      const executadas=bxD2.baixas;
       const carteiraD1Count=osD1Filtered.length;
 
       // D-0 (pendente atual — mesmos dados da aba Pendentes)
       const osD0Frente=osD0.filter(matchFn);
-      const osD0Filtered=osD0Frente.filter(r=>!excludedOsNumbers.has(r.numero_os)&&!isOsExcluded(r));
+      const osD0Filtered=osD0Frente.filter(r=>!excludedOsNumbers.has(osKey(r))&&!isOsExcluded(r));
       const carteiraD0Count=osD0Filtered.length;
-      const setD0Frente=new Set(osD0Filtered.map(r=>r.numero_os));
+      const setD0Frente=new Set(osD0Filtered.map(osKey));
 
       // EM RUA FILTERED (para métricas da frente)
       const emRuaFrente=emRuaData.filter(r=>{
@@ -1250,7 +1296,7 @@ function CarteiraView({rawRows}){
       const equipesNomes=[...equipesSet].sort();
       const osEmCampo=emRuaFrente.length;
       // Separar EM RUA: OS que estão na Cart. D-0 vs extras
-      const naRuaRows=emRuaFrente.filter(r=>setD0Frente.has(r.numero_os));
+      const naRuaRows=emRuaFrente.filter(r=>setD0Frente.has(osKey(r)));
       const naRuaCarteira=naRuaRows.length;
       const naRuaExtras=osEmCampo-naRuaCarteira;
       const pctEmCampo=carteiraD0Count>0?((naRuaCarteira/carteiraD0Count)*100):0;
@@ -1267,24 +1313,26 @@ function CarteiraView({rawRows}){
           const d3Count=d3Tss.length;
           const d2Count=d2Tss.length;
           const d1Count=d1Tss.length;
-          const setD3Tss=new Set(d3Tss.map(r=>r.numero_os));
-          const setD2Tss=new Set(d2Tss.map(r=>r.numero_os));
-          const setD1Tss=new Set(d1Tss.map(r=>r.numero_os));
-          const tssNovasD3=d2Tss.filter(r=>!setD3Tss.has(r.numero_os)).length;
-          const tssExecD3=d3Tss.filter(r=>!setD2Tss.has(r.numero_os)).length;
-          const tssNovas=d1Tss.filter(r=>!setD2Tss.has(r.numero_os)).length;
-          const tssExec=d2Tss.filter(r=>!setD1Tss.has(r.numero_os)).length;
+          const setD3Tss=new Set(d3Tss.map(osKey));
+          const setD2Tss=new Set(d2Tss.map(osKey));
+          const setD1Tss=new Set(d1Tss.map(osKey));
+          const tssNovasD3=d2Tss.filter(r=>!setD3Tss.has(osKey(r))).length;
+          const tBx3=splitBaixas(d3Tss.filter(r=>!setD2Tss.has(osKey(r))),diaD3,diaD2);
+          const tssExecD3=tBx3.baixas;
+          const tssNovas=d1Tss.filter(r=>!setD2Tss.has(osKey(r))).length;
+          const tBx2=splitBaixas(d2Tss.filter(r=>!setD1Tss.has(osKey(r))),diaD2,diaD1);
+          const tssExec=tBx2.baixas;
           const d0Tss=osD0.filter(r=>norm(r.tss)===tssNorm);
           const d0Count=d0Tss.length;
-          const setD0Tss=new Set(d0Tss.map(r=>r.numero_os));
+          const setD0Tss=new Set(d0Tss.map(osKey));
           const tssEmRua=emRuaData.filter(r=>norm(r.tss)===tssNorm);
           const tssEquipes=new Set(tssEmRua.map(r=>r.equipe).filter(Boolean)).size;
           const tssOsCampo=tssEmRua.length;
-          const tssNaRuaRows=tssEmRua.filter(r=>setD0Tss.has(r.numero_os));
+          const tssNaRuaRows=tssEmRua.filter(r=>setD0Tss.has(osKey(r)));
           const tssNaRuaCart=tssNaRuaRows.length;
           const tssNaRuaExtras=tssOsCampo-tssNaRuaCart;
           const tssPct=d0Count>0?((tssNaRuaCart/d0Count)*100):0;
-          return{tss:tssName,excluded,carteiraD3:d3Count,novasD3:tssNovasD3,execD3:tssExecD3,carteiraD2:d2Count,novas:tssNovas,executadas:tssExec,carteiraD1:d1Count,carteiraD0:d0Count,equipes:tssEquipes,osCampo:tssOsCampo,naRuaCarteira:tssNaRuaCart,naRuaRows:tssNaRuaRows,naRuaExtras:tssNaRuaExtras,pctCampo:tssPct};
+          return{tss:tssName,excluded,bx3:tBx3,bx2:tBx2,carteiraD3:d3Count,novasD3:tssNovasD3,execD3:tssExecD3,carteiraD2:d2Count,novas:tssNovas,executadas:tssExec,carteiraD1:d1Count,carteiraD0:d0Count,equipes:tssEquipes,osCampo:tssOsCampo,naRuaCarteira:tssNaRuaCart,naRuaRows:tssNaRuaRows,naRuaExtras:tssNaRuaExtras,pctCampo:tssPct};
         }).filter(t=>t.carteiraD3>0||t.carteiraD2>0||t.carteiraD1>0||t.osCampo>0);
       }
 
@@ -1305,23 +1353,25 @@ function CarteiraView({rawRows}){
           const d3Count=d3Fam.length;
           const d2Count=d2Fam.length;
           const d1Count=d1Fam.length;
-          const setD3Fam=new Set(d3Fam.map(r=>r.numero_os));
-          const setD2Fam=new Set(d2Fam.map(r=>r.numero_os));
-          const setD1Fam=new Set(d1Fam.map(r=>r.numero_os));
-          const famNovasD3=d2Fam.filter(r=>!setD3Fam.has(r.numero_os)).length;
-          const famExecD3=d3Fam.filter(r=>!setD2Fam.has(r.numero_os)).length;
-          const famNovas=d1Fam.filter(r=>!setD2Fam.has(r.numero_os)).length;
-          const famExec=d2Fam.filter(r=>!setD1Fam.has(r.numero_os)).length;
+          const setD3Fam=new Set(d3Fam.map(osKey));
+          const setD2Fam=new Set(d2Fam.map(osKey));
+          const setD1Fam=new Set(d1Fam.map(osKey));
+          const famNovasD3=d2Fam.filter(r=>!setD3Fam.has(osKey(r))).length;
+          const fBx3=splitBaixas(d3Fam.filter(r=>!setD2Fam.has(osKey(r))),diaD3,diaD2);
+          const famExecD3=fBx3.baixas;
+          const famNovas=d1Fam.filter(r=>!setD2Fam.has(osKey(r))).length;
+          const fBx2=splitBaixas(d2Fam.filter(r=>!setD1Fam.has(osKey(r))),diaD2,diaD1);
+          const famExec=fBx2.baixas;
           const d0Fam=osD0.filter(r=>norm(r.familia)===famNorm);
           const d0Count=d0Fam.length;
-          const setD0Fam=new Set(d0Fam.map(r=>r.numero_os));
+          const setD0Fam=new Set(d0Fam.map(osKey));
           const emRuaFam=emRuaData.filter(r=>{
             const tFam=tssToFamilia[norm(r.tss||"")];
             return tFam===famNorm;
           });
           const famEquipes=new Set(emRuaFam.map(r=>r.equipe).filter(Boolean)).size;
           const famOsCampo=emRuaFam.length;
-          const famNaRuaRows=emRuaFam.filter(r=>setD0Fam.has(r.numero_os));
+          const famNaRuaRows=emRuaFam.filter(r=>setD0Fam.has(osKey(r)));
           const famNaRuaCart=famNaRuaRows.length;
           const famNaRuaExtras=famOsCampo-famNaRuaCart;
           const famPct=d0Count>0?((famNaRuaCart/d0Count)*100):0;
@@ -1338,44 +1388,61 @@ function CarteiraView({rawRows}){
             const td3=d3Tss.length;
             const td2=d2Tss.length;
             const td1=d1Tss.length;
-            const sD3=new Set(d3Tss.map(r=>r.numero_os));
-            const sD2=new Set(d2Tss.map(r=>r.numero_os));
-            const sD1=new Set(d1Tss.map(r=>r.numero_os));
-            const tNovasD3=d2Tss.filter(r=>!sD3.has(r.numero_os)).length;
-            const tExecD3=d3Tss.filter(r=>!sD2.has(r.numero_os)).length;
-            const tNovas=d1Tss.filter(r=>!sD2.has(r.numero_os)).length;
-            const tExec=d2Tss.filter(r=>!sD1.has(r.numero_os)).length;
+            const sD3=new Set(d3Tss.map(osKey));
+            const sD2=new Set(d2Tss.map(osKey));
+            const sD1=new Set(d1Tss.map(osKey));
+            const tNovasD3=d2Tss.filter(r=>!sD3.has(osKey(r))).length;
+            const nBx3=splitBaixas(d3Tss.filter(r=>!sD2.has(osKey(r))),diaD3,diaD2);
+            const tExecD3=nBx3.baixas;
+            const tNovas=d1Tss.filter(r=>!sD2.has(osKey(r))).length;
+            const nBx2=splitBaixas(d2Tss.filter(r=>!sD1.has(osKey(r))),diaD2,diaD1);
+            const tExec=nBx2.baixas;
             const td0Tss=d0Fam.filter(r=>norm(r.tss)===tssNorm);
             const td0=td0Tss.length;
-            const sD0=new Set(td0Tss.map(r=>r.numero_os));
+            const sD0=new Set(td0Tss.map(osKey));
             const tEmRua=emRuaFam.filter(r=>norm(r.tss||"")===tssNorm);
             const tEquipes=new Set(tEmRua.map(r=>r.equipe).filter(Boolean)).size;
             const tOsCampo=tEmRua.length;
-            const tNaRuaRows=tEmRua.filter(r=>sD0.has(r.numero_os));
+            const tNaRuaRows=tEmRua.filter(r=>sD0.has(osKey(r)));
             const tNaRuaCart=tNaRuaRows.length;
             const tNaRuaExtras=tOsCampo-tNaRuaCart;
             const tPct=td0>0?((tNaRuaCart/td0)*100):0;
             const origRec=[...d2Fam,...d1Fam,...emRuaFam].find(r=>norm(r.tss)===tssNorm);
             const tssLabel=origRec?origRec.tss:tssNorm;
-            return{tss:tssLabel,excluded:tssExcluded,carteiraD3:td3,novasD3:tNovasD3,execD3:tExecD3,carteiraD2:td2,novas:tNovas,executadas:tExec,carteiraD1:td1,carteiraD0:td0,equipes:tEquipes,osCampo:tOsCampo,naRuaCarteira:tNaRuaCart,naRuaRows:tNaRuaRows,naRuaExtras:tNaRuaExtras,pctCampo:tPct};
+            return{tss:tssLabel,excluded:tssExcluded,bx3:nBx3,bx2:nBx2,carteiraD3:td3,novasD3:tNovasD3,execD3:tExecD3,carteiraD2:td2,novas:tNovas,executadas:tExec,carteiraD1:td1,carteiraD0:td0,equipes:tEquipes,osCampo:tOsCampo,naRuaCarteira:tNaRuaCart,naRuaRows:tNaRuaRows,naRuaExtras:tNaRuaExtras,pctCampo:tPct};
           }).filter(t=>t.carteiraD3>0||t.carteiraD2>0||t.carteiraD1>0||t.osCampo>0);
 
-          return{familia:famName,excluded:famExcluded,carteiraD3:d3Count,novasD3:famNovasD3,execD3:famExecD3,carteiraD2:d2Count,novas:famNovas,executadas:famExec,carteiraD1:d1Count,carteiraD0:d0Count,equipes:famEquipes,osCampo:famOsCampo,naRuaCarteira:famNaRuaCart,naRuaRows:famNaRuaRows,naRuaExtras:famNaRuaExtras,pctCampo:famPct,tssBreakdown:famTssBreakdown};
+          return{familia:famName,excluded:famExcluded,bx3:fBx3,bx2:fBx2,carteiraD3:d3Count,novasD3:famNovasD3,execD3:famExecD3,carteiraD2:d2Count,novas:famNovas,executadas:famExec,carteiraD1:d1Count,carteiraD0:d0Count,equipes:famEquipes,osCampo:famOsCampo,naRuaCarteira:famNaRuaCart,naRuaRows:famNaRuaRows,naRuaExtras:famNaRuaExtras,pctCampo:famPct,tssBreakdown:famTssBreakdown};
         }).filter(f=>f.carteiraD3>0||f.carteiraD2>0||f.carteiraD1>0||f.osCampo>0);
       }
 
-      return{frente:frenteName,carteiraD3:carteiraD3Count,novasD3,execD3,carteiraD2:carteiraD2Count,novas,executadas,carteiraD1:carteiraD1Count,carteiraD0:carteiraD0Count,equipes,equipesNomes,osCampo:osEmCampo,naRuaCarteira,naRuaRows,naRuaExtras,pctCampo:pctEmCampo,tssBreakdown,familiaBreakdown};
+      return{frente:frenteName,bx3:bxD3,bx2:bxD2,carteiraD3:carteiraD3Count,novasD3,execD3,carteiraD2:carteiraD2Count,novas,executadas,carteiraD1:carteiraD1Count,carteiraD0:carteiraD0Count,equipes,equipesNomes,osCampo:osEmCampo,naRuaCarteira,naRuaRows,naRuaExtras,pctCampo:pctEmCampo,tssBreakdown,familiaBreakdown};
     });
-  },[osD3,osD2,osD1,osD0,emRuaData,excludedCarteira,globalTssMap]);
+  },[osD3,osD2,osD1,osD0,emRuaData,excludedCarteira,globalTssMap,execSet,diaD3,diaD2,diaD1]);
 
   // Totals
   const totals=useMemo(()=>carteiraData.reduce((acc,r)=>({
     carteiraD3:acc.carteiraD3+r.carteiraD3,novasD3:acc.novasD3+r.novasD3,execD3:acc.execD3+r.execD3,
+    ex3:acc.ex3+(r.bx3?.executadas||0),ne3:acc.ne3+(r.bx3?.naoExecutadas||0),
+    ex2:acc.ex2+(r.bx2?.executadas||0),ne2:acc.ne2+(r.bx2?.naoExecutadas||0),
     carteiraD2:acc.carteiraD2+r.carteiraD2,novas:acc.novas+r.novas,executadas:acc.executadas+r.executadas,
     carteiraD1:acc.carteiraD1+r.carteiraD1,carteiraD0:acc.carteiraD0+r.carteiraD0,equipes:acc.equipes+r.equipes,
     osCampo:acc.osCampo+r.osCampo,naRuaCarteira:acc.naRuaCarteira+r.naRuaCarteira,naRuaExtras:acc.naRuaExtras+r.naRuaExtras,
-  }),{carteiraD3:0,novasD3:0,execD3:0,carteiraD2:0,novas:0,executadas:0,carteiraD1:0,carteiraD0:0,equipes:0,osCampo:0,naRuaCarteira:0,naRuaExtras:0}),[carteiraData]);
+  }),{carteiraD3:0,novasD3:0,execD3:0,ex3:0,ne3:0,ex2:0,ne2:0,carteiraD2:0,novas:0,executadas:0,carteiraD1:0,carteiraD0:0,equipes:0,osCampo:0,naRuaCarteira:0,naRuaExtras:0}),[carteiraData]);
   const totalPct=totals.carteiraD0>0?((totals.naRuaCarteira/totals.carteiraD0)*100):0;
+
+  // Celula dividida "executadas / nao executadas" da coluna Baixas.
+  // O total continua sendo o que fecha a conta da carteira; o split so
+  // diz quanto daquilo teve execucao confirmada no relatorio.
+  const Baixa=({bx,fs=12,onOpen})=>{
+    if(!bx||!bx.baixas) return <span style={{color:C.textDim}}>0</span>;
+    return <span onClick={onOpen?e=>{e.stopPropagation();onOpen();}:undefined}
+      style={{cursor:onOpen?"pointer":"default",fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap"}}>
+      <span style={{color:C.green,fontWeight:700,fontSize:fs}}>{bx.executadas}</span>
+      <span style={{color:C.textDim,fontSize:fs-2,margin:"0 2px"}}>/</span>
+      <span style={{color:bx.naoExecutadas>0?C.red:C.textDim,fontWeight:600,fontSize:fs-1}}>{bx.naoExecutadas}</span>
+    </span>;
+  };
 
   const cellStyle={padding:"8px 4px",borderBottom:`1px solid ${C.border}`,textAlign:"center",fontVariantNumeric:"tabular-nums",fontSize:12};
   const hdrCell={padding:"6px 3px",textAlign:"center",fontSize:9,fontWeight:700,color:C.textDim,textTransform:"uppercase",letterSpacing:0.3,borderBottom:`2px solid rgba(100,116,139,0.4)`,whiteSpace:"nowrap"};
@@ -1512,10 +1579,10 @@ function CarteiraView({rawRows}){
             <th style={{...hdrCell,textAlign:"left",paddingLeft:10,borderRight:colDiv}}>Frente / TSS</th>
             <th style={{...hdrCell,background:grpD3.hdr,borderRight:colDiv}}>Cart. {fmtDiaShort(diaD3)}</th>
             <th style={{...hdrCell,background:grpMov1.hdr}}>Novas</th>
-            <th style={{...hdrCell,background:grpMov1.hdr}}>Exec.</th>
+            <th style={{...hdrCell,background:grpMov1.hdr}}>Baixas<br/><span style={{fontSize:7,opacity:.75,letterSpacing:0}}>exec / não</span></th>
             <th style={{...hdrCell,background:grpMov1.hdr,borderRight:colDiv}}>Cart. {fmtDiaShort(diaD2)}</th>
             <th style={{...hdrCell,background:grpMov2.hdr}}>Novas</th>
-            <th style={{...hdrCell,background:grpMov2.hdr}}>Exec.</th>
+            <th style={{...hdrCell,background:grpMov2.hdr}}>Baixas<br/><span style={{fontSize:7,opacity:.75,letterSpacing:0}}>exec / não</span></th>
             <th style={{...hdrCell,background:grpMov2.hdr,borderRight:colDiv}}>Cart. {fmtDiaShort(diaD1)}</th>
             <th style={{...hdrCell,background:"rgba(99,102,241,0.10)",borderRight:colDiv}}>Cart. Atual</th>
             <th style={{...hdrCell,background:grpCampo.hdr}}>Equipes</th>
@@ -1540,10 +1607,10 @@ function CarteiraView({rawRows}){
                   </td>
                   <td style={{...cellStyle,background:grpD3.bg,borderRight:colDiv}}>{row.carteiraD3}</td>
                   <td style={{...cellStyle,background:grpMov1.bg,color:row.novasD3>0?C.amber:C.textDim,fontWeight:row.novasD3>0?700:400}}>{row.novasD3>0?"+"+row.novasD3:"0"}</td>
-                  <td style={{...cellStyle,background:grpMov1.bg,color:row.execD3>0?C.green:C.textDim,fontWeight:row.execD3>0?700:400}}>{row.execD3>0?"-"+row.execD3:"0"}</td>
+                  <td style={{...cellStyle,background:grpMov1.bg}}><Baixa bx={row.bx3}/></td>
                   <td style={{...cellStyle,background:grpMov1.bg,fontWeight:700,borderRight:colDiv}}>{row.carteiraD2}</td>
                   <td style={{...cellStyle,background:grpMov2.bg,color:row.novas>0?C.amber:C.textDim,fontWeight:row.novas>0?700:400}}>{row.novas>0?"+"+row.novas:"0"}</td>
-                  <td style={{...cellStyle,background:grpMov2.bg,color:row.executadas>0?C.green:C.textDim,fontWeight:row.executadas>0?700:400}}>{row.executadas>0?"-"+row.executadas:"0"}</td>
+                  <td style={{...cellStyle,background:grpMov2.bg}}><Baixa bx={row.bx2}/></td>
                   <td style={{...cellStyle,background:grpMov2.bg,fontWeight:700,borderRight:colDiv}}>{row.carteiraD1}</td>
                   <td style={{...cellStyle,background:"rgba(99,102,241,0.04)",fontWeight:700,color:"#6366f1",borderRight:colDiv}}>{row.carteiraD0}</td>
                   <td onClick={e=>{e.stopPropagation();if(row.equipesNomes&&row.equipesNomes.length>0)setEquipeModal({frente:row.frente,equipes:row.equipesNomes});}}
@@ -1566,10 +1633,10 @@ function CarteiraView({rawRows}){
                       title={t.excluded?"Clique para incluir":"Clique para excluir"}>{t.tss}</td>
                     <td style={{...cellStyle,fontSize:11,color:C.textMuted,background:grpD3.bg,borderRight:colDiv}}>{t.carteiraD3}</td>
                     <td style={{...cellStyle,fontSize:11,color:t.novasD3>0?C.amber:C.textDim,background:grpMov1.bg}}>{t.novasD3>0?"+"+t.novasD3:"0"}</td>
-                    <td style={{...cellStyle,fontSize:11,color:t.execD3>0?C.green:C.textDim,background:grpMov1.bg}}>{t.execD3>0?"-"+t.execD3:"0"}</td>
+                    <td style={{...cellStyle,fontSize:11,background:grpMov1.bg}}><Baixa bx={t.bx3} fs={10}/></td>
                     <td style={{...cellStyle,fontSize:11,fontWeight:600,background:grpMov1.bg,borderRight:colDiv}}>{t.carteiraD2}</td>
                     <td style={{...cellStyle,fontSize:11,color:t.novas>0?C.amber:C.textDim,background:grpMov2.bg}}>{t.novas>0?"+"+t.novas:"0"}</td>
-                    <td style={{...cellStyle,fontSize:11,color:t.executadas>0?C.green:C.textDim,background:grpMov2.bg}}>{t.executadas>0?"-"+t.executadas:"0"}</td>
+                    <td style={{...cellStyle,fontSize:11,background:grpMov2.bg}}><Baixa bx={t.bx2} fs={10}/></td>
                     <td style={{...cellStyle,fontSize:11,fontWeight:600,background:grpMov2.bg,borderRight:colDiv}}>{t.carteiraD1}</td>
                     <td style={{...cellStyle,fontSize:11,fontWeight:600,color:"#6366f1",background:"rgba(99,102,241,0.04)",borderRight:colDiv}}>{t.carteiraD0}</td>
                     <td style={{...cellStyle,fontSize:11,color:"#8b5cf6",background:grpCampo.bg}}>{t.equipes||"—"}</td>
@@ -1601,10 +1668,10 @@ function CarteiraView({rawRows}){
                       </td>
                       <td style={{...cellStyle,fontSize:11,background:grpD3.bg,borderRight:colDiv}}>{fam.carteiraD3}</td>
                       <td style={{...cellStyle,fontSize:11,color:fam.novasD3>0?C.amber:C.textDim,background:grpMov1.bg}}>{fam.novasD3>0?"+"+fam.novasD3:"0"}</td>
-                      <td style={{...cellStyle,fontSize:11,color:fam.execD3>0?C.green:C.textDim,background:grpMov1.bg}}>{fam.execD3>0?"-"+fam.execD3:"0"}</td>
+                      <td style={{...cellStyle,fontSize:11,background:grpMov1.bg}}><Baixa bx={fam.bx3} fs={10}/></td>
                       <td style={{...cellStyle,fontSize:11,fontWeight:600,background:grpMov1.bg,borderRight:colDiv}}>{fam.carteiraD2}</td>
                       <td style={{...cellStyle,fontSize:11,color:fam.novas>0?C.amber:C.textDim,background:grpMov2.bg}}>{fam.novas>0?"+"+fam.novas:"0"}</td>
-                      <td style={{...cellStyle,fontSize:11,color:fam.executadas>0?C.green:C.textDim,background:grpMov2.bg}}>{fam.executadas>0?"-"+fam.executadas:"0"}</td>
+                      <td style={{...cellStyle,fontSize:11,background:grpMov2.bg}}><Baixa bx={fam.bx2} fs={10}/></td>
                       <td style={{...cellStyle,fontSize:11,fontWeight:600,background:grpMov2.bg,borderRight:colDiv}}>{fam.carteiraD1}</td>
                       <td style={{...cellStyle,fontSize:11,fontWeight:600,color:"#6366f1",background:"rgba(99,102,241,0.04)",borderRight:colDiv}}>{fam.carteiraD0}</td>
                       <td style={{...cellStyle,fontSize:12,color:"#8b5cf6",background:grpCampo.bg}}>{fam.equipes||"—"}</td>
@@ -1625,10 +1692,10 @@ function CarteiraView({rawRows}){
                           title={t.excluded?"Clique para incluir":"Clique para excluir"}>{t.tss}</td>
                         <td style={{...cellStyle,fontSize:11,color:C.textDim,background:grpD3.bg,borderRight:colDiv}}>{t.carteiraD3}</td>
                         <td style={{...cellStyle,fontSize:11,color:t.novasD3>0?C.amber:C.textDim,background:grpMov1.bg}}>{t.novasD3>0?"+"+t.novasD3:"0"}</td>
-                        <td style={{...cellStyle,fontSize:11,color:t.execD3>0?C.green:C.textDim,background:grpMov1.bg}}>{t.execD3>0?"-"+t.execD3:"0"}</td>
+                        <td style={{...cellStyle,fontSize:11,background:grpMov1.bg}}><Baixa bx={t.bx3} fs={10}/></td>
                         <td style={{...cellStyle,fontSize:11,fontWeight:600,background:grpMov1.bg,borderRight:colDiv}}>{t.carteiraD2}</td>
                         <td style={{...cellStyle,fontSize:11,color:t.novas>0?C.amber:C.textDim,background:grpMov2.bg}}>{t.novas>0?"+"+t.novas:"0"}</td>
-                        <td style={{...cellStyle,fontSize:11,color:t.executadas>0?C.green:C.textDim,background:grpMov2.bg}}>{t.executadas>0?"-"+t.executadas:"0"}</td>
+                        <td style={{...cellStyle,fontSize:11,background:grpMov2.bg}}><Baixa bx={t.bx2} fs={10}/></td>
                         <td style={{...cellStyle,fontSize:11,fontWeight:600,background:grpMov2.bg,borderRight:colDiv}}>{t.carteiraD1}</td>
                         <td style={{...cellStyle,fontSize:11,fontWeight:600,color:"#6366f1",background:"rgba(99,102,241,0.04)",borderRight:colDiv}}>{t.carteiraD0}</td>
                         <td style={{...cellStyle,fontSize:11,color:"#8b5cf6",background:grpCampo.bg}}>{t.equipes||"—"}</td>
@@ -1651,10 +1718,10 @@ function CarteiraView({rawRows}){
               <td style={{padding:"14px 16px",borderTop:`2px solid ${C.accent}`,borderRight:colDiv,fontSize:14}}>TOTAL</td>
               <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,background:grpD3.bg,borderRight:colDiv}}>{totals.carteiraD3}</td>
               <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.amber,background:grpMov1.bg}}>{totals.novasD3>0?"+"+totals.novasD3:"0"}</td>
-              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.green,background:grpMov1.bg}}>{totals.execD3>0?"-"+totals.execD3:"0"}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,background:grpMov1.bg}}><Baixa bx={{baixas:totals.execD3,executadas:totals.ex3,naoExecutadas:totals.ne3}} fs={13}/></td>
               <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,background:grpMov1.bg,borderRight:colDiv}}>{totals.carteiraD2}</td>
               <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.amber,background:grpMov2.bg}}>{totals.novas>0?"+"+totals.novas:"0"}</td>
-              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:C.green,background:grpMov2.bg}}>{totals.executadas>0?"-"+totals.executadas:"0"}</td>
+              <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,background:grpMov2.bg}}><Baixa bx={{baixas:totals.executadas,executadas:totals.ex2,naoExecutadas:totals.ne2}} fs={13}/></td>
               <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,background:grpMov2.bg,borderRight:colDiv}}>{totals.carteiraD1}</td>
               <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:"#6366f1",background:"rgba(99,102,241,0.04)",borderRight:colDiv}}>{totals.carteiraD0}</td>
               <td style={{...cellStyle,borderTop:`2px solid ${C.accent}`,fontWeight:800,color:"#8b5cf6",background:grpCampo.bg}}>{totals.equipes}</td>
