@@ -236,7 +236,115 @@ async function fetchEmRua(dia){
   return allRows;
 }
 
+/* ── Parse relatório de EXECUÇÃO (Dados Operacionais / Registro de Falhas) ──
+   Ao contrário do EM RUA, este cobre um PERÍODO, não um dia. O cabeçalho não
+   fica numa linha fixa (vem depois de um bloco de filtros), então é localizado
+   procurando "Número da OS". */
+function parseExecucaoFile(file){
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onload=e=>{
+      try{
+        const wb=XLSX.read(e.target.result,{type:"array",cellDates:true});
+        const ws=wb.Sheets[wb.SheetNames[0]];
+        const raw=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
+        // acha a linha de cabecalho
+        let hi=-1;
+        for(let i=0;i<Math.min(60,raw.length);i++){
+          if((raw[i]||[]).some(v=>String(v||"").trim().toUpperCase()==="NÚMERO DA OS"
+                              ||String(v||"").trim().toUpperCase()==="NUMERO DA OS")){hi=i;break;}
+        }
+        if(hi<0){reject(new Error('Cabeçalho não encontrado — a coluna "Número da OS" não existe neste arquivo. Confira se é o relatório Dados Operacionais.'));return;}
+        const hdr=raw[hi].map(h=>String(h||"").trim().toUpperCase());
+        const col={};
+        const find=(...alts)=>{for(const a of alts){const i=hdr.indexOf(a);if(i>=0)return i;}return -1;};
+        col.numero_os=find("NÚMERO DA OS","NUMERO DA OS");
+        col.tss=find("TSS");
+        col.tse=find("TSE");
+        col.dexec=find("DATA DE EXECUÇÃO","DATA DE EXECUCAO");
+        col.dcomp=find("DATA DE COMPETÊNCIA","DATA DE COMPETENCIA");
+        col.equipe=find("EQUIPE");
+        col.atc=find("ATC");
+        col.ato=find("ATO");
+        col.municipio=find("MUNICÍPIO","MUNICIPIO");
+        col.bairro=find("BAIRRO");
+        col.logradouro=find("LOGRADOURO");
+        col.obs=find("OBSERVAÇÕES DE EXECUÇÃO","OBSERVACOES DE EXECUCAO");
+        if(col.numero_os<0||col.tss<0||col.dexec<0){
+          reject(new Error("Faltam colunas obrigatórias (Número da OS, TSS ou Data de Execução)."));return;
+        }
+        // "04/09/2026 17:31" ou objeto Date -> {dia, iso}
+        const parseDT=v=>{
+          if(v instanceof Date&&!isNaN(v)){
+            const p=n=>String(n).padStart(2,"0");
+            return{dia:`${v.getFullYear()}-${p(v.getMonth()+1)}-${p(v.getDate())}`,
+                   iso:`${v.getFullYear()}-${p(v.getMonth()+1)}-${p(v.getDate())}T${p(v.getHours())}:${p(v.getMinutes())}:00`};
+          }
+          const m=String(v).match(/(\d{2})\/(\d{2})\/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2}))?/);
+          if(!m) return null;
+          const hh=String(m[4]||"00").padStart(2,"0"), mm=m[5]||"00";
+          return{dia:`${m[3]}-${m[2]}-${m[1]}`,iso:`${m[3]}-${m[2]}-${m[1]}T${hh}:${mm}:00`};
+        };
+        const num=v=>{const m=String(v||"").match(/\d+/);return m?parseInt(m[0],10):null;};
+        const get=(row,i)=>i>=0?String(row[i]||"").trim():"";
+
+        const seen=new Set();       // dedup por (OS, TSS, dia)
+        const records=[];
+        let ignoradas=0;
+        for(let r=hi+1;r<raw.length;r++){
+          const row=raw[r];
+          if(!row||!row.length) continue;
+          const os=get(row,col.numero_os), tss=get(row,col.tss);
+          if(!os||!tss) continue;
+          const dx=parseDT(row[col.dexec]);
+          if(!dx){ignoradas++;continue;}
+          const key=os+"|"+tss+"|"+dx.dia;
+          if(seen.has(key)){ignoradas++;continue;}
+          seen.add(key);
+          const dc=col.dcomp>=0?parseDT(row[col.dcomp]):null;
+          records.push({
+            numero_os:os, tss, dia:dx.dia,
+            tse:get(row,col.tse)||null,
+            data_execucao:dx.iso,
+            data_competencia:dc?dc.iso:null,
+            equipe:get(row,col.equipe)||null,
+            atc:num(get(row,col.atc)),
+            ato:String(num(get(row,col.ato))??""),
+            municipio:get(row,col.municipio)||null,
+            bairro:get(row,col.bairro)||null,
+            logradouro:get(row,col.logradouro)||null,
+            observacao:get(row,col.obs)||null,
+          });
+        }
+        if(!records.length){reject(new Error("Nenhuma execução válida encontrada no arquivo."));return;}
+        const dias=records.map(r=>r.dia).sort();
+        resolve({records,ini:dias[0],fim:dias[dias.length-1],ignoradas});
+      }catch(err){reject(err);}
+    };
+    reader.onerror=()=>reject(new Error("Erro ao ler o arquivo"));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+// Reimporta um periodo: limpa a faixa de datas e regrava.
+// Assim reimportar o mesmo mes nao duplica nada.
+async function uploadExecucao(records,ini,fim){
+  const del=await fetch(SUPABASE_URL+"/rest/v1/rpc/limpar_execucao",{
+    method:"POST",headers:{...HEADERS,"Prefer":"return=minimal"},
+    body:JSON.stringify({p_ini:ini,p_fim:fim})});
+  if(!del.ok) throw new Error("Erro ao limpar período: "+await del.text());
+  const bs=500;
+  for(let i=0;i<records.length;i+=bs){
+    const res=await fetch(SUPABASE_URL+"/rest/v1/execucao",{
+      method:"POST",headers:{...HEADERS,"Prefer":"return=minimal"},
+      body:JSON.stringify(records.slice(i,i+bs))});
+    if(!res.ok) throw new Error("Erro lote execução "+(Math.floor(i/bs)+1)+": "+await res.text());
+  }
+  return records.length;
+}
+
 /* ── Parse EM RUA xlsx ── */
+
 function parseEmRuaFile(file){
   return new Promise((resolve,reject)=>{
     const reader=new FileReader();
@@ -1092,6 +1200,8 @@ function CarteiraView({rawRows}){
   const [globalTssMap,setGlobalTssMap]=useState({}); // TSS→família de todo histórico
   const [loadingCarteira,setLoadingCarteira]=useState(true);
   const [uploadingEmRua,setUploadingEmRua]=useState(false);
+  const [uploadingExec,setUploadingExec]=useState(false);
+  const [execInfo,setExecInfo]=useState(null); // {n, ini, fim}
   const [emRuaToast,setEmRuaToast]=useState("");
   const [expandedFrente,setExpandedFrente]=useState(null);
   const [expandedFamilia,setExpandedFamilia]=useState(null);
@@ -1100,6 +1210,7 @@ function CarteiraView({rawRows}){
   const [showAllEquipesModal,setShowAllEquipesModal]=useState(false);
   const [naRuaModal,setNaRuaModal]=useState(null); // {label, rows:[{numero_os,tss,endereco,bairro,equipe}]}
   const emRuaInputRef=useRef();
+  const execInputRef=useRef();
 
   const toggleExcluded=useCallback((name)=>{
     const key=norm(name);
@@ -1158,6 +1269,23 @@ function CarteiraView({rawRows}){
     }catch(e){flashEmRua("Erro: "+e.message);}
     setUploadingEmRua(false);
   },[diaD1]);
+
+  // Importar relatório de execução (cobre um período inteiro)
+  const handleExecFile=useCallback(async(file)=>{
+    if(!file)return;
+    setUploadingExec(true);
+    try{
+      flashEmRua("Lendo relatório de execução...");
+      const{records,ini,fim,ignoradas}=await parseExecucaoFile(file);
+      flashEmRua(`Enviando ${records.length} execuções (${fmtDiaFull(ini)} a ${fmtDiaFull(fim)})...`);
+      await uploadExecucao(records,ini,fim);
+      flashEmRua(`Execuções importadas ✓ ${records.length} registros${ignoradas?`, ${ignoradas} ignoradas`:""}`);
+      const exe=await fetchExecucao(diaD3,fmt(today));
+      setExecSet(new Set(exe.map(r=>osKey(r)+"|"+r.dia)));
+      setExecInfo({n:records.length,ini,fim});
+    }catch(e){flashEmRua("Erro: "+e.message);}
+    setUploadingExec(false);
+  },[diaD3]);
 
   // Converter rawRows (pendente_os, campos do Excel) para formato normalizado (D-0)
   const osD0=useMemo(()=>{
@@ -1469,11 +1597,18 @@ function CarteiraView({rawRows}){
         <input type="date" value={diaD1} onChange={e=>setDiaD1(e.target.value)} style={dateInputStyle}/>
       </div>
       <div style={{display:"flex",gap:8,alignItems:"center"}}>
+        <span style={{fontSize:11,color:C.textDim}}>Execuções: {execSet.size>0?<span style={{color:C.green,fontWeight:600}}>{execSet.size}</span>:<span style={{color:C.amber}}>não importado</span>}</span>
         <span style={{fontSize:11,color:C.textDim}}>EM RUA: {emRuaData.length>0?<span style={{color:C.green,fontWeight:600}}>{emRuaData.length} OS</span>:<span style={{color:C.amber}}>não importado</span>}</span>
         <input ref={emRuaInputRef} type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={e=>{handleEmRuaFile(e.target.files[0]);e.target.value="";}}/>
         <button onClick={()=>emRuaInputRef.current?.click()} disabled={uploadingEmRua}
           style={{fontSize:12,color:"#fff",fontWeight:600,padding:"6px 16px",borderRadius:8,background:uploadingEmRua?"#475569":"linear-gradient(135deg,#3b82f6,#6366f1)",border:"none",cursor:uploadingEmRua?"wait":"pointer",display:"flex",alignItems:"center",gap:6}}>
           {uploadingEmRua?"Importando...":"📥 Importar EM RUA"}
+        </button>
+        <input ref={execInputRef} type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={e=>{handleExecFile(e.target.files[0]);e.target.value="";}}/>
+        <button onClick={()=>execInputRef.current?.click()} disabled={uploadingExec}
+          title="Relatório Dados Operacionais — pode cobrir um mês inteiro; reimportar o mesmo período substitui, não duplica"
+          style={{fontSize:12,color:"#fff",fontWeight:600,padding:"6px 16px",borderRadius:8,background:uploadingExec?"#475569":"linear-gradient(135deg,#10b981,#059669)",border:"none",cursor:uploadingExec?"wait":"pointer",display:"flex",alignItems:"center",gap:6}}>
+          {uploadingExec?"Importando...":"✅ Importar Execução"}
         </button>
       </div>
     </div>
