@@ -797,7 +797,7 @@ function HistoricoChart({historico,activeUnit}){
   // durante a carga lê um dia pela metade — e o gráfico desenhava um penhasco
   // que parecia a carteira zerando (07/09 apareceu com 9 OS em vez de 988).
   // Só o ÚLTIMO dia é suspeito: uma queda no meio da série é dado real.
-  const {chartData,diaParcial} = useMemo(()=>{
+  const {chartData} = useMemo(()=>{
     if(!historico?.length) return {chartData:[],diaParcial:null};
     const byDay={};
     historico.forEach(r=>{
@@ -872,15 +872,6 @@ function HistoricoChart({historico,activeUnit}){
         </div>
       </div>
 
-      {diaParcial&&<div style={{margin:"0 18px 12px",padding:"10px 14px",borderRadius:9,
-        background:"rgba(245,158,11,0.08)",border:`1px solid rgba(245,158,11,0.28)`,
-        display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-        <span style={{fontSize:15}}>⏳</span>
-        <span style={{fontSize:12.5,color:C.amber,fontWeight:600}}>{fmtDiaFull(diaParcial.dia)} ainda está sendo carregado</span>
-        <span style={{fontSize:12,color:C.textDim}}>
-          {diaParcial.total} de ~{diaParcial.esperado} OS gravadas — o dia foi omitido do gráfico para não desenhar uma queda que não existe. Atualize em alguns minutos.
-        </span>
-      </div>}
       {chartData.length>0 ? <>
         <ResponsiveContainer width="100%" height={260}>
           <AreaChart data={chartData} margin={{top:5,right:10,left:0,bottom:5}} onClick={handleChartClick} style={{cursor:"pointer"}}>
