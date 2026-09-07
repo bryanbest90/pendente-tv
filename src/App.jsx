@@ -38,7 +38,17 @@ const LIGACAO_AGUA_TSS = [
   'TRANSFORMAÇÃO LIG NOVA SEM APROV RAMAL',
 ];
 // Normaliza acentos para comparação segura (ÁGUA = AGUA, MÚLTIPLO = MULTIPLO)
-const norm = s => s.normalize("NFD").replace(/[̀-ͯ]/g,"").toUpperCase();
+// Normaliza rótulos vindos dos relatórios da Sabesp antes de comparar.
+// Além de acento e caixa, precisa tratar pontuação e espaço: o mesmo
+// serviço aparece como "LIGAÇÃO DE ESGOTO S/V" no pendente e
+// "LIGAÇÃO DE ESGOTO S/V." no Resumo do Dia. Sem isso a OS some da
+// coluna Na Rua (8 de 229 linhas no relatório de 07/09).
+const norm = s => String(s ?? "")
+  .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+  .toUpperCase()
+  .replace(/\s+/g," ")
+  .trim()
+  .replace(/[.,;:\s]+$/,"");
 // Chave real de um item de carteira: a OS sozinha NÃO identifica o trabalho.
 // Uma mesma OS carrega várias TSS (o serviço original gera etapas novas com
 // o mesmo número), e cada par OS+TSS entra e sai da carteira por conta própria.
