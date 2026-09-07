@@ -793,8 +793,12 @@ function HistoricoChart({historico,activeUnit}){
     }
   },[allFamilies]);
 
-  const chartData = useMemo(()=>{
-    if(!historico?.length)return[];
+  // O robô grava o resumo do dia em etapas, depois das 17h. Quem abre a tela
+  // durante a carga lê um dia pela metade — e o gráfico desenhava um penhasco
+  // que parecia a carteira zerando (07/09 apareceu com 9 OS em vez de 988).
+  // Só o ÚLTIMO dia é suspeito: uma queda no meio da série é dado real.
+  const {chartData,diaParcial} = useMemo(()=>{
+    if(!historico?.length) return {chartData:[],diaParcial:null};
     const byDay={};
     historico.forEach(r=>{
       if(unidadeFilter!==null && r.unidade!==unidadeFilter) return;
@@ -807,7 +811,20 @@ function HistoricoChart({historico,activeUnit}){
     let data = Object.values(byDay).sort((a,b)=>a.dia.localeCompare(b.dia));
     if(dateFrom) data = data.filter(d => d.dia >= dateFrom);
     if(dateTo) data = data.filter(d => d.dia <= dateTo);
-    return data.map(d=>({...d,label:fmtDiaShort(d.dia)}));
+
+    // Compara o último dia com a mediana dos 5 anteriores. Mediana, não média,
+    // para um único dia estranho não contaminar a referência.
+    let parcial=null;
+    if(data.length>=4){
+      const ult=data[data.length-1];
+      const ref=data.slice(-6,-1).map(d=>d.total).sort((a,b)=>a-b);
+      const mediana=ref[Math.floor(ref.length/2)];
+      if(mediana>0 && ult.total < mediana*0.5){
+        parcial={dia:ult.dia,total:ult.total,esperado:mediana};
+        data=data.slice(0,-1);
+      }
+    }
+    return {chartData:data.map(d=>({...d,label:fmtDiaShort(d.dia)})),diaParcial:parcial};
   },[historico,unidadeFilter,familyFilter,dateFrom,dateTo]);
 
   const handleChartClick = useCallback((e)=>{
@@ -855,6 +872,15 @@ function HistoricoChart({historico,activeUnit}){
         </div>
       </div>
 
+      {diaParcial&&<div style={{margin:"0 18px 12px",padding:"10px 14px",borderRadius:9,
+        background:"rgba(245,158,11,0.08)",border:`1px solid rgba(245,158,11,0.28)`,
+        display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+        <span style={{fontSize:15}}>⏳</span>
+        <span style={{fontSize:12.5,color:C.amber,fontWeight:600}}>{fmtDiaFull(diaParcial.dia)} ainda está sendo carregado</span>
+        <span style={{fontSize:12,color:C.textDim}}>
+          {diaParcial.total} de ~{diaParcial.esperado} OS gravadas — o dia foi omitido do gráfico para não desenhar uma queda que não existe. Atualize em alguns minutos.
+        </span>
+      </div>}
       {chartData.length>0 ? <>
         <ResponsiveContainer width="100%" height={260}>
           <AreaChart data={chartData} margin={{top:5,right:10,left:0,bottom:5}} onClick={handleChartClick} style={{cursor:"pointer"}}>
