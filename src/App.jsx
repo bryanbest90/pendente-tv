@@ -793,12 +793,8 @@ function HistoricoChart({historico,activeUnit}){
     }
   },[allFamilies]);
 
-  // O robô grava o resumo do dia em etapas, depois das 17h. Quem abre a tela
-  // durante a carga lê um dia pela metade — e o gráfico desenhava um penhasco
-  // que parecia a carteira zerando (07/09 apareceu com 9 OS em vez de 988).
-  // Só o ÚLTIMO dia é suspeito: uma queda no meio da série é dado real.
-  const {chartData} = useMemo(()=>{
-    if(!historico?.length) return {chartData:[],diaParcial:null};
+  const chartData = useMemo(()=>{
+    if(!historico?.length)return[];
     const byDay={};
     historico.forEach(r=>{
       if(unidadeFilter!==null && r.unidade!==unidadeFilter) return;
@@ -811,20 +807,7 @@ function HistoricoChart({historico,activeUnit}){
     let data = Object.values(byDay).sort((a,b)=>a.dia.localeCompare(b.dia));
     if(dateFrom) data = data.filter(d => d.dia >= dateFrom);
     if(dateTo) data = data.filter(d => d.dia <= dateTo);
-
-    // Compara o último dia com a mediana dos 5 anteriores. Mediana, não média,
-    // para um único dia estranho não contaminar a referência.
-    let parcial=null;
-    if(data.length>=4){
-      const ult=data[data.length-1];
-      const ref=data.slice(-6,-1).map(d=>d.total).sort((a,b)=>a-b);
-      const mediana=ref[Math.floor(ref.length/2)];
-      if(mediana>0 && ult.total < mediana*0.5){
-        parcial={dia:ult.dia,total:ult.total,esperado:mediana};
-        data=data.slice(0,-1);
-      }
-    }
-    return {chartData:data.map(d=>({...d,label:fmtDiaShort(d.dia)})),diaParcial:parcial};
+    return data.map(d=>({...d,label:fmtDiaShort(d.dia)}));
   },[historico,unidadeFilter,familyFilter,dateFrom,dateTo]);
 
   const handleChartClick = useCallback((e)=>{
