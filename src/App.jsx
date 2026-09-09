@@ -503,10 +503,17 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
   const sorted=useMemo(()=>{if(!modalSort.col)return rows;const def=cols.find(c=>c.key===modalSort.col);if(!def)return rows;const fn=def.sort||def.get;
     return[...rows].sort((a,b)=>{let va=fn(a),vb=fn(b);if(typeof va==="string")va=va.toLowerCase();if(typeof vb==="string")vb=vb.toLowerCase();const cmp=va<vb?-1:va>vb?1:0;return modalSort.asc?cmp:-cmp;});},[rows,modalSort]);
   const toggleSort=(key)=>setModalSort(prev=>prev.col===key?{col:key,asc:!prev.asc}:{col:key,asc:true});
+  // Rua com rede de gas da Comgas. So marca — nao reordena nem filtra nada.
+  const gasPorLinha=useMemo(()=>sorted.map(r=>
+    matchGasStreet(String(r["Endereço"]||"").trim())
+  ),[sorted]);
+  const totalGas=gasPorLinha.filter(Boolean).length;
   return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(4px)"}}>
     <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:16,border:`1px solid ${C.border}`,width:"100%",maxWidth:1400,maxHeight:"80vh",display:"flex",flexDirection:"column",overflow:"hidden",animation:"modalIn 0.2s ease"}}>
       <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
-        <div><div style={{fontSize:16,fontWeight:700,color:C.text}}>{familia}</div><div style={{fontSize:13,color:C.textDim,marginTop:2}}>{tssName?tssName+" · ":""}<span style={{color}}>{label}</span> · {rows.length} OS</div></div>
+        <div><div style={{fontSize:16,fontWeight:700,color:C.text}}>{familia}</div><div style={{fontSize:13,color:C.textDim,marginTop:2}}>{tssName?tssName+" · ":""}<span style={{color}}>{label}</span> · {rows.length} OS
+          {totalGas>0&&<span style={{marginLeft:8,fontSize:12,color:C.amber,fontWeight:700,padding:"2px 9px",borderRadius:6,border:"1px solid rgba(245,158,11,0.4)",background:C.amberBg}}>🔥 {totalGas} com rede de gás</span>}
+        </div></div>
         <button onClick={onClose} style={{background:"transparent",border:"none",color:C.textDim,fontSize:22,cursor:"pointer",padding:"4px 8px"}}>✕</button>
       </div>
       <div style={{overflowY:"auto",flex:1}}>
@@ -519,7 +526,11 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
               <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,fontVariantNumeric:"tabular-nums",fontWeight:600,color:C.accent}}>{r["Número OS"]}</td>
               <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r["TSS"]}</td>
               <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,fontWeight:600,color:C.textMuted}}>{r["SF"]}</td>
-              <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{String(r["Endereço"]).trim()}, {r["Número"]}{r["Complemento"]?" - "+String(r["Complemento"]).trim():""}</td>
+              <td title={gasPorLinha[i]?"Rua com rede de gás Comgás: "+gasPorLinha[i]:undefined}
+                style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap",
+                  ...(gasPorLinha[i]?{color:C.amber,fontWeight:700,background:C.amberBg,boxShadow:"inset 3px 0 0 "+C.amber}:{})}}>
+                {gasPorLinha[i]&&<span style={{marginRight:6}}>🔥</span>}
+                {String(r["Endereço"]).trim()}, {r["Número"]}{r["Complemento"]?" - "+String(r["Complemento"]).trim():""}</td>
               <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`}}>{r["Bairro"]}</td>
               <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`}}>{r["Município"]}</td>
               <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,fontWeight:600,color:tempo(r["Tempo Residual"])==="fora"?C.red:C.green}}>{r["Tempo Residual"]}</td>
@@ -1048,7 +1059,21 @@ const GAS_STREETS_RAW = [
 ];
 const GAS_EXCLUDED_FAMILIES = ["OUTROS SERVIÇOS DE CAVALETE","REPOSIÇÃO","OUTROS SERVIÇOS DE REPOSIÇÃO","HIDRÔMETRO","CAVALETE"];
 
-function normalizar(str){return(str||"").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim();}
+// Padroniza o tipo do logradouro antes de comparar. O pendente escreve
+// "AVENIDA GUARAPIRANGA" e a lista de gas tem "AV GUARAPIRANGA"; como o
+// casamento e por trecho contido, as 20 avenidas e 1 praca da lista (30%
+// dela) nunca disparavam alerta. Abreviar dos dois lados resolve sem
+// perder a desambiguacao entre rua e avenida de mesmo nome.
+function normalizar(str){
+  return (str||"").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim()
+    .replace(/^AVENIDA\s+/,"AV ")
+    .replace(/^PRACA\s+/,"PCA ")
+    .replace(/^PCA\.?\s+/,"PCA ")
+    .replace(/^TRAVESSA\s+/,"TV ")
+    .replace(/^ALAMEDA\s+/,"AL ")
+    .replace(/^ESTRADA\s+/,"ESTR ")
+    .replace(/^RODOVIA\s+/,"ROD ");
+}
 function loadIgnoredGas(){try{const d=localStorage.getItem("gas-ignored-v1");return d?new Set(JSON.parse(d)):new Set();}catch{return new Set();}}
 function saveIgnoredGas(s){try{localStorage.setItem("gas-ignored-v1",JSON.stringify([...s]));}catch{}}
 
