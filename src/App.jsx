@@ -154,10 +154,24 @@ async function fetchRows(){
   }
   return { rows: allRows, updatedAt };
 }
+// Pagina de 1000 em 1000 como as demais buscas.
+// Sem isso o Supabase devolve so as 1000 primeiras linhas e, como a ordem
+// e dia.asc, quem fica de fora sao os dias MAIS RECENTES — o grafico
+// simplesmente parava de crescer. Com ~46 linhas por dia, o corte chegou
+// em 08/09/2026, quando o historico passou de 24 dias.
 async function fetchHistorico(){
-  const res = await fetch(SUPABASE_URL+"/rest/v1/pendente_historico?select=dia,unidade,familia,no_prazo,fora_prazo,total&order=dia.asc",{headers:HEADERS});
-  if(!res.ok) throw new Error("Erro historico "+res.status);
-  return await res.json();
+  const allRows=[];let from=0;const ps=1000;
+  while(true){
+    const res=await fetch(SUPABASE_URL+"/rest/v1/pendente_historico?select=dia,unidade,familia,no_prazo,fora_prazo,total&order=dia.asc",
+      {headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
+    if(!res.ok&&res.status!==206) throw new Error("Erro historico "+res.status);
+    const data=await res.json();
+    if(!data?.length) break;
+    allRows.push(...data);
+    if(data.length<ps) break;
+    from+=ps;
+  }
+  return allRows;
 }
 // Busca mapeamento global TSS→família de TODOS os dados históricos (não só D-2/D-1)
 async function fetchTssToFamiliaMap(){
