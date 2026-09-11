@@ -2310,12 +2310,12 @@ function ProducaoView({sess,onLogout}){
           </div>
         </div>}
 
-        <div style={{marginTop:12,fontSize:11,color:C.textDim,lineHeight:1.6}}>
+        {/* <div style={{marginTop:12,fontSize:11,color:C.textDim,lineHeight:1.6}}>
           Contagem de execuções confirmadas (Relatório de Dados Operacionais), não de OS distintas —
           uma OS que gera duas etapas conta duas vezes, que é como a equipe é medida.
           {" "}<strong style={{color:C.textMuted}}>TSS</strong> é o serviço solicitado na abertura;
           {" "}<strong style={{color:C.textMuted}}>TSE</strong> é o que foi feito. Eles divergem na maioria das linhas.
-        </div>
+        </div> */}
       </>}
     </>}
   </div>;
