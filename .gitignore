@@ -1,3 +1,7 @@
 node_modules
 dist
 .DS_Store
+
+# exports e arquivos de trabalho — nao vao para o repositorio
+*.csv
+Claude outputs/

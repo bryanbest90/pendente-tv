@@ -206,18 +206,89 @@ async function fetchDiarioOS(dia){
 // Execuções confirmadas (relatório Dados Operacionais / Registro de Falhas).
 // Fonte da verdade do que foi EXECUTADO — o que sai da carteira sem estar
 // aqui saiu por outro motivo (cancelamento, erro de base, encerramento).
+//
+// Duas origens possíveis, na ordem:
+//   v_execucao_publica  — só numero_os, tss, dia. É o que a Carteira
+//                         precisa, e é o que sobra para o anon depois
+//                         da etapa 2 de sql/producao.sql.
+//   execucao            — a tabela cheia, enquanto a etapa 2 não roda.
+// A ordem importa: sem o fallback, aplicar a etapa 2 quebraria a
+// coluna Baixas silenciosamente.
+let FONTE_EXEC=null;
 async function fetchExecucao(diaIni,diaFim){
-  const allRows=[];let from=0;const ps=1000;
-  while(true){
-    const res=await fetch(SUPABASE_URL+`/rest/v1/execucao?dia=gte.${diaIni}&dia=lte.${diaFim}&select=numero_os,tss,dia,tse,equipe`,{headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
-    if(!res.ok&&res.status!==206) break;
-    const data=await res.json();
-    if(!data?.length)break;
-    allRows.push(...data);
-    if(data.length<ps)break;
-    from+=ps;
+  const tentar=async fonte=>{
+    const allRows=[];let from=0;const ps=1000;
+    while(true){
+      const res=await fetch(SUPABASE_URL+`/rest/v1/${fonte}?dia=gte.${diaIni}&dia=lte.${diaFim}&select=numero_os,tss,dia`,{headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
+      if(!res.ok&&res.status!==206) return null;
+      const data=await res.json();
+      if(!data?.length)break;
+      allRows.push(...data);
+      if(data.length<ps)break;
+      from+=ps;
+    }
+    return allRows;
+  };
+  for(const fonte of (FONTE_EXEC?[FONTE_EXEC]:["v_execucao_publica","execucao"])){
+    const r=await tentar(fonte);
+    if(r){FONTE_EXEC=fonte;return r;}
   }
-  return allRows;
+  return [];
+}
+
+/* ── Auth (Supabase) — só a aba Produção depende disto ── */
+const AUTH_STORE="sabesp-auth-v1";
+function loadSess(){try{const d=localStorage.getItem(AUTH_STORE);return d?JSON.parse(d):null;}catch{return null;}}
+function saveSess(s){try{s?localStorage.setItem(AUTH_STORE,JSON.stringify(s)):localStorage.removeItem(AUTH_STORE);}catch{}}
+const authHeaders=tok=>({"apikey":SUPABASE_KEY,"Authorization":"Bearer "+tok,"Content-Type":"application/json"});
+
+async function authLogin(email,senha){
+  const res=await fetch(SUPABASE_URL+"/auth/v1/token?grant_type=password",
+    {method:"POST",headers:{"apikey":SUPABASE_KEY,"Content-Type":"application/json"},
+     body:JSON.stringify({email:email.trim(),password:senha})});
+  const j=await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(j.error_description||j.msg||j.message||"Login inválido");
+  return j; // access_token, refresh_token, expires_at, user
+}
+async function authRefresh(refresh_token){
+  const res=await fetch(SUPABASE_URL+"/auth/v1/token?grant_type=refresh_token",
+    {method:"POST",headers:{"apikey":SUPABASE_KEY,"Content-Type":"application/json"},
+     body:JSON.stringify({refresh_token})});
+  if(!res.ok) return null;
+  return res.json();
+}
+// A RLS de `perfis` devolve só a própria linha — daí a lista de quem
+// tem acesso não vaza nem para quem está logado.
+async function fetchPerfil(tok){
+  const res=await fetch(SUPABASE_URL+"/rest/v1/perfis?select=email,nome,pode_producao",{headers:authHeaders(tok)});
+  if(!res.ok) return null;
+  const j=await res.json().catch(()=>[]);
+  return j?.[0]||null;
+}
+// Detalhe da produção. Usa a view quando existe (soma no banco, não no
+// navegador); se ela não existe ainda, lê a tabela e soma aqui.
+async function fetchProducao(tok,diaIni,diaFim){
+  const H={...authHeaders(tok)};
+  const puxar=async(rota,sel)=>{
+    const out=[];let from=0;const ps=1000;
+    while(true){
+      const res=await fetch(SUPABASE_URL+`/rest/v1/${rota}?dia=gte.${diaIni}&dia=lte.${diaFim}&select=${sel}`,{headers:{...H,"Range":from+"-"+(from+ps-1)}});
+      if(!res.ok&&res.status!==206){const t=await res.text();throw new Error(res.status+" "+t.slice(0,160));}
+      const data=await res.json();
+      if(!data?.length)break;
+      out.push(...data);
+      if(data.length<ps)break;
+      from+=ps;
+    }
+    return out;
+  };
+  try{
+    const v=await puxar("v_producao_detalhe","dia,equipe,tss,tse,atc,qtd,os_distintas");
+    return {rows:v,agregado:true};
+  }catch(e){
+    const t=await puxar("execucao","dia,equipe,tss,tse,atc,numero_os");
+    return {rows:t.map(r=>({...r,qtd:1,os_distintas:1})),agregado:false};
+  }
 }
 
 async function uploadRows(rows){
@@ -1927,6 +1998,329 @@ function CarteiraView({rawRows}){
 }
 
 /* ── Main ── */
+/* ══════════════════════════════════════════════════════════
+   PRODUÇÃO POR EQUIPES — aba restrita
+   Fonte: tabela `execucao` (Relatório de Dados Operacionais,
+   robô das 00:30). Nenhuma coleta nova.
+   ══════════════════════════════════════════════════════════ */
+
+const fmtISO=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+const diasAtras=n=>{const d=new Date();d.setDate(d.getDate()-n);return fmtISO(d);};
+
+function LoginModal({onClose,onOk}){
+  const [email,setEmail]=useState("");
+  const [senha,setSenha]=useState("");
+  const [erro,setErro]=useState("");
+  const [busy,setBusy]=useState(false);
+
+  const entrar=async()=>{
+    if(busy)return;
+    setErro("");setBusy(true);
+    try{
+      const s=await authLogin(email,senha);
+      const perfil=await fetchPerfil(s.access_token);
+      if(!perfil) throw new Error("Usuário sem linha em `perfis`. Rode a etapa 1 de sql/producao.sql.");
+      if(!perfil.pode_producao) throw new Error("Este usuário existe, mas não está liberado para a aba Produção.");
+      onOk({access_token:s.access_token,refresh_token:s.refresh_token,expires_at:s.expires_at,perfil});
+    }catch(e){setErro(e.message);}
+    setBusy(false);
+  };
+
+  const inp={width:"100%",boxSizing:"border-box",padding:"10px 12px",borderRadius:8,fontSize:13,
+    border:`1px solid ${C.border}`,background:C.cardAlt,color:C.text,outline:"none"};
+
+  return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(2,6,16,0.75)",backdropFilter:"blur(4px)",zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+    <div onClick={e=>e.stopPropagation()} style={{width:340,maxWidth:"100%",background:C.card,borderRadius:16,border:`1px solid ${C.border}`,padding:24,animation:"modalIn 0.2s ease"}}>
+      <div style={{textAlign:"center",marginBottom:18}}>
+        <div style={{fontSize:28,marginBottom:6}}>🔒</div>
+        <h3 style={{margin:0,fontSize:16,fontWeight:800}}>Produção por Equipes</h3>
+        <p style={{margin:"6px 0 0",fontSize:12,color:C.textDim}}>Área restrita — entre com sua conta</p>
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        <input style={inp} type="email" placeholder="e-mail" value={email} autoFocus
+          onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==="Enter"&&entrar()}/>
+        <input style={inp} type="password" placeholder="senha" value={senha}
+          onChange={e=>setSenha(e.target.value)} onKeyDown={e=>e.key==="Enter"&&entrar()}/>
+        {erro&&<div style={{fontSize:12,color:C.red,background:C.redBg,border:`1px solid ${C.redBorder}`,borderRadius:8,padding:"8px 10px",lineHeight:1.4}}>{erro}</div>}
+        <button onClick={entrar} disabled={busy||!email||!senha}
+          style={{padding:"10px 0",borderRadius:8,fontSize:13,fontWeight:700,cursor:busy?"wait":"pointer",border:"1px solid rgba(59,130,246,0.4)",
+            background:busy?C.border:C.accentBg,color:busy?C.textDim:C.accent,opacity:(!email||!senha)?0.5:1}}>
+          {busy?"Entrando…":"Entrar"}
+        </button>
+        <button onClick={onClose} style={{padding:"6px 0",borderRadius:8,fontSize:12,fontWeight:600,cursor:"pointer",border:"none",background:"transparent",color:C.textDim}}>cancelar</button>
+      </div>
+    </div>
+  </div>;
+}
+
+function BarraProp({valor,max,cor}){
+  const pct=max>0?(valor/max)*100:0;
+  return <div style={{height:6,borderRadius:3,background:C.border,overflow:"hidden",width:"100%"}}>
+    <div style={{width:`${pct}%`,height:"100%",background:cor,transition:"width 0.35s"}}/>
+  </div>;
+}
+
+function ProducaoView({sess,onLogout}){
+  const [ini,setIni]=useState(diasAtras(6));
+  const [fim,setFim]=useState(fmtISO(new Date()));
+  const [modo,setModo]=useState("tss");      // tss = pedido | tse = executado
+  const [unidade,setUnidade]=useState("geral");
+  const [equipeSel,setEquipeSel]=useState(null);
+  const [busca,setBusca]=useState("");
+  const [data,setData]=useState(null);
+  const [loading,setLoading]=useState(true);
+  const [erro,setErro]=useState("");
+
+  useEffect(()=>{let vivo=true;
+    (async()=>{
+      setLoading(true);setErro("");
+      try{
+        const d=await fetchProducao(sess.access_token,ini,fim);
+        if(vivo){setData(d);setEquipeSel(null);}
+      }catch(e){
+        if(vivo){setErro(String(e.message||e));setData(null);}
+      }
+      if(vivo)setLoading(false);
+    })();
+    return()=>{vivo=false;};
+  },[sess.access_token,ini,fim]);
+
+  const atcAlvo=UNITS.find(u=>u.id===unidade)?.atc??null;
+
+  const ag=useMemo(()=>{
+    if(!data)return null;
+    const campo=modo==="tss"?"tss":"tse";
+    const linhas=data.rows.filter(r=>atcAlvo===null?true:Number(r.atc)===atcAlvo);
+
+    const equipes=new Map();  // equipe -> {total, tipos:Map}
+    const dias=new Map();
+    let total=0;
+    linhas.forEach(r=>{
+      const eq=String(r.equipe||"").trim()||"(sem equipe)";
+      const tp=String(r[campo]||"").trim()||(modo==="tss"?"(sem TSS)":"(sem TSE)");
+      const q=Number(r.qtd)||1;
+      total+=q;
+      if(!equipes.has(eq))equipes.set(eq,{equipe:eq,total:0,tipos:new Map()});
+      const e=equipes.get(eq);
+      e.total+=q;
+      e.tipos.set(tp,(e.tipos.get(tp)||0)+q);
+      dias.set(r.dia,(dias.get(r.dia)||0)+q);
+    });
+
+    const listaEquipes=[...equipes.values()].sort((a,b)=>b.total-a.total||a.equipe.localeCompare(b.equipe));
+
+    // tipos do recorte atual (equipe selecionada ou todas)
+    const tiposMap=new Map();
+    const fonte=equipeSel?listaEquipes.filter(e=>e.equipe===equipeSel):listaEquipes;
+    fonte.forEach(e=>e.tipos.forEach((q,tp)=>tiposMap.set(tp,(tiposMap.get(tp)||0)+q)));
+    const listaTipos=[...tiposMap.entries()].map(([tipo,qtd])=>({tipo,qtd}))
+      .sort((a,b)=>b.qtd-a.qtd||a.tipo.localeCompare(b.tipo));
+
+    const listaDias=[...dias.entries()].map(([dia,qtd])=>({dia,qtd})).sort((a,b)=>a.dia.localeCompare(b.dia));
+
+    return {
+      total,
+      equipes:listaEquipes,
+      tipos:listaTipos,
+      dias:listaDias,
+      totalRecorte:listaTipos.reduce((s,t)=>s+t.qtd,0),
+      nTiposGeral:new Set(listaEquipes.flatMap(e=>[...e.tipos.keys()])).size,
+    };
+  },[data,modo,atcAlvo,equipeSel]);
+
+  const equipesFiltradas=useMemo(()=>{
+    if(!ag)return[];
+    const b=norm(busca);
+    return b?ag.equipes.filter(e=>norm(e.equipe).includes(b)):ag.equipes;
+  },[ag,busca]);
+
+  const tiposFiltrados=useMemo(()=>{
+    if(!ag)return[];
+    const b=norm(busca);
+    return (b&&!equipeSel)?ag.tipos.filter(t=>norm(t.tipo).includes(b)):ag.tipos;
+  },[ag,busca,equipeSel]);
+
+  const baixarCSV=()=>{
+    if(!ag)return;
+    const campo=modo==="tss"?"TSS":"TSE";
+    const linhas=[["Equipe",campo,"Quantidade"]];
+    ag.equipes.forEach(e=>[...e.tipos.entries()].sort((a,b)=>b[1]-a[1])
+      .forEach(([tp,q])=>linhas.push([e.equipe,tp,q])));
+    const csv="﻿"+linhas.map(l=>l.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(";")).join("\n");
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8"}));
+    a.download=`producao_${campo.toLowerCase()}_${ini}_a_${fim}.csv`;
+    a.click();URL.revokeObjectURL(a.href);
+  };
+
+  const presets=[
+    {rot:"Hoje",     ini:fmtISO(new Date()),fim:fmtISO(new Date())},
+    {rot:"7 dias",   ini:diasAtras(6),      fim:fmtISO(new Date())},
+    {rot:"30 dias",  ini:diasAtras(29),     fim:fmtISO(new Date())},
+    {rot:"Mês atual",ini:fmtISO(new Date(new Date().getFullYear(),new Date().getMonth(),1)),fim:fmtISO(new Date())},
+  ];
+  const ativoPreset=p=>p.ini===ini&&p.fim===fim;
+
+  const btn=(on)=>({padding:"5px 12px",borderRadius:7,fontSize:12,fontWeight:700,cursor:"pointer",
+    border:on?"1px solid rgba(59,130,246,0.4)":`1px solid ${C.border}`,
+    background:on?C.accentBg:"transparent",color:on?C.accent:C.textMuted,transition:"all 0.15s"});
+
+  const maxEq=ag?.equipes[0]?.total||0;
+  const maxTp=tiposFiltrados[0]?.qtd||0;
+  const nDias=ag?.dias.length||0;
+  const rotuloTipo=modo==="tss"?"TSS":"TSE";
+
+  return <div style={{animation:"fadeIn 0.35s ease"}}>
+
+    {/* barra superior */}
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexWrap:"wrap",
+      padding:"10px 16px",background:C.card,borderRadius:10,border:`1px solid ${C.border}`,marginBottom:14}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+        <span style={{fontSize:12,padding:"2px 10px",borderRadius:8,background:"rgba(139,92,246,0.1)",color:"#8b5cf6",border:"1px solid rgba(139,92,246,0.25)",fontWeight:700}}>🔒 restrito</span>
+        <span style={{fontSize:12,color:C.textDim}}>{sess.perfil?.nome||sess.perfil?.email}</span>
+      </div>
+      <div style={{display:"flex",gap:8}}>
+        <button onClick={baixarCSV} style={{...btn(false),color:C.green,border:`1px solid ${C.greenBorder}`}}>⬇ CSV</button>
+        <button onClick={onLogout} style={btn(false)}>Sair</button>
+      </div>
+    </div>
+
+    {/* filtros */}
+    <div style={{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,padding:"12px 16px",marginBottom:14,display:"flex",flexDirection:"column",gap:10}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+        <span style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,fontWeight:700,minWidth:56}}>Período</span>
+        {presets.map(p=><button key={p.rot} onClick={()=>{setIni(p.ini);setFim(p.fim);}} style={btn(ativoPreset(p))}>{p.rot}</button>)}
+        <span style={{width:1,height:18,background:C.border,margin:"0 2px"}}/>
+        <input type="date" value={ini} max={fim} onChange={e=>setIni(e.target.value)} style={dateInputStyle}/>
+        <span style={{color:C.textDim,fontSize:12}}>até</span>
+        <input type="date" value={fim} min={ini} onChange={e=>setFim(e.target.value)} style={dateInputStyle}/>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+        <span style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,fontWeight:700,minWidth:56}}>Serviço</span>
+        <button onClick={()=>setModo("tss")} style={btn(modo==="tss")} title="TSS — serviço que foi solicitado na abertura da OS">TSS · solicitado</button>
+        <button onClick={()=>setModo("tse")} style={btn(modo==="tse")} title="TSE — serviço que a equipe efetivamente executou">TSE · executado</button>
+        <span style={{width:1,height:18,background:C.border,margin:"0 2px"}}/>
+        {UNITS.map(u=><button key={u.id} onClick={()=>setUnidade(u.id)} style={btn(unidade===u.id)}>{u.icon} {u.label}</button>)}
+      </div>
+    </div>
+
+    {erro&&<div style={{background:C.redBg,border:`1px solid ${C.redBorder}`,borderRadius:10,padding:"12px 16px",marginBottom:14,fontSize:12,color:C.red,lineHeight:1.5}}>
+      Não consegui ler a produção: {erro}
+      <div style={{color:C.textMuted,marginTop:6}}>Se a mensagem fala em permissão, falta rodar a etapa 1 de <code>sql/producao.sql</code> ou marcar <code>pode_producao = true</code> no seu perfil.</div>
+    </div>}
+
+    {loading&&<div style={{textAlign:"center",padding:"40px 0",color:C.textDim,fontSize:13}}>Carregando produção…</div>}
+
+    {!loading&&ag&&<>
+      {/* cartões */}
+      <div style={{display:"flex",gap:12,marginBottom:14,flexWrap:"wrap"}}>
+        <SummaryCard label="Execuções"        value={ag.total}                                   color={C.green}  icon="✅"/>
+        <SummaryCard label="Equipes"          value={ag.equipes.length}                          color="#8b5cf6"  icon="👷"/>
+        <SummaryCard label={`Tipos de ${rotuloTipo}`} value={ag.nTiposGeral}                     color={C.accent} icon="🔧"/>
+        <SummaryCard label="Média por dia"    value={nDias?Math.round(ag.total/nDias):0}          color={C.amber}  icon="📅"/>
+      </div>
+
+      {ag.total===0&&<div style={{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,padding:"40px 20px",textAlign:"center",color:C.textDim,fontSize:13}}>
+        Nenhuma execução nesse período{unidade!=="geral"?" para esta unidade":""}.
+      </div>}
+
+      {ag.total>0&&<>
+        <input value={busca} onChange={e=>setBusca(e.target.value)} placeholder={`buscar equipe ou ${rotuloTipo}…`}
+          style={{width:"100%",boxSizing:"border-box",padding:"9px 14px",borderRadius:10,fontSize:13,marginBottom:14,
+            border:`1px solid ${C.border}`,background:C.card,color:C.text,outline:"none"}}/>
+
+        <div style={{display:"flex",gap:14,alignItems:"flex-start",flexWrap:"wrap"}}>
+
+          {/* equipes */}
+          <div style={{flex:"1 1 320px",minWidth:300,background:C.card,borderRadius:12,border:`1px solid ${C.border}`,overflow:"hidden"}}>
+            <div style={{padding:"10px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:12,fontWeight:800,color:C.text}}>Equipes ({equipesFiltradas.length})</span>
+              {equipeSel&&<button onClick={()=>setEquipeSel(null)} style={{...btn(false),padding:"3px 10px",fontSize:11}}>limpar seleção</button>}
+            </div>
+            <div style={{maxHeight:520,overflowY:"auto"}}>
+              {equipesFiltradas.map((e,i)=>{
+                const on=equipeSel===e.equipe;
+                return <div key={e.equipe} onClick={()=>setEquipeSel(on?null:e.equipe)}
+                  style={{padding:"9px 16px",cursor:"pointer",borderBottom:`1px solid ${C.border}`,
+                    background:on?C.accentBg:(i%2?"rgba(15,23,42,0.35)":"transparent"),
+                    borderLeft:on?`3px solid ${C.accent}`:"3px solid transparent",transition:"background 0.12s"}}
+                  onMouseEnter={ev=>{if(!on)ev.currentTarget.style.background=C.rowHover;}}
+                  onMouseLeave={ev=>{if(!on)ev.currentTarget.style.background=i%2?"rgba(15,23,42,0.35)":"transparent";}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,marginBottom:5}}>
+                    <span style={{fontSize:12,fontWeight:600,color:on?C.accent:"#8b5cf6",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.equipe}</span>
+                    <span style={{fontSize:13,fontWeight:800,color:C.text,fontVariantNumeric:"tabular-nums"}}>{e.total.toLocaleString("pt-BR")}</span>
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <BarraProp valor={e.total} max={maxEq} cor="linear-gradient(90deg,#8b5cf6,#a78bfa)"/>
+                    <span style={{fontSize:10,color:C.textDim,minWidth:56,textAlign:"right",whiteSpace:"nowrap"}}>{e.tipos.size} {rotuloTipo}</span>
+                  </div>
+                </div>;
+              })}
+              {equipesFiltradas.length===0&&<div style={{padding:"24px 16px",textAlign:"center",color:C.textDim,fontSize:12}}>nenhuma equipe com esse nome</div>}
+            </div>
+          </div>
+
+          {/* tipos de serviço */}
+          <div style={{flex:"1 1 380px",minWidth:320,background:C.card,borderRadius:12,border:`1px solid ${C.border}`,overflow:"hidden"}}>
+            <div style={{padding:"10px 16px",borderBottom:`1px solid ${C.border}`}}>
+              <div style={{fontSize:12,fontWeight:800,color:C.text}}>
+                {equipeSel?<>{rotuloTipo} de <span style={{color:"#8b5cf6"}}>{equipeSel}</span></>:`${rotuloTipo} — todas as equipes`}
+              </div>
+              <div style={{fontSize:11,color:C.textDim,marginTop:2}}>
+                {ag.totalRecorte.toLocaleString("pt-BR")} execuções · {tiposFiltrados.length} tipos
+              </div>
+            </div>
+            <div style={{maxHeight:520,overflowY:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse"}}>
+                <tbody>
+                  {tiposFiltrados.map((t,i)=>
+                    <tr key={t.tipo} style={{background:i%2?"rgba(15,23,42,0.35)":"transparent"}}>
+                      <td style={{padding:"8px 16px",fontSize:12,color:C.text,borderBottom:`1px solid ${C.border}`,lineHeight:1.35}}>
+                        {t.tipo}
+                        <div style={{marginTop:5,display:"flex",alignItems:"center",gap:8}}>
+                          <BarraProp valor={t.qtd} max={maxTp} cor={`linear-gradient(90deg,${C.accent},#60a5fa)`}/>
+                          <span style={{fontSize:10,color:C.textDim,minWidth:38,textAlign:"right"}}>
+                            {ag.totalRecorte?((t.qtd/ag.totalRecorte)*100).toFixed(1):0}%
+                          </span>
+                        </div>
+                      </td>
+                      <td style={{padding:"8px 16px",fontSize:14,fontWeight:800,color:C.green,textAlign:"right",verticalAlign:"top",
+                        borderBottom:`1px solid ${C.border}`,fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap"}}>{t.qtd.toLocaleString("pt-BR")}</td>
+                    </tr>)}
+                  {tiposFiltrados.length===0&&<tr><td style={{padding:"24px 16px",textAlign:"center",color:C.textDim,fontSize:12}}>nada aqui</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        {/* por dia */}
+        {ag.dias.length>1&&<div style={{marginTop:14,background:C.card,borderRadius:12,border:`1px solid ${C.border}`,padding:"12px 16px"}}>
+          <div style={{fontSize:12,fontWeight:800,color:C.text,marginBottom:10}}>Execuções por dia</div>
+          <div style={{display:"flex",alignItems:"flex-end",gap:3,height:80}}>
+            {ag.dias.map(d=>{
+              const mx=Math.max(...ag.dias.map(x=>x.qtd))||1;
+              return <div key={d.dia} title={`${fmtDiaFull(d.dia)} — ${d.qtd} execuções`}
+                style={{flex:1,minWidth:4,height:`${Math.max((d.qtd/mx)*100,2)}%`,borderRadius:"3px 3px 0 0",
+                  background:`linear-gradient(180deg,${C.accent},rgba(59,130,246,0.25))`,cursor:"default"}}/>;
+            })}
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",marginTop:6,fontSize:10,color:C.textDim}}>
+            <span>{fmtDiaShort(ag.dias[0].dia)}</span><span>{fmtDiaShort(ag.dias[ag.dias.length-1].dia)}</span>
+          </div>
+        </div>}
+
+        <div style={{marginTop:12,fontSize:11,color:C.textDim,lineHeight:1.6}}>
+          Contagem de execuções confirmadas (Relatório de Dados Operacionais), não de OS distintas —
+          uma OS que gera duas etapas conta duas vezes, que é como a equipe é medida.
+          {" "}<strong style={{color:C.textMuted}}>TSS</strong> é o serviço solicitado na abertura;
+          {" "}<strong style={{color:C.textMuted}}>TSE</strong> é o que foi feito. Eles divergem na maioria das linhas.
+        </div>
+      </>}
+    </>}
+  </div>;
+}
+
 export default function App(){
   const [rawRows,setRawRows]=useState(null);
   const [excludedTSS,setExcludedTSS]=useState(new Set());
@@ -1941,7 +2335,30 @@ export default function App(){
   const [historico,setHistorico]=useState(null);
   const [showGasModal,setShowGasModal]=useState(false);
   const [activeTab,setActiveTab]=useState("pendente");
+  const [sess,setSess]=useState(null);          // sessão do Supabase Auth (só a aba Produção usa)
+  const [showLogin,setShowLogin]=useState(false);
   const inputRef=useRef();
+
+  // Retoma a sessão salva. O access_token dura 1h; se venceu, renova pelo
+  // refresh_token — senão o usuário teria que logar de novo a cada hora.
+  useEffect(()=>{(async()=>{
+    const s=loadSess();
+    if(!s?.refresh_token)return;
+    let tok=s.access_token;
+    if(!s.expires_at||s.expires_at*1000<Date.now()+60000){
+      const novo=await authRefresh(s.refresh_token);
+      if(!novo?.access_token){saveSess(null);return;}
+      tok=novo.access_token;
+      s.access_token=novo.access_token;s.refresh_token=novo.refresh_token;s.expires_at=novo.expires_at;
+    }
+    const perfil=await fetchPerfil(tok);
+    if(!perfil?.pode_producao){saveSess(null);return;}
+    const atual={...s,perfil};
+    saveSess(atual);setSess(atual);
+  })();},[]);
+
+  const entrar=useCallback(s=>{saveSess(s);setSess(s);setShowLogin(false);setActiveTab("producao");flash("Bem-vindo, "+(s.perfil?.nome||s.perfil?.email));},[]);
+  const sair=useCallback(()=>{saveSess(null);setSess(null);setActiveTab("pendente");flash("Sessão encerrada");},[]);
 
   const flash=(msg)=>{setToast(msg);setTimeout(()=>setToast(""),4000);};
   const saveFilters=useCallback((excSet,sort,unit)=>{saveLocal({excluded:[...excSet],sortBy:sort,activeUnit:unit});},[]);
@@ -2002,17 +2419,18 @@ export default function App(){
   return <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"'Inter',-apple-system,sans-serif",display:"flex"}}>
     {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed}/>}
     <div style={{flex:1,padding:"24px 16px",overflowY:"auto",minHeight:"100vh"}}>
-      <div style={{maxWidth:960,margin:"0 auto"}}>
+      <div style={{maxWidth:activeTab==="producao"?1180:960,margin:"0 auto"}}>
         <div style={{marginBottom:24,textAlign:"center"}}>
           <h1 style={{fontSize:22,fontWeight:800,margin:0,letterSpacing:-0.5,background:"linear-gradient(135deg,#60a5fa,#3b82f6,#818cf8)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>
-            {activeTab==="pendente"?"Controle de Prazos — OS Pendentes":"Acompanhamento de Carteira"}
+            {activeTab==="pendente"?"Controle de Prazos — OS Pendentes":activeTab==="carteira"?"Acompanhamento de Carteira":"Produção por Equipes"}
           </h1>
           <p style={{color:C.textDim,margin:"6px 0 0",fontSize:13}}>
-            {activeTab==="pendente"?"Análise por família de serviço":"Carteira diária por frente de serviço"}
+            {activeTab==="pendente"?"Análise por família de serviço":activeTab==="carteira"?"Carteira diária por frente de serviço":"Execuções confirmadas por equipe e tipo de serviço"}
           </p>
           {/* Tabs */}
           <div style={{display:"flex",justifyContent:"center",gap:4,marginTop:14}}>
-            {[{id:"pendente",label:"Pendente",icon:"📋"},{id:"carteira",label:"Carteira",icon:"📊"}].map(tab=>
+            {[{id:"pendente",label:"Pendente",icon:"📋"},{id:"carteira",label:"Carteira",icon:"📊"},
+              ...(sess?.perfil?.pode_producao?[{id:"producao",label:"Produção",icon:"👷"}]:[])].map(tab=>
               <button key={tab.id} onClick={()=>setActiveTab(tab.id)}
                 style={{padding:"8px 24px",borderRadius:8,fontSize:13,fontWeight:700,cursor:"pointer",border:activeTab===tab.id?`1px solid rgba(59,130,246,0.4)`:`1px solid ${C.border}`,
                   background:activeTab===tab.id?C.accentBg:"transparent",color:activeTab===tab.id?C.accent:C.textMuted,transition:"all 0.15s",display:"flex",alignItems:"center",gap:6}}
@@ -2021,10 +2439,17 @@ export default function App(){
                 {tab.icon} {tab.label}
               </button>
             )}
+            {!sess&&<button onClick={()=>setShowLogin(true)} title="Área restrita"
+              style={{padding:"8px 12px",borderRadius:8,fontSize:12,cursor:"pointer",border:`1px solid ${C.border}`,
+                background:"transparent",color:C.textDim,opacity:0.45,transition:"opacity 0.15s"}}
+              onMouseEnter={e=>{e.currentTarget.style.opacity=1;}}
+              onMouseLeave={e=>{e.currentTarget.style.opacity=0.45;}}>🔒</button>}
           </div>
         </div>
         {toast&&<div style={{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",zIndex:2000,padding:"10px 24px",borderRadius:10,fontSize:13,fontWeight:600,maxWidth:"90vw",wordBreak:"break-word",background:toast.includes("Erro")?"rgba(239,68,68,0.15)":"rgba(16,185,129,0.15)",color:toast.includes("Erro")?C.red:C.green,border:`1px solid ${toast.includes("Erro")?C.redBorder:C.greenBorder}`,backdropFilter:"blur(8px)",animation:"fadeIn 0.2s ease"}}>{toast}</div>}
         {activeTab==="carteira"&&<CarteiraView rawRows={rawRows}/>}
+        {activeTab==="producao"&&sess?.perfil?.pode_producao&&<ProducaoView sess={sess} onLogout={sair}/>}
+        {showLogin&&<LoginModal onClose={()=>setShowLogin(false)} onOk={entrar}/>}
         {activeTab==="pendente"&&!rawRows&&<div onDragOver={e=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)} onDrop={onDrop}
           onClick={()=>inputRef.current?.click()} style={{border:`2px dashed ${dragOver?C.accent:C.border}`,borderRadius:16,padding:"60px 20px",textAlign:"center",cursor:"pointer",background:dragOver?C.accentBg:C.card,transition:"all 0.2s"}}>
           <input ref={inputRef} type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
