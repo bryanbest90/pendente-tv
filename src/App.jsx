@@ -260,7 +260,7 @@ async function authRefresh(refresh_token){
 // A RLS de `perfis` devolve só a própria linha — daí a lista de quem
 // tem acesso não vaza nem para quem está logado.
 async function fetchPerfil(tok){
-  const res=await fetch(SUPABASE_URL+"/rest/v1/perfis?select=email,nome,pode_producao",{headers:authHeaders(tok)});
+  const res=await fetch(SUPABASE_URL+"/rest/v1/perfis?select=email,nome,pode_producao,pode_importar",{headers:authHeaders(tok)});
   if(!res.ok) return null;
   const j=await res.json().catch(()=>[]);
   return j?.[0]||null;
@@ -291,28 +291,35 @@ async function fetchProducao(tok,diaIni,diaFim){
   }
 }
 
-async function uploadRows(rows){
-  const delRes = await fetch(SUPABASE_URL+"/rest/v1/rpc/limpar_pendente",{method:"POST",headers:{...HEADERS,"Prefer":"return=minimal"},body:"{}"});
+// H = cabecalhos do login, igual as outras duas importacoes.
+async function uploadRows(rows,H){
+  const delRes = await fetch(SUPABASE_URL+"/rest/v1/rpc/limpar_pendente",{method:"POST",headers:{...H,"Prefer":"return=minimal"},body:"{}"});
   if(!delRes.ok) throw new Error("Erro ao limpar: "+await delRes.text());
   const bs=500;
   for(let i=0;i<rows.length;i+=bs){
     const batch=rows.slice(i,i+bs).map(r=>({dados:r}));
-    const res=await fetch(SUPABASE_URL+"/rest/v1/pendente_os",{method:"POST",headers:{...HEADERS,"Prefer":"return=minimal"},body:JSON.stringify(batch)});
+    const res=await fetch(SUPABASE_URL+"/rest/v1/pendente_os",{method:"POST",headers:{...H,"Prefer":"return=minimal"},body:JSON.stringify(batch)});
     if(!res.ok) throw new Error("Erro lote "+(Math.floor(i/bs)+1)+": "+await res.text());
   }
   const now=new Date().toISOString();
-  await fetch(SUPABASE_URL+"/rest/v1/pendente_meta?id=eq.1",{method:"PATCH",headers:{...HEADERS,"Prefer":"return=minimal"},body:JSON.stringify({updated_at:now,total_rows:rows.length})});
+  await fetch(SUPABASE_URL+"/rest/v1/pendente_meta?id=eq.1",{method:"PATCH",headers:{...H,"Prefer":"return=minimal"},body:JSON.stringify({updated_at:now,total_rows:rows.length})});
   return{count:rows.length,updatedAt:now};
 }
 
 /* ── EM RUA API ── */
-async function uploadEmRua(dia, records){
-  // Limpar dia antes de importar
-  await fetch(SUPABASE_URL+"/rest/v1/rpc/limpar_em_rua",{method:"POST",headers:{...HEADERS,"Prefer":"return=minimal"},body:JSON.stringify({p_dia:dia})});
+// H = cabeçalhos com o token de quem está logado. A importação manual deixou
+// de usar a chave anônima do bundle: sem isso, esconder o botão seria enfeite —
+// a chave continuaria podendo gravar direto pelo console.
+async function uploadEmRua(dia, records, H){
+  // Limpar dia antes de importar. Sem checar a resposta, um DELETE recusado
+  // fazia o INSERT rodar por cima e duplicar o dia inteiro — em_rua não tem
+  // chave única que barrasse isso.
+  const del=await fetch(SUPABASE_URL+"/rest/v1/rpc/limpar_em_rua",{method:"POST",headers:{...H,"Prefer":"return=minimal"},body:JSON.stringify({p_dia:dia})});
+  if(!del.ok) throw new Error("Erro ao limpar o dia: "+await del.text());
   const bs=500;
   for(let i=0;i<records.length;i+=bs){
     const batch=records.slice(i,i+bs);
-    const res=await fetch(SUPABASE_URL+"/rest/v1/em_rua",{method:"POST",headers:{...HEADERS,"Prefer":"return=minimal"},body:JSON.stringify(batch)});
+    const res=await fetch(SUPABASE_URL+"/rest/v1/em_rua",{method:"POST",headers:{...H,"Prefer":"return=minimal"},body:JSON.stringify(batch)});
     if(!res.ok) throw new Error("Erro lote em_rua "+(Math.floor(i/bs)+1)+": "+await res.text());
   }
   return records.length;
@@ -423,15 +430,15 @@ function parseExecucaoFile(file){
 
 // Reimporta um periodo: limpa a faixa de datas e regrava.
 // Assim reimportar o mesmo mes nao duplica nada.
-async function uploadExecucao(records,ini,fim){
+async function uploadExecucao(records,ini,fim,H){
   const del=await fetch(SUPABASE_URL+"/rest/v1/rpc/limpar_execucao",{
-    method:"POST",headers:{...HEADERS,"Prefer":"return=minimal"},
+    method:"POST",headers:{...H,"Prefer":"return=minimal"},
     body:JSON.stringify({p_ini:ini,p_fim:fim})});
   if(!del.ok) throw new Error("Erro ao limpar período: "+await del.text());
   const bs=500;
   for(let i=0;i<records.length;i+=bs){
     const res=await fetch(SUPABASE_URL+"/rest/v1/execucao",{
-      method:"POST",headers:{...HEADERS,"Prefer":"return=minimal"},
+      method:"POST",headers:{...H,"Prefer":"return=minimal"},
       body:JSON.stringify(records.slice(i,i+bs))});
     if(!res.ok) throw new Error("Erro lote execução "+(Math.floor(i/bs)+1)+": "+await res.text());
   }
@@ -1304,7 +1311,11 @@ function GasAlertModal({alerts,onIgnore,onClose}){
 }
 
 /* ── Carteira View ── */
-function CarteiraView({rawRows}){
+function CarteiraView({rawRows,sess}){
+  // Os robôs cobrem EM RUA (08:30) e Execução (00:30) todo dia. Os botões
+  // continuam existindo como reserva, mas só para quem tem pode_importar —
+  // e a gravação usa o token do login, não a chave anônima do bundle.
+  const podeImportar=!!sess?.perfil?.pode_importar;
   const today=new Date();
   const fmt=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
   const daysAgo=(n)=>{const d=new Date(today);d.setDate(d.getDate()-n);return fmt(d);};
@@ -1381,14 +1392,14 @@ function CarteiraView({rawRows}){
       flashEmRua("Processando EM RUA...");
       const{dia,records}=await parseEmRuaFile(file);
       flashEmRua(`Enviando ${records.length} registros (${fmtDiaFull(dia)})...`);
-      const count=await uploadEmRua(dia,records);
+      const count=await uploadEmRua(dia,records,authHeaders(sess.access_token));
       flashEmRua(`EM RUA importado ✓ (${count} registros, dia ${fmtDiaFull(dia)})`);
       // Reload em_rua do dia importado
       const er=await fetchEmRua(dia);
       setEmRuaData(er.filter(r=>!isGloballyExcludedTss(r.tss)));
     }catch(e){flashEmRua("Erro: "+e.message);}
     setUploadingEmRua(false);
-  },[diaD1]);
+  },[diaD1,sess]);
 
   // Importar relatório de execução (cobre um período inteiro)
   const handleExecFile=useCallback(async(file)=>{
@@ -1398,14 +1409,14 @@ function CarteiraView({rawRows}){
       flashEmRua("Lendo relatório de execução...");
       const{records,ini,fim,ignoradas}=await parseExecucaoFile(file);
       flashEmRua(`Enviando ${records.length} execuções (${fmtDiaFull(ini)} a ${fmtDiaFull(fim)})...`);
-      await uploadExecucao(records,ini,fim);
+      await uploadExecucao(records,ini,fim,authHeaders(sess.access_token));
       flashEmRua(`Execuções importadas ✓ ${records.length} registros${ignoradas?`, ${ignoradas} ignoradas`:""}`);
       const exe=await fetchExecucao(diaD3,fmt(today));
       setExecSet(new Set(exe.map(r=>osKey(r)+"|"+r.dia)));
       setExecInfo({n:records.length,ini,fim});
     }catch(e){flashEmRua("Erro: "+e.message);}
     setUploadingExec(false);
-  },[diaD3]);
+  },[diaD3,sess]);
 
   // Converter rawRows (pendente_os, campos do Excel) para formato normalizado (D-0)
   const osD0=useMemo(()=>{
@@ -1719,7 +1730,7 @@ function CarteiraView({rawRows}){
       <div style={{display:"flex",gap:8,alignItems:"center"}}>
         <span style={{fontSize:11,color:C.textDim}}>Execuções: {execSet.size>0?<span style={{color:C.green,fontWeight:600}}>{execSet.size}</span>:<span style={{color:C.amber}}>não importado</span>}</span>
         <span style={{fontSize:11,color:C.textDim}}>EM RUA: {emRuaData.length>0?<span style={{color:C.green,fontWeight:600}}>{emRuaData.length} OS</span>:<span style={{color:C.amber}}>não importado</span>}</span>
-        <input ref={emRuaInputRef} type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={e=>{handleEmRuaFile(e.target.files[0]);e.target.value="";}}/>
+        {podeImportar&&<><input ref={emRuaInputRef} type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={e=>{handleEmRuaFile(e.target.files[0]);e.target.value="";}}/>
         <button onClick={()=>emRuaInputRef.current?.click()} disabled={uploadingEmRua}
           style={{fontSize:12,color:"#fff",fontWeight:600,padding:"6px 16px",borderRadius:8,background:uploadingEmRua?"#475569":"linear-gradient(135deg,#3b82f6,#6366f1)",border:"none",cursor:uploadingEmRua?"wait":"pointer",display:"flex",alignItems:"center",gap:6}}>
           {uploadingEmRua?"Importando...":"📥 Importar EM RUA"}
@@ -1729,7 +1740,7 @@ function CarteiraView({rawRows}){
           title="Relatório Dados Operacionais — pode cobrir um mês inteiro; reimportar o mesmo período substitui, não duplica"
           style={{fontSize:12,color:"#fff",fontWeight:600,padding:"6px 16px",borderRadius:8,background:uploadingExec?"#475569":"linear-gradient(135deg,#10b981,#059669)",border:"none",cursor:uploadingExec?"wait":"pointer",display:"flex",alignItems:"center",gap:6}}>
           {uploadingExec?"Importando...":"✅ Importar Execução"}
-        </button>
+        </button></>}
       </div>
     </div>
 
@@ -2020,7 +2031,10 @@ function LoginModal({onClose,onOk}){
       const s=await authLogin(email,senha);
       const perfil=await fetchPerfil(s.access_token);
       if(!perfil) throw new Error("Usuário sem linha em `perfis`. Rode a etapa 1 de sql/producao.sql.");
-      if(!perfil.pode_producao) throw new Error("Este usuário existe, mas não está liberado para a aba Produção.");
+      // Duas permissões independentes: ver a Produção e importar arquivos.
+      // O gerente tem a primeira sem a segunda.
+      if(!perfil.pode_producao&&!perfil.pode_importar)
+        throw new Error("Este usuário existe, mas não está liberado para nada ainda.");
       onOk({access_token:s.access_token,refresh_token:s.refresh_token,expires_at:s.expires_at,perfil});
     }catch(e){setErro(e.message);}
     setBusy(false);
@@ -2061,9 +2075,12 @@ function BarraProp({valor,max,cor}){
 }
 
 function ProducaoView({sess,onLogout}){
-  const [ini,setIni]=useState(diasAtras(6));
+  const primeiroDoMes=()=>{const d=new Date();return fmtISO(new Date(d.getFullYear(),d.getMonth(),1));};
+  const [ini,setIni]=useState(primeiroDoMes());
   const [fim,setFim]=useState(fmtISO(new Date()));
-  const [modo,setModo]=useState("tss");      // tss = pedido | tse = executado
+  // TSE por padrão: é o serviço que a equipe efetivamente executou, que é o
+  // que responde "o que essa equipe fez". O TSS (solicitado) fica no botão.
+  const [modo,setModo]=useState("tse");      // tss = pedido | tse = executado
   const [unidade,setUnidade]=useState("geral");
   const [equipeSel,setEquipeSel]=useState(null);
   const [busca,setBusca]=useState("");
@@ -2352,12 +2369,14 @@ export default function App(){
       s.access_token=novo.access_token;s.refresh_token=novo.refresh_token;s.expires_at=novo.expires_at;
     }
     const perfil=await fetchPerfil(tok);
-    if(!perfil?.pode_producao){saveSess(null);return;}
+    if(!perfil?.pode_producao&&!perfil?.pode_importar){saveSess(null);return;}
     const atual={...s,perfil};
     saveSess(atual);setSess(atual);
   })();},[]);
 
-  const entrar=useCallback(s=>{saveSess(s);setSess(s);setShowLogin(false);setActiveTab("producao");flash("Bem-vindo, "+(s.perfil?.nome||s.perfil?.email));},[]);
+  const entrar=useCallback(s=>{saveSess(s);setSess(s);setShowLogin(false);
+    if(s.perfil?.pode_producao)setActiveTab("producao");
+    flash("Bem-vindo, "+(s.perfil?.nome||s.perfil?.email));},[]);
   const sair=useCallback(()=>{saveSess(null);setSess(null);setActiveTab("pendente");flash("Sessão encerrada");},[]);
 
   const flash=(msg)=>{setToast(msg);setTimeout(()=>setToast(""),4000);};
@@ -2374,15 +2393,17 @@ export default function App(){
   })();},[]);
 
   const handleFile=useCallback(async(file)=>{
-    if(!file)return;setUploading(true);
+    if(!file)return;
+    if(!sess?.perfil?.pode_importar){flash("Erro: importar o pendente exige login com permissão");return;}
+    setUploading(true);
     try{flash("Processando arquivo...");const all=await parseFile(file);
       const filtered=all.map(sanitize).filter(r=>VALID_ATCS.includes(Number(r["ATC"]))&&!EXCLUDED_TSS.includes(String(r["TSS"]||"").trim()));
       setRawRows(filtered);setExcludedTSS(new Set());const now=new Date().toISOString();setUpdatedAt(now);
       cacheRows(filtered,now);saveFilters(new Set(),sortBy,activeUnit);
-      flash("Enviando "+filtered.length+" OS...");const result=await uploadRows(filtered);
+      flash("Enviando "+filtered.length+" OS...");const result=await uploadRows(filtered,authHeaders(sess.access_token));
       setUpdatedAt(result.updatedAt);cacheRows(filtered,result.updatedAt);flash("Pendente atualizado ✓ ("+result.count+" OS)");
     }catch(e){flash("Erro: "+e.message);}setUploading(false);
-  },[saveFilters,sortBy,activeUnit]);
+  },[saveFilters,sortBy,activeUnit,sess]);
 
   const toggleTSS=useCallback(tss=>{setExcludedTSS(prev=>{const n=new Set(prev);n.has(tss)?n.delete(tss):n.add(tss);saveFilters(n,sortBy,activeUnit);return n;});},[saveFilters,sortBy,activeUnit]);
   const toggleAllTSS=useCallback((names,on)=>{setExcludedTSS(prev=>{const n=new Set(prev);names.forEach(nm=>on?n.delete(nm):n.add(nm));saveFilters(n,sortBy,activeUnit);return n;});},[saveFilters,sortBy,activeUnit]);
@@ -2447,16 +2468,22 @@ export default function App(){
           </div>
         </div>
         {toast&&<div style={{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",zIndex:2000,padding:"10px 24px",borderRadius:10,fontSize:13,fontWeight:600,maxWidth:"90vw",wordBreak:"break-word",background:toast.includes("Erro")?"rgba(239,68,68,0.15)":"rgba(16,185,129,0.15)",color:toast.includes("Erro")?C.red:C.green,border:`1px solid ${toast.includes("Erro")?C.redBorder:C.greenBorder}`,backdropFilter:"blur(8px)",animation:"fadeIn 0.2s ease"}}>{toast}</div>}
-        {activeTab==="carteira"&&<CarteiraView rawRows={rawRows}/>}
+        {activeTab==="carteira"&&<CarteiraView rawRows={rawRows} sess={sess}/>}
         {activeTab==="producao"&&sess?.perfil?.pode_producao&&<ProducaoView sess={sess} onLogout={sair}/>}
         {showLogin&&<LoginModal onClose={()=>setShowLogin(false)} onOk={entrar}/>}
-        {activeTab==="pendente"&&!rawRows&&<div onDragOver={e=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)} onDrop={onDrop}
-          onClick={()=>inputRef.current?.click()} style={{border:`2px dashed ${dragOver?C.accent:C.border}`,borderRadius:16,padding:"60px 20px",textAlign:"center",cursor:"pointer",background:dragOver?C.accentBg:C.card,transition:"all 0.2s"}}>
-          <input ref={inputRef} type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
-          <div style={{fontSize:40,marginBottom:12,opacity:0.7}}>📂</div>
-          <p style={{fontSize:16,fontWeight:600,margin:0}}>Nenhum pendente no servidor</p>
-          <p style={{fontSize:14,color:C.textDim,margin:"8px 0 0"}}>Importe o primeiro arquivo .xlsx</p>
-        </div>}
+        {activeTab==="pendente"&&!rawRows&&(sess?.perfil?.pode_importar
+          ?<div onDragOver={e=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)} onDrop={onDrop}
+            onClick={()=>inputRef.current?.click()} style={{border:`2px dashed ${dragOver?C.accent:C.border}`,borderRadius:16,padding:"60px 20px",textAlign:"center",cursor:"pointer",background:dragOver?C.accentBg:C.card,transition:"all 0.2s"}}>
+            <input ref={inputRef} type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
+            <div style={{fontSize:40,marginBottom:12,opacity:0.7}}>📂</div>
+            <p style={{fontSize:16,fontWeight:600,margin:0}}>Nenhum pendente no servidor</p>
+            <p style={{fontSize:14,color:C.textDim,margin:"8px 0 0"}}>Importe o primeiro arquivo .xlsx</p>
+          </div>
+          :<div style={{border:`1px solid ${C.border}`,borderRadius:16,padding:"60px 20px",textAlign:"center",background:C.card}}>
+            <div style={{fontSize:40,marginBottom:12,opacity:0.5}}>⏳</div>
+            <p style={{fontSize:16,fontWeight:600,margin:0}}>Nenhum pendente no servidor</p>
+            <p style={{fontSize:14,color:C.textDim,margin:"8px 0 0"}}>O robô atualiza de hora em hora. Se demorar, entre com sua conta para importar manualmente.</p>
+          </div>)}
         {activeTab==="pendente"&&rawRows&&<div style={{animation:"fadeIn 0.35s ease"}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 16px",background:C.card,borderRadius:10,border:`1px solid ${C.border}`,marginBottom:16,flexWrap:"wrap",gap:8}}>
             <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
