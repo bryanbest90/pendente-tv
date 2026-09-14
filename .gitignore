@@ -5,3 +5,7 @@ dist
 # exports e arquivos de trabalho — nao vao para o repositorio
 *.csv
 Claude outputs/
+relatorios/
+scripts/endereco_coord.csv
+scripts/ruas_osm.json
+scripts/ruas_osm.parcial.json

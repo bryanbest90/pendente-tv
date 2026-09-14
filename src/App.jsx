@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useRef, useMemo, useEffect } from "react";
 import * as XLSX from "xlsx";
 import { XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Area, AreaChart } from "recharts";
+import coordBase from "./coordBase.json";
 
 // ━━━ SUPABASE ━━━
 const SUPABASE_URL = "https://iggnfikqbdgrvfshxhul.supabase.co";
@@ -548,6 +549,91 @@ function fmtDate(iso){if(!iso)return"—";try{const d=new Date(iso);return d.toL
 function fmtDiaShort(dia){try{const[y,m,d]=dia.split("-");return`${d}/${m}`;}catch{return dia;}}
 function fmtDiaFull(dia){try{const[y,m,d]=dia.split("-");return`${d}/${m}/${y}`;}catch{return dia;}}
 
+/* ── Base de coordenadas (teste) ──────────────────────────
+   Vem do relatorio EXECUÇÕES do GEOCALL, evento "Fim da
+   Execução" — onde a turma estava ao terminar o servico. E a
+   unica fonte que resolve rua homonima e viela: a coordenada de
+   ABERTURA da OS nao serve, porque servico aberto de forma
+   administrativa cai num escritorio da Sabesp.
+
+   Base atual: agosto/2026 — 2.299 ruas e 5.206 enderecos.
+   60 enderecos foram descartados por terem muitas ocorrencias
+   espalhadas por quilometros: e a assinatura do endereco
+   administrativo, ele se denuncia sozinho.
+
+   ATENCAO: isto esta dentro do bundle so porque e um teste.
+   Com um ano de historico sao ~50 mil enderecos, que passam
+   para uma tabela no Supabase — o navegador nao deve carregar
+   a base inteira para consultar um punhado de enderecos.
+   ───────────────────────────────────────────────────────── */
+function ruaKey(s){
+  let r=String(s??"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toUpperCase()
+        .replace(/\s+/g," ").trim().replace(/[.,;: ]+$/,"");
+  return r.replace(/^AVENIDA\s+/,"AV ").replace(/^PRACA\s+/,"PCA ").replace(/^PCA\.?\s+/,"PCA ")
+          .replace(/^TRAVESSA\s+/,"TV ").replace(/^ALAMEDA\s+/,"AL ")
+          .replace(/^ESTRADA\s+/,"ESTR ").replace(/^RODOVIA\s+/,"ROD ");
+}
+const numKey=s=>String(s??"").normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+  .toUpperCase().replace(/\s+/g," ").trim().replace(/[.,;: ]+$/,"");
+
+// Tres respostas possiveis, nesta ordem:
+//   exato  — a turma ja executou nesse numero. Melhor caso.
+//   rua    — a rua esta mapeada, o numero nao. Cai no centro da
+//            rua; ja resolve "qual das tres Rua Jequirituba".
+//   null   — nao esta na base. Quem chama decide o que fazer.
+// A rua e uma NUVEM de pontos, nao um ponto. Medido em agosto: 32%
+// das ruas aparecem em dois ou mais lugares separados por mais de
+// 800 m — parte disso e avenida comprida, parte e rua homonima de
+// verdade, e distancia sozinha nao separa os dois casos. Quem separa
+// e o numero. Por isso a busca e sempre pelo ponto cujo numero esta
+// mais perto do pedido, e o centro da rua e o ultimo recurso.
+const distM=(a,b)=>{const R=6371000,p1=a[0]*Math.PI/180,p2=b[0]*Math.PI/180,dl=(b[1]-a[1])*Math.PI/180;
+  const h=Math.sin((p2-p1)/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;
+  return 2*R*Math.asin(Math.sqrt(h));};
+function acharCoord(endereco,numero){
+  const ent=coordBase.r[ruaKey(endereco)];
+  if(!ent?.p?.length) return null;
+  const alvo=parseInt(String(numero??"").replace(/\D/g,""),10);
+  if(Number.isFinite(alvo)){
+    let melhor=null,dist=Infinity,abaixo=null,acima=null;
+    for(const p of ent.p){
+      if(p[2]==null) continue;
+      const d=Math.abs(p[2]-alvo);
+      if(d<dist){dist=d;melhor=p;}
+      if(p[2]<=alvo&&(!abaixo||p[2]>abaixo[2])) abaixo=p;
+      if(p[2]>=alvo&&(!acima||p[2]<acima[2])) acima=p;
+    }
+    if(dist===0) return {lat:melhor[0],lon:melhor[1],tipo:"exato",obs:melhor[3],desvio:melhor[4]};
+    // Dois numeros conhecidos cercando o pedido: interpolar entre eles
+    // erra menos do que grudar no mais proximo. Com 78% dos pontos vindo
+    // de UMA leitura de GPS, o erro de uma leitura sozinha e a rua de
+    // tras; a interpolacao pelo menos usa duas.
+    // So vale se os dois estiverem no MESMO trecho — interpolar entre
+    // dois lugares distantes com o mesmo nome de rua seria pior que o
+    // problema que resolve.
+    if(abaixo&&acima&&abaixo[2]!==acima[2]&&distM(abaixo,acima)<500){
+      const t=(alvo-abaixo[2])/(acima[2]-abaixo[2]);
+      return {lat:+(abaixo[0]+(acima[0]-abaixo[0])*t).toFixed(6),
+              lon:+(abaixo[1]+(acima[1]-abaixo[1])*t).toFixed(6),
+              tipo:"interpolado",entre:[abaixo[2],acima[2]],
+              obs:abaixo[3]+acima[3],desvio:Math.max(abaixo[4],acima[4])};
+    }
+    if(melhor) return {lat:melhor[0],lon:melhor[1],tipo:"vizinho",casas:dist,obs:melhor[3],desvio:melhor[4]};
+  }
+  // Nenhum numero utilizavel: o ponto mais observado da rua.
+  const p=ent.p.reduce((a,b)=>(b[3]>a[3]?b:a));
+  return {lat:p[0],lon:p[1],tipo:"rua",obs:p[3],desvio:p[4]};
+}
+function abrirNoMapa(r){
+  const c=acharCoord(r["Endereço"],r["Número"]);
+  const url=c
+    ? `https://www.google.com/maps/search/?api=1&query=${c.lat},${c.lon}`
+    : `https://www.google.com/maps/search/?api=1&query=`+encodeURIComponent(
+        [String(r["Endereço"]||"").trim(),r["Número"],r["Bairro"],r["Município"]||"SAO PAULO"]
+        .filter(Boolean).join(", "));
+  window.open(url,"_blank","noopener,noreferrer");
+}
+
 /* ── Pill / Bar / SummaryCard / Check ── */
 function Pill({value,color,bg,border,onClick,clickable}){
   return <span onClick={onClick} style={{display:"inline-flex",alignItems:"center",justifyContent:"center",minWidth:46,padding:"5px 14px",borderRadius:8,fontSize:15,fontWeight:700,fontVariantNumeric:"tabular-nums",color,background:bg,border:`1px solid ${border}`,cursor:clickable?"pointer":"default",transition:"transform 0.1s,box-shadow 0.15s"}}
@@ -586,11 +672,24 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
     matchGasStreet(String(r["Endereço"]||"").trim())
   ),[sorted]);
   const totalGas=gasPorLinha.filter(Boolean).length;
+  // Teste do mapa: so na familia de vazamento, para medir a cobertura
+  // da base num universo pequeno antes de valer para tudo.
+  const ehVazamento=matchFamiliaVazamento(familia);
+  const coordPorLinha=useMemo(()=>ehVazamento
+    ? sorted.map(r=>acharCoord(r["Endereço"],r["Número"]))
+    : [],[sorted,ehVazamento]);
+  const nExato=coordPorLinha.filter(c=>c?.tipo==="exato").length;
+  const nInterp=coordPorLinha.filter(c=>c?.tipo==="interpolado").length;
+  const nAprox=coordPorLinha.filter(c=>c?.tipo==="vizinho"||c?.tipo==="rua").length;
   return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(4px)"}}>
     <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:16,border:`1px solid ${C.border}`,width:"100%",maxWidth:1400,maxHeight:"80vh",display:"flex",flexDirection:"column",overflow:"hidden",animation:"modalIn 0.2s ease"}}>
       <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
         <div><div style={{fontSize:16,fontWeight:700,color:C.text}}>{familia}</div><div style={{fontSize:13,color:C.textDim,marginTop:2}}>{tssName?tssName+" · ":""}<span style={{color}}>{label}</span> · {rows.length} OS
           {totalGas>0&&<span style={{marginLeft:8,fontSize:12,color:C.amber,fontWeight:700,padding:"2px 9px",borderRadius:6,border:"1px solid rgba(245,158,11,0.4)",background:C.amberBg}}>🔥 {totalGas} com rede de gás</span>}
+          {ehVazamento&&<span title="Clique no endereço para abrir no Google Maps. Verde: a turma já executou nesse número. Âmbar: só a rua está mapeada, abre no meio dela. Cinza: fora da base, abre uma busca por texto."
+            style={{marginLeft:8,fontSize:12,fontWeight:700,padding:"2px 9px",borderRadius:6,border:`1px solid ${C.border}`,background:C.cardAlt,color:C.textMuted,cursor:"help"}}>
+            📍 <span style={{color:C.green}}>{nExato} exatos</span> · <span style={{color:"#38bdf8"}}>{nInterp} interpolados</span> · <span style={{color:C.amber}}>{nAprox} aproximados</span> · <span style={{color:C.textDim}}>{rows.length-nExato-nInterp-nAprox} sem base</span>
+          </span>}
         </div></div>
         <button onClick={onClose} style={{background:"transparent",border:"none",color:C.textDim,fontSize:22,cursor:"pointer",padding:"4px 8px"}}>✕</button>
       </div>
@@ -608,7 +707,19 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
                 style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap",
                   ...(gasPorLinha[i]?{color:C.amber,fontWeight:700,background:C.amberBg,boxShadow:"inset 3px 0 0 "+C.amber}:{})}}>
                 {gasPorLinha[i]&&<span style={{marginRight:6}}>🔥</span>}
-                {String(r["Endereço"]).trim()}, {r["Número"]}{r["Complemento"]?" - "+String(r["Complemento"]).trim():""}</td>
+                {ehVazamento?(()=>{const c=coordPorLinha[i];
+                  const cor=c?.tipo==="exato"?C.green:c?.tipo==="interpolado"?"#38bdf8":c?C.amber:C.textDim;
+                  const dica=c?.tipo==="exato"?`Coordenada exata — ${c.obs} execução${c.obs>1?"ões":""} neste número, dispersão ${c.desvio} m`
+                            :c?.tipo==="interpolado"?`Número não mapeado — posição calculada entre os nº ${c.entre[0]} e ${c.entre[1]}, que já foram executados`
+                            :c?.tipo==="vizinho"?`Número não mapeado — abre no vizinho conhecido mais próximo, ${c.casas} número${c.casas>1?"s":""} de distância`
+                            :c?.tipo==="rua"?`Número não mapeado e a rua não tem número na base — abre no meio dela (${c.obs} execuções, dispersão ${c.desvio} m)`
+                            :"Fora da base — abre uma busca por texto no Google Maps";
+                  return <span onClick={e=>{e.stopPropagation();abrirNoMapa(r);}} title={dica}
+                    style={{cursor:"pointer",textDecoration:"underline",textDecorationStyle:c?.tipo==="exato"?"solid":"dotted",textDecorationColor:cor,textUnderlineOffset:3}}>
+                    <span style={{color:cor,marginRight:4}}>{c?"📍":"🔍"}</span>
+                    {String(r["Endereço"]).trim()}, {r["Número"]}{r["Complemento"]?" - "+String(r["Complemento"]).trim():""}
+                  </span>;})()
+                 :<>{String(r["Endereço"]).trim()}, {r["Número"]}{r["Complemento"]?" - "+String(r["Complemento"]).trim():""}</>}</td>
               <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`}}>{r["Bairro"]}</td>
               <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`}}>{r["Município"]}</td>
               <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,fontWeight:600,color:tempo(r["Tempo Residual"])==="fora"?C.red:C.green}}>{r["Tempo Residual"]}</td>
@@ -2327,12 +2438,12 @@ function ProducaoView({sess,onLogout}){
           </div>
         </div>}
 
-        {/* <div style={{marginTop:12,fontSize:11,color:C.textDim,lineHeight:1.6}}>
+        <div style={{marginTop:12,fontSize:11,color:C.textDim,lineHeight:1.6}}>
           Contagem de execuções confirmadas (Relatório de Dados Operacionais), não de OS distintas —
           uma OS que gera duas etapas conta duas vezes, que é como a equipe é medida.
           {" "}<strong style={{color:C.textMuted}}>TSS</strong> é o serviço solicitado na abertura;
           {" "}<strong style={{color:C.textMuted}}>TSE</strong> é o que foi feito. Eles divergem na maioria das linhas.
-        </div> */}
+        </div>
       </>}
     </>}
   </div>;
