@@ -8,6 +8,7 @@
 //   --comparar          so mede qual dos 4 eventos e o melhor, e sai
 //   --evento "<nome>"   qual evento usar (padrao: Início da Execução)
 //   --raio 60           metros de tolerancia ate a rua (padrao 60)
+//   --com-pc            inclui baixas dadas no PC (Mobile = Nao)
 //   --sem-osm           nao confere contra a malha viaria
 //   --rebaixar          baixa a malha viaria inteira de novo
 //   --completar         busca so os quadrados que faltaram na malha
@@ -96,6 +97,21 @@ const COMPARAR = process.argv.includes("--comparar");
 // no meio da quadra vira "endereco" e manda a equipe para a rua de
 // tras. --sem-osm pula (util para rodar offline).
 const SEM_OSM = process.argv.includes("--sem-osm");
+// Coluna "Mobile" da aba Execução: Sim = a baixa foi dada no
+// celular, em campo. Nao = foi dada num PC — do canteiro ou de
+// casa —, e ai a coordenada nao e do local do servico.
+//
+// Medido em agosto: as baixas de PC sao 19% da base e respondem por
+// 54% dos pontos que caem a mais de 20 km do centro da operacao.
+// Oito virgula oito por cento delas passam dos 20 km, contra 1,8%
+// das de celular; e 25% ficam a mais de 2 km do centro da propria
+// rua, contra 13%.
+//
+// O corte custa 11% das ruas e 20% dos enderecos, que voltam
+// sozinhos conforme mais meses entram. Para uma biblioteca que vai
+// mandar equipe para um lugar, precisao vale mais que volume.
+// --com-pc inclui as baixas de PC de volta.
+const COM_PC = process.argv.includes("--com-pc");
 const iLim = process.argv.indexOf("--raio");
 const RAIO = iLim > 0 ? Number(process.argv[iLim + 1]) : 60;   // metros
 const TIPOS = ["Admitida", "Chegada ao Local", "Início da Execução", "Fim da Execução"];
@@ -126,8 +142,8 @@ if (!arquivos.length) { console.error(`Nenhum .xlsx em ${PASTA}`); process.exit(
 console.log(`${arquivos.length} arquivo(s) em ${PASTA}\n`);
 
 const endPorOS = new Map();   // numero_os -> {rua, num, bairro}
-const pontos = [];            // {rua, num, lat, lon}
-let lidos = 0, foraDaCaixa = 0, semEndereco = 0;
+let pontos = [];              // {rua, num, lat, lon}
+let lidos = 0, foraDaCaixa = 0, semEndereco = 0, pcIgnorados = 0;
 
 for (const nome of arquivos) {
   const wb = XLSX.readFile(path.join(PASTA, nome), { cellDates: false });
@@ -141,6 +157,8 @@ for (const nome of arquivos) {
     const os = String(r["Número OS"] || "").trim();
     const rua = ruaKey(r["Endereço"]);
     if (!os || !rua) continue;
+    const mobile = /^s/i.test(String(r["Mobile"] || "").trim());   // "Sim"
+    if (!COM_PC && !mobile) { pcIgnorados++; continue; }
     if (!endPorOS.has(os)) endPorOS.set(os, { rua, num: soNum(r["Número"]), bairro: String(r["Bairro"] || "").trim() });
   }
   let nesse = 0;
@@ -161,6 +179,7 @@ for (const nome of arquivos) {
   console.log(`  ${nome}: ${nesse} pontos`);
 }
 console.log(`\nlidos ${lidos} | fora do polo ${foraDaCaixa} (${(100 * foraDaCaixa / lidos).toFixed(1)}%) | sem endereco ${semEndereco}`);
+if (!COM_PC) console.log(`baixas de PC ignoradas (Mobile = Nao): ${pcIgnorados} linhas — use --com-pc para incluir`);
 
 const R = 6371000;
 const mediana = a => { const b = [...a].sort((x, y) => x - y); const m = b.length >> 1; return b.length % 2 ? b[m] : (b[m - 1] + b[m]) / 2; };
@@ -244,7 +263,7 @@ function cortarPorRaio() {
   console.log(`\ncentro da operacao: ${cy.toFixed(4)}, ${cx.toFixed(4)}`);
   console.log(`  distancia ate o centro: p50 ${q(.5).toFixed(1)} km | p99 ${q(.99).toFixed(1)} km | max ${(d[d.length - 1] / 1000).toFixed(1)} km`);
   console.log(`  fora do raio de ${RAIO_POLO / 1000} km: ${antes - fica.length} (${(100 * (antes - fica.length) / antes).toFixed(2)}%) descartados`);
-  pontos.length = 0; pontos.push(...fica);
+  pontos = fica;
 }
 
 // ── coerencia dentro da rua ───────────────────────────────
@@ -273,7 +292,7 @@ function coerenciaPorRua() {
   }
   const fica = []; let cortados = 0, ruas = 0;
   for (const [, lista] of porRua) {
-    if (lista.length < 3) { fica.push(...lista); continue; }
+    if (lista.length < 3) { for (const p of lista) fica.push(p); continue; }
     // grupos por ligacao simples
     const grupo = new Array(lista.length).fill(-1);
     let g = 0;
@@ -289,10 +308,10 @@ function coerenciaPorRua() {
       }
       g++;
     }
-    if (g === 1) { fica.push(...lista); continue; }
+    if (g === 1) { for (const p of lista) fica.push(p); continue; }
     const tam = new Array(g).fill(0);
     grupo.forEach(x => tam[x]++);
-    const principal = tam.indexOf(Math.max(...tam));
+    const principal = tam.indexOf(tam.reduce((a, b) => (b > a ? b : a), -Infinity));
     const doPrincipal = lista.filter((_, i) => grupo[i] === principal);
     let cortouAqui = 0;
     lista.forEach((p, i) => {
@@ -305,7 +324,7 @@ function coerenciaPorRua() {
     if (cortouAqui) { ruas++; cortados += cortouAqui; }
   }
   console.log(`  coerencia por rua: ${cortados} ponto(s) isolado(s) do resto da propria rua, em ${ruas} rua(s) — descartados`);
-  pontos.length = 0; pontos.push(...fica);
+  pontos = fica;
 }
 
 // ── conferencia contra a malha viaria ─────────────────────
@@ -319,10 +338,17 @@ function coerenciaPorRua() {
 //              sua biblioteca vale mais que qualquer mapa pronto
 async function conferirNaMalha() {
   if (SEM_OSM) { console.log("\n(--sem-osm: conferencia contra a malha viaria pulada)"); return; }
-  const lats = pontos.map(p => p.lat), lons = pontos.map(p => p.lon);
+  // Math.min(...array) tambem quebra em volume: cada elemento vira um
+  // argumento de funcao, e o limite fica por volta de 100 mil. Com 13
+  // meses sao 190 mil pontos. Entao percorre.
+  let latMin = Infinity, latMax = -Infinity, lonMin = Infinity, lonMax = -Infinity;
+  for (const p of pontos) {
+    if (p.lat < latMin) latMin = p.lat; if (p.lat > latMax) latMax = p.lat;
+    if (p.lon < lonMin) lonMin = p.lon; if (p.lon > lonMax) lonMax = p.lon;
+  }
   const m = 0.01;   // margem de ~1 km em volta da area de trabalho
-  const caixa = { latMin: Math.min(...lats) - m, latMax: Math.max(...lats) + m,
-                  lonMin: Math.min(...lons) - m, lonMax: Math.max(...lons) + m };
+  const caixa = { latMin: latMin - m, latMax: latMax + m,
+                  lonMin: lonMin - m, lonMax: lonMax + m };
   console.log(`\nconferindo contra a malha viaria (raio de ${RAIO} m)`);
   console.log(`  area: ${caixa.latMin.toFixed(3)},${caixa.lonMin.toFixed(3)} a ${caixa.latMax.toFixed(3)},${caixa.lonMax.toFixed(3)}`);
   let ind;
@@ -348,7 +374,7 @@ async function conferirNaMalha() {
               (desvios.length ? ` — deslocamento mediano ${Math.round(desvios[desvios.length >> 1])} m` : ""));
   console.log(`  descartados (a rua existe, o ponto nao estava nela): ${descartados} (${(100 * descartados / tot).toFixed(0)}%)`);
   console.log(`  sem malha (viela nao mapeada, mantido como veio): ${semMalha} (${(100 * semMalha / tot).toFixed(0)}%)`);
-  pontos.length = 0; pontos.push(...mantidos);
+  pontos = mantidos;
 }
 
 async function principal() {

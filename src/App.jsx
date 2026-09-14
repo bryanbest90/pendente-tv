@@ -1,7 +1,6 @@
 import React, { useState, useCallback, useRef, useMemo, useEffect } from "react";
 import * as XLSX from "xlsx";
 import { XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Area, AreaChart } from "recharts";
-import coordBase from "./coordBase.json";
 
 // ━━━ SUPABASE ━━━
 const SUPABASE_URL = "https://iggnfikqbdgrvfshxhul.supabase.co";
@@ -549,23 +548,53 @@ function fmtDate(iso){if(!iso)return"—";try{const d=new Date(iso);return d.toL
 function fmtDiaShort(dia){try{const[y,m,d]=dia.split("-");return`${d}/${m}`;}catch{return dia;}}
 function fmtDiaFull(dia){try{const[y,m,d]=dia.split("-");return`${d}/${m}/${y}`;}catch{return dia;}}
 
-/* ── Base de coordenadas (teste) ──────────────────────────
+/* ── Biblioteca de coordenadas ────────────────────────────
    Vem do relatorio EXECUÇÕES do GEOCALL, evento "Fim da
    Execução" — onde a turma estava ao terminar o servico. E a
    unica fonte que resolve rua homonima e viela: a coordenada de
    ABERTURA da OS nao serve, porque servico aberto de forma
    administrativa cai num escritorio da Sabesp.
 
-   Base atual: agosto/2026 — 2.299 ruas e 5.206 enderecos.
-   60 enderecos foram descartados por terem muitas ocorrencias
-   espalhadas por quilometros: e a assinatura do endereco
-   administrativo, ele se denuncia sozinho.
+   13 meses de historico: 4.523 ruas e 47.246 enderecos, so de
+   baixas dadas no celular (a coluna Mobile do relatorio) — baixa
+   feita no PC marca o canteiro ou a casa de quem digitou.
 
-   ATENCAO: isto esta dentro do bundle so porque e um teste.
-   Com um ano de historico sao ~50 mil enderecos, que passam
-   para uma tabela no Supabase — o navegador nao deve carregar
-   a base inteira para consultar um punhado de enderecos.
+   Ate 8 meses isso morava num JSON dentro do bundle. Com 13 ele
+   passou de 1,5 MB, entao virou a tabela coord_rua no Supabase e
+   o navegador pede so as ruas do modal que voce abriu. Uma linha
+   por rua, com o array de pontos dentro — assim um modal de 300
+   OS pede no maximo 300 linhas, e nao esbarra no limite de 1.000
+   do PostgREST no meio de um clique.
    ───────────────────────────────────────────────────────── */
+const coordCache = new Map();   // ruaKey -> {p:[...]} | null (procurada, nao existe)
+async function carregarRuas(chaves){
+  const faltam=[...new Set(chaves.filter(Boolean))].filter(k=>!coordCache.has(k));
+  if(!faltam.length) return;
+  // Lotes de 80 para a URL nao passar de ~4 KB: nome de rua com
+  // acento e espaco incha ao ser codificado, e servidor nenhum
+  // garante URL longa.
+  for(let i=0;i<faltam.length;i+=80){
+    const lote=faltam.slice(i,i+80);
+    // Nome de rua tem parenteses e ponto ("VIELA QUATRO(HERMOGENES
+    // F .L .FILHO)"), que o PostgREST le como sintaxe se vierem
+    // soltos. Por isso cada valor vai entre aspas.
+    const lista=lote.map(k=>'"'+k.replace(/["\\]/g,m=>"\\"+m)+'"').join(",");
+    try{
+      const res=await fetch(SUPABASE_URL+"/rest/v1/coord_rua?select=rua,p&rua=in.("+encodeURIComponent(lista)+")",{headers:HEADERS});
+      if(!res.ok) throw new Error("HTTP "+res.status);
+      for(const d of await res.json()) coordCache.set(d.rua,{p:d.p});
+      // Rua que o banco nao devolveu nao esta na base. Grava o vazio
+      // para nao perguntar de novo a cada modal aberto.
+      for(const k of lote) if(!coordCache.has(k)) coordCache.set(k,null);
+    }catch(e){
+      // Falha de rede NAO pode virar "endereco sem base" — seria o
+      // mesmo erro silencioso dos robos, so que na tela. Deixa fora
+      // do cache para tentar de novo no proximo modal.
+      console.warn("coord_rua:",e.message||e);
+      return;
+    }
+  }
+}
 function ruaKey(s){
   let r=String(s??"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toUpperCase()
         .replace(/\s+/g," ").trim().replace(/[.,;: ]+$/,"");
@@ -591,7 +620,7 @@ const distM=(a,b)=>{const R=6371000,p1=a[0]*Math.PI/180,p2=b[0]*Math.PI/180,dl=(
   const h=Math.sin((p2-p1)/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;
   return 2*R*Math.asin(Math.sqrt(h));};
 function acharCoord(endereco,numero){
-  const ent=coordBase.r[ruaKey(endereco)];
+  const ent=coordCache.get(ruaKey(endereco));
   if(!ent?.p?.length) return null;
   const alvo=parseInt(String(numero??"").replace(/\D/g,""),10);
   if(Number.isFinite(alvo)){
@@ -675,9 +704,21 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
   // Teste do mapa: so na familia de vazamento, para medir a cobertura
   // da base num universo pequeno antes de valer para tudo.
   const ehVazamento=matchFamiliaVazamento(familia);
+  // A base agora esta no Supabase, entao pedir as ruas deste modal
+  // antes de calcular. coordVer so existe para recalcular o memo
+  // quando a resposta chega.
+  const [coordVer,setCoordVer]=useState(0);
+  const [coordCarregando,setCoordCarregando]=useState(false);
+  useEffect(()=>{
+    if(!ehVazamento) return;
+    let vivo=true; setCoordCarregando(true);
+    carregarRuas(sorted.map(r=>ruaKey(r["Endereço"])))
+      .finally(()=>{if(vivo){setCoordCarregando(false);setCoordVer(v=>v+1);}});
+    return()=>{vivo=false;};
+  },[sorted,ehVazamento]);
   const coordPorLinha=useMemo(()=>ehVazamento
     ? sorted.map(r=>acharCoord(r["Endereço"],r["Número"]))
-    : [],[sorted,ehVazamento]);
+    : [],[sorted,ehVazamento,coordVer]);
   const nExato=coordPorLinha.filter(c=>c?.tipo==="exato").length;
   const nInterp=coordPorLinha.filter(c=>c?.tipo==="interpolado").length;
   const nAprox=coordPorLinha.filter(c=>c?.tipo==="vizinho"||c?.tipo==="rua").length;
@@ -688,7 +729,8 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
           {totalGas>0&&<span style={{marginLeft:8,fontSize:12,color:C.amber,fontWeight:700,padding:"2px 9px",borderRadius:6,border:"1px solid rgba(245,158,11,0.4)",background:C.amberBg}}>🔥 {totalGas} com rede de gás</span>}
           {ehVazamento&&<span title="Clique no endereço para abrir no Google Maps. Verde: a turma já executou nesse número. Âmbar: só a rua está mapeada, abre no meio dela. Cinza: fora da base, abre uma busca por texto."
             style={{marginLeft:8,fontSize:12,fontWeight:700,padding:"2px 9px",borderRadius:6,border:`1px solid ${C.border}`,background:C.cardAlt,color:C.textMuted,cursor:"help"}}>
-            📍 <span style={{color:C.green}}>{nExato} exatos</span> · <span style={{color:"#38bdf8"}}>{nInterp} interpolados</span> · <span style={{color:C.amber}}>{nAprox} aproximados</span> · <span style={{color:C.textDim}}>{rows.length-nExato-nInterp-nAprox} sem base</span>
+            {coordCarregando?<span style={{color:C.textDim}}>📍 consultando a biblioteca…</span>
+             :<>📍 <span style={{color:C.green}}>{nExato} exatos</span> · <span style={{color:"#38bdf8"}}>{nInterp} interpolados</span> · <span style={{color:C.amber}}>{nAprox} aproximados</span> · <span style={{color:C.textDim}}>{rows.length-nExato-nInterp-nAprox} sem base</span></>}
           </span>}
         </div></div>
         <button onClick={onClose} style={{background:"transparent",border:"none",color:C.textDim,fontSize:22,cursor:"pointer",padding:"4px 8px"}}>✕</button>

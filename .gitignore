@@ -9,3 +9,5 @@ relatorios/
 scripts/endereco_coord.csv
 scripts/ruas_osm.json
 scripts/ruas_osm.parcial.json
+src/coordBase.json
+scripts/config.json
