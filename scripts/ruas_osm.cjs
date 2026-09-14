@@ -28,12 +28,17 @@ const path = require("path");
 const ARQ = path.join(__dirname, "ruas_osm.json");
 const R = 6371000;
 
-// Overpass tem varios espelhos. Se um estiver fora do ar ou
-// sobrecarregado, tenta o proximo.
+// Espelhos do Overpass. SO OS GLOBAIS.
+//
+// overpass.osm.ch estava aqui e foi removido: e um espelho regional
+// da Suica, nao tem dados do Brasil. Quando a vez calhava nele, ele
+// respondia 200 com lista VAZIA e sem erro — nem timeout, nem
+// remark, nada. Um servidor que simplesmente nao tem a regiao.
+// Resultado: 19 dos 64 quadrados voltaram zerados e passaram por
+// bons, e o "sem malha" saltou de 20% para 68%.
 const ESPELHOS = [
   "https://overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
-  "https://overpass.osm.ch/api/interpreter",
 ];
 
 function ruaKey(s) {
@@ -65,7 +70,7 @@ function ruaKey(s) {
 
 const UA = "pendente-tv/1.0 (uso interno Consorcio Global Interlagos; contato: bmdeodato@gmail.com)";
 const PASSO = 0.05;          // ~5,5 km de lado
-const PAUSA = 1500;          // ms entre quadrados — nao apanhar de 429
+const PAUSA = 2500;          // ms entre quadrados — nao apanhar de 429
 const PARCIAL = path.join(__dirname, "ruas_osm.parcial.json");
 
 const dorme = ms => new Promise(r => setTimeout(r, ms));
@@ -121,7 +126,16 @@ async function pedirQuadrado(s, w, n, e, tentativa = 0) {
       await dorme(espera);
       return pedirQuadrado(s, w, n, e, tentativa + 1);
     }
-    return j.elements || [];
+    const els = j.elements || [];
+    // Lista vazia e SUSPEITA, nao resposta. Quadrado de cidade sem
+    // nenhuma rua com nome praticamente nao existe por aqui; o que
+    // existe e espelho que nao tem a regiao ou que desistiu em
+    // silencio. Entao confirma num segundo espelho antes de aceitar.
+    if (!els.length && tentativa < 2) {
+      await dorme(2000);
+      return pedirQuadrado(s, w, n, e, tentativa + 1);
+    }
+    return els;
   } catch (err) {
     if (tentativa >= 5) throw err;
     await dorme(3000);
@@ -289,7 +303,23 @@ async function carregar(caixa, forcar, completar) {
     return ind;
   }
   console.log("  malha viaria ainda nao baixada — buscando no OpenStreetMap");
-  const osm = await baixar(caixa);
+  let osm = await baixar(caixa);
+  // Nunca substituir um arquivo bom por um pior: se ja existia
+  // malha, o novo e a UNIAO dos dois. Uma carga com espelhos
+  // sobrecarregados nao pode apagar o que ja tinha vindo.
+  if (fs.existsSync(ARQ)) {
+    try {
+      const velho = JSON.parse(fs.readFileSync(ARQ, "utf8"));
+      const porId = new Map();
+      for (const el of velho.elements || []) porId.set(el.id, el);
+      const antes = porId.size;
+      for (const el of osm.elements) porId.set(el.id, el);
+      if (porId.size > osm.elements.length)
+        console.log(`  juntando com a malha anterior: ${antes} + novos = ${porId.size} trechos`);
+      osm = { feitos: [...new Set([...(velho.feitos || []), ...osm.feitos])],
+              elements: [...porId.values()] };
+    } catch {}
+  }
   fs.writeFileSync(ARQ, JSON.stringify(osm));
   try { if (fs.existsSync(PARCIAL)) fs.unlinkSync(PARCIAL); } catch {}
   console.log(`  guardado em ${ARQ} (${(fs.statSync(ARQ).size / 1024 / 1024).toFixed(1)} MB) — nao precisa baixar de novo`);
