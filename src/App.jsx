@@ -7,6 +7,12 @@ const SUPABASE_URL = "https://iggnfikqbdgrvfshxhul.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlnZ25maWtxYmRncnZmc2h4aHVsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU3MDgwNTIsImV4cCI6MjEwMTI4NDA1Mn0.Wnpzw5NK9b55oLwBiuFKcmx5rgG5F39Ka-fdho2aH9E";
 const HEADERS = {"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY,"Content-Type":"application/json"};
 
+// A sessao do login precisa chegar la no fundo, no modal de OS, e
+// so para saber se aparece o lapis de cadastrar coordenada. Passar
+// de mao em mao atravessaria dois componentes que nao tem nada a
+// ver com isso (Dashboard e FamilyRow), entao vai por contexto.
+const SessaoCtx = React.createContext(null);
+
 const EXCLUDED_DISPLAY = ["VISTORIA","CORTE SUPRESSÃO ADM","FISCALIZAÇÃO","SERV COMPLEMENTAR","ABASTECIMENTO","DESOBSTRUÇÃO"];
 const EXCLUDED_TSS = [
   "RETIRAR LACRE NUMERADO","LIGAÇÃO DE ÁGUA - PROG AGUA LEGAL","DESCARGA EM REDE DE ÁGUA",
@@ -566,7 +572,8 @@ function fmtDiaFull(dia){try{const[y,m,d]=dia.split("-");return`${d}/${m}/${y}`;
    OS pede no maximo 300 linhas, e nao esbarra no limite de 1.000
    do PostgREST no meio de um clique.
    ───────────────────────────────────────────────────────── */
-const coordCache = new Map();   // ruaKey -> {p:[...]} | null (procurada, nao existe)
+// ruaKey -> {p:[...] automatico, m:[...] cadastrado a mao} | null
+const coordCache = new Map();
 async function carregarRuas(chaves){
   const faltam=[...new Set(chaves.filter(Boolean))].filter(k=>!coordCache.has(k));
   if(!faltam.length) return;
@@ -579,12 +586,24 @@ async function carregarRuas(chaves){
     // F .L .FILHO)"), que o PostgREST le como sintaxe se vierem
     // soltos. Por isso cada valor vai entre aspas.
     const lista=lote.map(k=>'"'+k.replace(/["\\]/g,m=>"\\"+m)+'"').join(",");
+    const filtro="rua=in.("+encodeURIComponent(lista)+")";
     try{
-      const res=await fetch(SUPABASE_URL+"/rest/v1/coord_rua?select=rua,p&rua=in.("+encodeURIComponent(lista)+")",{headers:HEADERS});
-      if(!res.ok) throw new Error("HTTP "+res.status);
-      for(const d of await res.json()) coordCache.set(d.rua,{p:d.p});
-      // Rua que o banco nao devolveu nao esta na base. Grava o vazio
-      // para nao perguntar de novo a cada modal aberto.
+      // As duas tabelas no mesmo ida-e-volta. A manual e pequena e
+      // quase sempre volta vazia, mas custa o mesmo tempo que a outra
+      // quando vai junto.
+      const [auto,mao]=await Promise.all([
+        fetch(SUPABASE_URL+"/rest/v1/coord_rua?select=rua,p&"+filtro,{headers:HEADERS}),
+        fetch(SUPABASE_URL+"/rest/v1/coord_manual?select=rua,numero,lat,lon,criado_em,origem,extensao_m&"+filtro,{headers:HEADERS}),
+      ]);
+      if(!auto.ok) throw new Error("coord_rua HTTP "+auto.status);
+      if(!mao.ok) throw new Error("coord_manual HTTP "+mao.status);
+      for(const d of await auto.json()) coordCache.set(d.rua,{p:d.p,m:[]});
+      for(const d of await mao.json()){
+        if(!coordCache.get(d.rua)) coordCache.set(d.rua,{p:[],m:[]});
+        coordCache.get(d.rua).m.push([d.lat,d.lon,d.numero<0?null:d.numero,d.criado_em,d.origem||"mao",d.extensao_m]);
+      }
+      // Rua que nenhuma das duas devolveu nao esta na base. Grava o
+      // vazio para nao perguntar de novo a cada modal aberto.
       for(const k of lote) if(!coordCache.has(k)) coordCache.set(k,null);
     }catch(e){
       // Falha de rede NAO pode virar "endereco sem base" — seria o
@@ -621,8 +640,36 @@ const distM=(a,b)=>{const R=6371000,p1=a[0]*Math.PI/180,p2=b[0]*Math.PI/180,dl=(
   return 2*R*Math.asin(Math.sqrt(h));};
 function acharCoord(endereco,numero){
   const ent=coordCache.get(ruaKey(endereco));
-  if(!ent?.p?.length) return null;
+  if(!ent) return null;
   const alvo=parseInt(String(numero??"").replace(/\D/g,""),10);
+  const cad=ent.m||[];
+  const mao=cad.filter(p=>p[4]!=="osm"), doMapa=cad.filter(p=>p[4]==="osm");
+  // A ordem aqui e a ordem da confianca, e ela e deliberada:
+  //   1. pessoa marcou o numero  — se o automatico acertasse,
+  //      ninguem teria ido la marcar
+  //   2. execucao real da turma   — GPS de quem esteve no local
+  //   3. pessoa marcou a rua      — o caso da viela sem mapa
+  //   4. mapa do OpenStreetMap    — da a rua certa, nunca o numero
+  if(Number.isFinite(alvo)){
+    const mm=mao.find(p=>p[2]===alvo);
+    if(mm) return {lat:mm[0],lon:mm[1],tipo:"manual",quando:mm[3]};
+  }
+  const a=acharAuto(ent,alvo);
+  if(a) return a;
+  const mr=mao.find(p=>p[2]==null);
+  if(mr) return {lat:mr[0],lon:mr[1],tipo:"manual-rua",quando:mr[3]};
+  const om=doMapa.find(p=>p[2]==null);
+  // A extensao vem junto de proposito. O ponto e o meio da rua, e
+  // "o meio" so quer dizer alguma coisa em rua curta: a mediana da
+  // regiao e 192 m, mas tem avenida e rodovia de dezenas de km na
+  // cauda. Numa dessas, o meio pode estar a quilometros da OS —
+  // continua sendo a via certa, e nao serve para mandar equipe.
+  // Entao a tela avisa em vez de apresentar como resposta pronta.
+  if(om) return {lat:om[0],lon:om[1],tipo:"osm",ext:om[5],longa:om[5]>2000};
+  return null;
+}
+function acharAuto(ent,alvo){
+  if(!ent?.p?.length) return null;
   if(Number.isFinite(alvo)){
     let melhor=null,dist=Infinity,abaixo=null,acima=null;
     for(const p of ent.p){
@@ -661,6 +708,137 @@ function abrirNoMapa(r){
         [String(r["Endereço"]||"").trim(),r["Número"],r["Bairro"],r["Município"]||"SAO PAULO"]
         .filter(Boolean).join(", "));
   window.open(url,"_blank","noopener,noreferrer");
+}
+
+/* ── Cadastro manual de coordenada ────────────────────────
+   Para a viela que o Google nao acha e para a rua que nunca
+   teve baixa no celular. O que entra aqui vai para a tabela
+   coord_manual, que a carga automatica nunca sobrescreve.
+   ───────────────────────────────────────────────────────── */
+
+// Aceita o que o Google Maps entrega de verdade, em qualquer das
+// formas: o "-23.749291, -46.703112" do botao direito, a URL da
+// barra de enderecos (@lat,lon,17z), e o link de compartilhar
+// (!3d...!4d...). Nao adianta exigir um formato so — na pratica
+// se cola o que estiver na mao.
+function lerCoord(txt){
+  const s=String(txt||"").trim();
+  // !3d!4d antes de @: numa URL de lugar, o @ e o centro do mapa
+  // e o !3d!4d e o ponto em si. Podem diferir uns 50 m.
+  const m=s.match(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/)
+       || s.match(/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/)
+       || s.match(/[?&]q=(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/)
+       || s.match(/(-?\d+(?:\.\d+)?)\s*[,; ]\s*(-?\d+(?:\.\d+)?)/);
+  if(!m) return null;
+  return {lat:+m[1],lon:+m[2]};
+}
+// Mesma caixa do CHECK da tabela. Conferir aqui tambem e de
+// proposito: o banco recusaria, mas com uma mensagem de constraint
+// que nao ajuda ninguem.
+const REGIAO={latMin:-24.2,latMax:-23.3,lonMin:-47.2,lonMax:-46.2};
+const CENTRO=[-23.7537,-46.7004];   // centro da operacao, medido nos 13 meses
+function conferirCoord(c){
+  if(!c) return "Nao consegui ler uma coordenada nesse texto. Cole algo como -23.749291, -46.703112";
+  const dentro=v=>v.lat>=REGIAO.latMin&&v.lat<=REGIAO.latMax&&v.lon>=REGIAO.lonMin&&v.lon<=REGIAO.lonMax;
+  if(dentro(c)) return null;
+  // O erro mais comum de todos: latitude e longitude trocadas.
+  if(dentro({lat:c.lon,lon:c.lat})) return "trocado";
+  return `Essa coordenada cai fora da regiao de trabalho (${c.lat}, ${c.lon}). Confira se copiou do lugar certo.`;
+}
+async function salvarCoordManual(reg,tok){
+  const res=await fetch(SUPABASE_URL+"/rest/v1/coord_manual?on_conflict=rua,numero",{
+    method:"POST",
+    headers:{...authHeaders(tok),"Prefer":"return=minimal,resolution=merge-duplicates"},
+    body:JSON.stringify([reg]),
+  });
+  if(!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  coordCache.delete(reg.rua);   // forca reler na proxima consulta
+}
+
+function CoordModal({linha,sess,onClose,onSalvou}){
+  const endereco=String(linha["Endereço"]||"").trim();
+  const numTxt=String(linha["Número"]??"").trim();
+  const num=parseInt(numTxt.replace(/\D/g,""),10);
+  const temNum=Number.isFinite(num);
+  const [txt,setTxt]=useState("");
+  const [soRua,setSoRua]=useState(!temNum);
+  const [erro,setErro]=useState("");
+  const [salvando,setSalvando]=useState(false);
+  const lido=lerCoord(txt);
+  const problema=txt?conferirCoord(lido):null;
+  const trocado=problema==="trocado";
+  const valido=lido&&!problema;
+  const dist=valido?Math.round(distM(CENTRO,[lido.lat,lido.lon])/100)/10:null;
+
+  const buscar=()=>window.open("https://www.google.com/maps/search/?api=1&query="+encodeURIComponent(
+    [endereco,numTxt,linha["Bairro"],linha["Município"]||"SAO PAULO"].filter(Boolean).join(", ")),
+    "_blank","noopener,noreferrer");
+
+  const salvar=async()=>{
+    const c=trocado?{lat:lido.lon,lon:lido.lat}:lido;
+    setSalvando(true); setErro("");
+    try{
+      await salvarCoordManual({
+        rua:ruaKey(endereco),
+        numero:soRua?-1:num,
+        lat:+c.lat.toFixed(6), lon:+c.lon.toFixed(6),
+        endereco_original:endereco+(temNum?", "+num:""),
+        bairro:linha["Bairro"]||null,
+      },sess.access_token);
+      onSalvou();
+    }catch(e){ setErro(String(e.message||e)); setSalvando(false); }
+  };
+
+  const campo={width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.border}`,
+    background:C.cardAlt,color:C.text,fontSize:13,fontFamily:"inherit",boxSizing:"border-box"};
+  return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+    <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:14,border:`1px solid ${C.border}`,width:"100%",maxWidth:520,padding:20,display:"flex",flexDirection:"column",gap:14}}>
+      <div>
+        <div style={{fontSize:15,fontWeight:700,color:C.text}}>Cadastrar coordenada</div>
+        <div style={{fontSize:13,color:C.textMuted,marginTop:4}}>{endereco}{temNum?", "+num:""}{linha["Bairro"]?" — "+linha["Bairro"]:""}</div>
+      </div>
+
+      <div style={{fontSize:12,color:C.textDim,lineHeight:1.6,background:C.cardAlt,padding:"10px 12px",borderRadius:8,border:`1px solid ${C.border}`}}>
+        1. Abra o mapa e ache o lugar certo<br/>
+        2. Clique com o <b>botão direito</b> em cima do ponto<br/>
+        3. O primeiro item do menu são as coordenadas — clicar nele copia<br/>
+        4. Cole aqui embaixo
+      </div>
+
+      <button onClick={buscar} style={{padding:"9px 14px",borderRadius:8,border:`1px solid ${C.accent}`,background:"transparent",color:C.accent,fontSize:13,fontWeight:600,cursor:"pointer"}}>
+        🗺️ Abrir no Google Maps
+      </button>
+
+      <div>
+        <input autoFocus value={txt} onChange={e=>setTxt(e.target.value)} placeholder="-23.749291, -46.703112" style={campo}/>
+        {txt&&!valido&&!trocado&&<div style={{fontSize:12,color:C.red,marginTop:6}}>{problema}</div>}
+        {trocado&&<div style={{fontSize:12,color:C.amber,marginTop:6}}>
+          Latitude e longitude parecem trocadas — vou gravar como {lido.lon.toFixed(6)}, {lido.lat.toFixed(6)}.
+        </div>}
+        {valido&&<div style={{fontSize:12,color:C.green,marginTop:6}}>
+          {lido.lat.toFixed(6)}, {lido.lon.toFixed(6)} · a {dist} km do centro da operação
+        </div>}
+      </div>
+
+      {temNum&&<label style={{display:"flex",alignItems:"center",gap:9,fontSize:13,color:C.textMuted,cursor:"pointer"}}>
+        <Check checked={soRua} onChange={()=>setSoRua(v=>!v)}/>
+        Vale para a rua inteira, não só o nº {num}
+      </label>}
+
+      {erro&&<div style={{fontSize:12,color:C.red,background:C.redBg,padding:"9px 12px",borderRadius:8,border:`1px solid ${C.redBorder}`,wordBreak:"break-word"}}>{erro}</div>}
+
+      <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+        <button onClick={onClose} style={{padding:"9px 16px",borderRadius:8,border:`1px solid ${C.border}`,background:"transparent",color:C.textDim,fontSize:13,cursor:"pointer"}}>Cancelar</button>
+        <button onClick={salvar} disabled={(!valido&&!trocado)||salvando}
+          style={{padding:"9px 18px",borderRadius:8,border:"none",fontSize:13,fontWeight:700,
+            background:(valido||trocado)&&!salvando?C.accent:C.border,
+            color:(valido||trocado)&&!salvando?"#0b1220":C.textDim,
+            cursor:(valido||trocado)&&!salvando?"pointer":"default"}}>
+          {salvando?"Salvando...":"Salvar"}
+        </button>
+      </div>
+    </div>
+  </div>;
 }
 
 /* ── Pill / Bar / SummaryCard / Check ── */
@@ -722,6 +900,14 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
   const nExato=coordPorLinha.filter(c=>c?.tipo==="exato").length;
   const nInterp=coordPorLinha.filter(c=>c?.tipo==="interpolado").length;
   const nAprox=coordPorLinha.filter(c=>c?.tipo==="vizinho"||c?.tipo==="rua").length;
+  const nMao=coordPorLinha.filter(c=>c?.tipo==="manual"||c?.tipo==="manual-rua").length;
+  const nMapa=coordPorLinha.filter(c=>c?.tipo==="osm"&&!c.longa).length;
+  const nLonga=coordPorLinha.filter(c=>c?.tipo==="osm"&&c.longa).length;
+  // Cadastro manual: so para quem importa. A TV roda sem login e
+  // nem ve o lapis.
+  const sess=React.useContext(SessaoCtx);
+  const podeCadastrar=ehVazamento&&!!sess?.perfil?.pode_importar;
+  const [cadastrando,setCadastrando]=useState(null);   // a linha aberta no formulario
   return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(4px)"}}>
     <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:16,border:`1px solid ${C.border}`,width:"100%",maxWidth:1400,maxHeight:"80vh",display:"flex",flexDirection:"column",overflow:"hidden",animation:"modalIn 0.2s ease"}}>
       <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
@@ -730,7 +916,11 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
           {ehVazamento&&<span title="Clique no endereço para abrir no Google Maps. Verde: a turma já executou nesse número. Âmbar: só a rua está mapeada, abre no meio dela. Cinza: fora da base, abre uma busca por texto."
             style={{marginLeft:8,fontSize:12,fontWeight:700,padding:"2px 9px",borderRadius:6,border:`1px solid ${C.border}`,background:C.cardAlt,color:C.textMuted,cursor:"help"}}>
             {coordCarregando?<span style={{color:C.textDim}}>📍 consultando a biblioteca…</span>
-             :<>📍 <span style={{color:C.green}}>{nExato} exatos</span> · <span style={{color:"#38bdf8"}}>{nInterp} interpolados</span> · <span style={{color:C.amber}}>{nAprox} aproximados</span> · <span style={{color:C.textDim}}>{rows.length-nExato-nInterp-nAprox} sem base</span></>}
+             :<>📍 <span style={{color:C.green}}>{nExato} exatos</span> · <span style={{color:"#38bdf8"}}>{nInterp} interpolados</span> · <span style={{color:C.amber}}>{nAprox} aproximados</span>
+               {nMao>0&&<> · <span style={{color:"#a78bfa"}}>{nMao} à mão</span></>}
+               {nMapa>0&&<> · <span style={{color:"#2dd4bf"}}>{nMapa} do mapa</span></>}
+               {nLonga>0&&<> · <span style={{color:C.amber}}>{nLonga} em via longa</span></>}
+               · <span style={{color:C.textDim}}>{rows.length-nExato-nInterp-nAprox-nMao-nMapa-nLonga} sem base</span></>}
           </span>}
         </div></div>
         <button onClick={onClose} style={{background:"transparent",border:"none",color:C.textDim,fontSize:22,cursor:"pointer",padding:"4px 8px"}}>✕</button>
@@ -750,17 +940,32 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
                   ...(gasPorLinha[i]?{color:C.amber,fontWeight:700,background:C.amberBg,boxShadow:"inset 3px 0 0 "+C.amber}:{})}}>
                 {gasPorLinha[i]&&<span style={{marginRight:6}}>🔥</span>}
                 {ehVazamento?(()=>{const c=coordPorLinha[i];
-                  const cor=c?.tipo==="exato"?C.green:c?.tipo==="interpolado"?"#38bdf8":c?C.amber:C.textDim;
-                  const dica=c?.tipo==="exato"?`Coordenada exata — ${c.obs} execução${c.obs>1?"ões":""} neste número, dispersão ${c.desvio} m`
+                  const manual=c?.tipo==="manual"||c?.tipo==="manual-rua";
+                  const doMapa=c?.tipo==="osm";
+                  const cor=manual?"#a78bfa":doMapa?(c.longa?C.amber:"#2dd4bf"):c?.tipo==="exato"?C.green:c?.tipo==="interpolado"?"#38bdf8":c?C.amber:C.textDim;
+                  const quando=c?.quando?new Date(c.quando).toLocaleDateString("pt-BR"):"";
+                  const kmTxt=c?.ext?(c.ext>=1000?(c.ext/1000).toFixed(1)+" km":c.ext+" m"):"";
+                  const dica=doMapa&&c.longa?`ATENÇÃO — via de ${kmTxt}. Do mapa do OpenStreetMap: a via é esta, mas o ponto é o MEIO dela e pode estar longe da OS. Confira antes de mandar equipe, ou cadastre o ponto certo no ✏️.`
+                            :doMapa?`Tirada do mapa do OpenStreetMap — o nome aparece em um só lugar na região, então a rua é esta (${kmTxt}). Abre no meio dela, sem o número.`
+                            :c?.tipo==="manual"?`Cadastrada à mão neste número${quando?" em "+quando:""}`
+                            :c?.tipo==="manual-rua"?`Rua cadastrada à mão${quando?" em "+quando:""} — abre no ponto marcado, o número não foi informado`
+                            :c?.tipo==="exato"?`Coordenada exata — ${c.obs} execução${c.obs>1?"ões":""} neste número, dispersão ${c.desvio} m`
                             :c?.tipo==="interpolado"?`Número não mapeado — posição calculada entre os nº ${c.entre[0]} e ${c.entre[1]}, que já foram executados`
                             :c?.tipo==="vizinho"?`Número não mapeado — abre no vizinho conhecido mais próximo, ${c.casas} número${c.casas>1?"s":""} de distância`
                             :c?.tipo==="rua"?`Número não mapeado e a rua não tem número na base — abre no meio dela (${c.obs} execuções, dispersão ${c.desvio} m)`
                             :"Fora da base — abre uma busca por texto no Google Maps";
-                  return <span onClick={e=>{e.stopPropagation();abrirNoMapa(r);}} title={dica}
-                    style={{cursor:"pointer",textDecoration:"underline",textDecorationStyle:c?.tipo==="exato"?"solid":"dotted",textDecorationColor:cor,textUnderlineOffset:3}}>
-                    <span style={{color:cor,marginRight:4}}>{c?"📍":"🔍"}</span>
-                    {String(r["Endereço"]).trim()}, {r["Número"]}{r["Complemento"]?" - "+String(r["Complemento"]).trim():""}
-                  </span>;})()
+                  return <>
+                    <span onClick={e=>{e.stopPropagation();abrirNoMapa(r);}} title={dica}
+                      style={{cursor:"pointer",textDecoration:"underline",textDecorationStyle:c?.tipo==="exato"||manual?"solid":"dotted",textDecorationColor:cor,textUnderlineOffset:3}}>
+                      <span style={{color:cor,marginRight:4}}>{manual?"📌":doMapa?(c.longa?"⚠️":"🗺️"):c?"📍":"🔍"}</span>
+                      {String(r["Endereço"]).trim()}, {r["Número"]}{r["Complemento"]?" - "+String(r["Complemento"]).trim():""}
+                    </span>
+                    {podeCadastrar&&<span onClick={e=>{e.stopPropagation();setCadastrando(r);}}
+                      title={c?"Corrigir esta coordenada à mão":"Cadastrar a coordenada desta rua à mão"}
+                      style={{cursor:"pointer",marginLeft:7,fontSize:11,opacity:c?0.35:0.85,userSelect:"none"}}
+                      onMouseEnter={e=>(e.currentTarget.style.opacity=1)}
+                      onMouseLeave={e=>(e.currentTarget.style.opacity=c?0.35:0.85)}>✏️</span>}
+                  </>;})()
                  :<>{String(r["Endereço"]).trim()}, {r["Número"]}{r["Complemento"]?" - "+String(r["Complemento"]).trim():""}</>}</td>
               <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`}}>{r["Bairro"]}</td>
               <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`}}>{r["Município"]}</td>
@@ -770,6 +975,13 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
         </table>
       </div>
     </div>
+    {cadastrando&&<CoordModal linha={cadastrando} sess={sess}
+      onClose={()=>setCadastrando(null)}
+      onSalvou={()=>{
+        setCadastrando(null);
+        // A rua saiu do cache ao salvar; recarrega e repinta a tabela.
+        carregarRuas(sorted.map(r=>ruaKey(r["Endereço"]))).then(()=>setCoordVer(v=>v+1));
+      }}/>}
   </div>;
 }
 
@@ -2590,7 +2802,7 @@ export default function App(){
     <span>Carregando dados do Supabase…</span><style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
   </div>;
 
-  return <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"'Inter',-apple-system,sans-serif",display:"flex"}}>
+  return <SessaoCtx.Provider value={sess}><div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"'Inter',-apple-system,sans-serif",display:"flex"}}>
     {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed}/>}
     <div style={{flex:1,padding:"24px 16px",overflowY:"auto",minHeight:"100vh"}}>
       <div style={{maxWidth:activeTab==="producao"?1180:960,margin:"0 auto"}}>
@@ -2658,5 +2870,5 @@ export default function App(){
       </div>
     </div>
     <style>{`@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@keyframes modalIn{from{opacity:0;transform:scale(0.95)}to{opacity:1;transform:scale(1)}}@keyframes gasPulse{0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,0.3)}50%{box-shadow:0 0 12px 4px rgba(245,158,11,0.15)}}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}`}</style>
-  </div>;
+  </div></SessaoCtx.Provider>;
 }

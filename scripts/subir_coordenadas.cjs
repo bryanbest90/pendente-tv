@@ -29,6 +29,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const chave = require("./chave.cjs");
 
 const RAIZ = path.resolve(__dirname, "..");
 const ARQ = path.join(RAIZ, "src", "coordBase.json");
@@ -36,79 +37,10 @@ const LIMPAR = process.argv.includes("--limpar");
 const LOTE = 500;
 
 // ── chave ────────────────────────────────────────────────
-let URL = process.env.SUPABASE_URL || "";
-let KEY = process.env.SUPABASE_KEY || "";
-const fCfg = path.join(__dirname, "config.json");
-if ((!URL || !KEY) && fs.existsSync(fCfg)) {
-  try {
-    const cfg = JSON.parse(fs.readFileSync(fCfg, "utf8"));
-    URL = URL || cfg.supabase?.url || "";
-    KEY = KEY || cfg.supabase?.key || "";
-  } catch (e) {
-    console.error(`config.json existe mas nao e um JSON valido: ${e.message}`);
-    process.exit(1);
-  }
-}
-if (!URL || !KEY) {
-  console.error("Falta a url e a chave do Supabase.");
-  console.error(`Crie ${fCfg} com:`);
-  console.error(`  {"supabase":{"url":"https://SEU-PROJETO.supabase.co","key":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlnZ25maWtxYmRncnZmc2h4aHVsIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4NTcwODA1MiwiZXhwIjoyMTAxMjg0MDUyfQ.ZQyfNn1JxiPkUe-vwmUYL5ebKhsjTjOGnadO49mpY4c"}}`);
-  process.exit(1);
-}
-URL = URL.replace(/\/+$/, "");
-
-// ── a chave, conferida antes de sair mandando ─────────────
-//
-// O erro que o Supabase devolve para chave errada e sempre o
-// mesmo 401 "Invalid API key", nao importa o motivo: chave
-// truncada, quebrada em duas linhas no copiar-e-colar, chave de
-// OUTRO projeto, ou o "JWT Secret" no lugar da service_role.
-// Como ele nao diferencia, quem diferencia e aqui.
-
-// Copiar do painel costuma trazer quebra de linha e espaco junto.
-// Um JWT nao tem espaco nenhum, entao tirar todos e seguro — e
-// resolve o motivo mais comum de 401.
-const KEY_BRUTA = KEY;
-KEY = KEY.replace(/\s+/g, "");
-if (KEY !== KEY_BRUTA) console.log("  (a chave tinha espaco/quebra de linha; limpei antes de usar)");
-
-const refDaUrl = (URL.match(/^https?:\/\/([^.]+)\./) || [])[1] || "";
-const erroChave = (...linhas) => {
-  console.error(linhas[0]);
-  for (const l of linhas.slice(1)) console.error("  " + l);
-  console.error("  Painel do Supabase -> Settings -> API Keys -> service_role (a secreta).");
-  process.exit(1);
-};
-
-if (/^sb_publishable_/.test(KEY)) {
-  erroChave("A chave e a publishable (a publica). Aqui precisa ser a secreta.");
-} else if (!/^sb_secret_/.test(KEY)) {
-  // Formato JWT (projetos mais antigos, que e o caso deste).
-  const partes = KEY.split(".");
-  let carga = null;
-  if (partes.length === 3) {
-    try { carga = JSON.parse(Buffer.from(partes[1], "base64").toString()); } catch { /* segue */ }
-  }
-  if (!carga) {
-    erroChave(
-      "A chave nao esta num formato que o Supabase aceite.",
-      `Veio com ${KEY.length} caractere(s) e ${partes.length} parte(s) separadas por ponto;`,
-      "a service_role e um JWT: tres partes, comeca com eyJ e tem ~220 caracteres.",
-      'Se voce copiou o campo "JWT Secret", nao e esse — e o que fica logo abaixo.');
-  }
-  if (carga.role !== "service_role") {
-    erroChave(`A chave e a "${carga.role}". Aqui precisa ser a service_role.`,
-      "A anon nao consegue gravar: a tabela coord_rua nao tem policy de escrita, de proposito.");
-  }
-  if (carga.ref && refDaUrl && carga.ref !== refDaUrl) {
-    erroChave("A chave e de OUTRO projeto do Supabase.",
-      `url aponta para: ${refDaUrl}`,
-      `chave pertence a: ${carga.ref}`);
-  }
-  if (carga.exp && carga.exp * 1000 < Date.now()) {
-    erroChave("A chave expirou.", `venceu em ${new Date(carga.exp * 1000).toLocaleDateString("pt-BR")}.`);
-  }
-}
+// A leitura e a conferencia da chave moram em chave.cjs, usadas
+// tambem pelo ruas_do_osm.cjs. Duas copias de uma conferencia de
+// credencial sempre acabam divergindo.
+const { URL, KEY, H } = chave.ler();
 
 // ── dados ────────────────────────────────────────────────
 if (!fs.existsSync(ARQ)) {
@@ -144,13 +76,6 @@ const enderecos = linhas.reduce((a, l) => a + l.pontos, 0);
 console.log(`${ARQ}`);
 console.log(`  ${linhas.length} ruas | ${enderecos} enderecos | gerado em ${base.gerado || "?"}`);
 console.log(`  destino: ${URL}/rest/v1/coord_rua\n`);
-
-const H = {
-  apikey: KEY,
-  Authorization: "Bearer " + KEY,
-  "Content-Type": "application/json",
-  Prefer: "return=minimal,resolution=merge-duplicates",
-};
 
 async function principal() {
   if (LIMPAR) {
