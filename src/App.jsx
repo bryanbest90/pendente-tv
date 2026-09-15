@@ -263,6 +263,29 @@ async function authRefresh(refresh_token){
   if(!res.ok) return null;
   return res.json();
 }
+
+// O access_token dura 1 hora, e até aqui ele só era renovado quando a
+// página carregava. Quem deixa a aba aberta a manhã inteira — que é o
+// uso normal desta tela — tentava gravar com token vencido e levava
+// "JWT expired", uma mensagem que não diz nem o que fazer. Agora toda
+// escrita passa por aqui antes.
+let renovando=null;
+async function tokenFresco(sess){
+  if(!sess?.refresh_token) return sess?.access_token;
+  if(sess.expires_at&&sess.expires_at*1000>Date.now()+60000) return sess.access_token;
+  // Duas gravações ao mesmo tempo não podem renovar duas vezes: a
+  // primeira renovação invalida o refresh_token que a segunda usaria,
+  // e a segunda cairia fora sem motivo aparente.
+  if(!renovando) renovando=authRefresh(sess.refresh_token).finally(()=>{renovando=null;});
+  const novo=await renovando;
+  if(!novo?.access_token) throw new Error("Sua sessão expirou. Entre de novo para gravar.");
+  sess.access_token=novo.access_token;
+  sess.refresh_token=novo.refresh_token;
+  sess.expires_at=novo.expires_at;
+  saveSess(sess);
+  return sess.access_token;
+}
+
 // A RLS de `perfis` devolve só a própria linha — daí a lista de quem
 // tem acesso não vaza nem para quem está logado.
 async function fetchPerfil(tok){
@@ -745,13 +768,27 @@ function conferirCoord(c){
   if(dentro({lat:c.lon,lon:c.lat})) return "trocado";
   return `Essa coordenada cai fora da regiao de trabalho (${c.lat}, ${c.lon}). Confira se copiou do lugar certo.`;
 }
-async function salvarCoordManual(reg,tok){
-  const res=await fetch(SUPABASE_URL+"/rest/v1/coord_manual?on_conflict=rua,numero",{
+async function salvarCoordManual(reg,sess){
+  const manda=tok=>fetch(SUPABASE_URL+"/rest/v1/coord_manual?on_conflict=rua,numero",{
     method:"POST",
     headers:{...authHeaders(tok),"Prefer":"return=minimal,resolution=merge-duplicates"},
     body:JSON.stringify([reg]),
   });
-  if(!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  let res=await manda(await tokenFresco(sess));
+  // Cinto e suspensorio: se ainda assim vier 401 (relogio do PC
+  // adiantado, token revogado no painel), força a renovacao e tenta
+  // uma vez. Perder o cadastro por causa disso seria perder o
+  // trabalho de garimpar a coordenada no mapa.
+  if(res.status===401&&sess?.refresh_token){
+    sess.expires_at=0;
+    res=await manda(await tokenFresco(sess));
+  }
+  if(!res.ok){
+    const txt=await res.text();
+    if(res.status===401) throw new Error("Sua sessão expirou. Entre de novo para gravar.");
+    if(res.status===403) throw new Error("Seu usuário não tem permissão para cadastrar coordenada.");
+    throw new Error(`${res.status} ${txt}`);
+  }
   coordCache.delete(reg.rua);   // forca reler na proxima consulta
 }
 
@@ -784,7 +821,7 @@ function CoordModal({linha,sess,onClose,onSalvou}){
         lat:+c.lat.toFixed(6), lon:+c.lon.toFixed(6),
         endereco_original:endereco+(temNum?", "+num:""),
         bairro:linha["Bairro"]||null,
-      },sess.access_token);
+      },sess);
       onSalvou();
     }catch(e){ setErro(String(e.message||e)); setSalvando(false); }
   };
@@ -1757,7 +1794,7 @@ function CarteiraView({rawRows,sess}){
       flashEmRua("Processando EM RUA...");
       const{dia,records}=await parseEmRuaFile(file);
       flashEmRua(`Enviando ${records.length} registros (${fmtDiaFull(dia)})...`);
-      const count=await uploadEmRua(dia,records,authHeaders(sess.access_token));
+      const count=await uploadEmRua(dia,records,authHeaders(await tokenFresco(sess)));
       flashEmRua(`EM RUA importado ✓ (${count} registros, dia ${fmtDiaFull(dia)})`);
       // Reload em_rua do dia importado
       const er=await fetchEmRua(dia);
@@ -1774,7 +1811,7 @@ function CarteiraView({rawRows,sess}){
       flashEmRua("Lendo relatório de execução...");
       const{records,ini,fim,ignoradas}=await parseExecucaoFile(file);
       flashEmRua(`Enviando ${records.length} execuções (${fmtDiaFull(ini)} a ${fmtDiaFull(fim)})...`);
-      await uploadExecucao(records,ini,fim,authHeaders(sess.access_token));
+      await uploadExecucao(records,ini,fim,authHeaders(await tokenFresco(sess)));
       flashEmRua(`Execuções importadas ✓ ${records.length} registros${ignoradas?`, ${ignoradas} ignoradas`:""}`);
       const exe=await fetchExecucao(diaD3,fmt(today));
       setExecSet(new Set(exe.map(r=>osKey(r)+"|"+r.dia)));
@@ -2765,7 +2802,7 @@ export default function App(){
       const filtered=all.map(sanitize).filter(r=>VALID_ATCS.includes(Number(r["ATC"]))&&!EXCLUDED_TSS.includes(String(r["TSS"]||"").trim()));
       setRawRows(filtered);setExcludedTSS(new Set());const now=new Date().toISOString();setUpdatedAt(now);
       cacheRows(filtered,now);saveFilters(new Set(),sortBy,activeUnit);
-      flash("Enviando "+filtered.length+" OS...");const result=await uploadRows(filtered,authHeaders(sess.access_token));
+      flash("Enviando "+filtered.length+" OS...");const result=await uploadRows(filtered,authHeaders(await tokenFresco(sess)));
       setUpdatedAt(result.updatedAt);cacheRows(filtered,result.updatedAt);flash("Pendente atualizado ✓ ("+result.count+" OS)");
     }catch(e){flash("Erro: "+e.message);}setUploading(false);
   },[saveFilters,sortBy,activeUnit,sess]);
