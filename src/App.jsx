@@ -13,16 +13,32 @@ const HEADERS = {"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY,"C
 // ver com isso (Dashboard e FamilyRow), entao vai por contexto.
 const SessaoCtx = React.createContext(null);
 
-const EXCLUDED_DISPLAY = ["VISTORIA","CORTE SUPRESSÃO ADM","FISCALIZAÇÃO","SERV COMPLEMENTAR","ABASTECIMENTO","DESOBSTRUÇÃO"];
+// DESOBSTRUÇÃO saiu daqui em 15/09/2026: passou a ser acompanhada na
+// aba Pendente por causa da prestadora. São três TSS próprias —
+// DESOBSTRUIR REDE DE ESGOTO, DESOBSTRUIR RAMAL DE ESGOTO e
+// DESOBSTRUIR RETORNO PARA IMOVEL.
+const EXCLUDED_DISPLAY = ["VISTORIA","CORTE SUPRESSÃO ADM","FISCALIZAÇÃO","SERV COMPLEMENTAR","ABASTECIMENTO"];
+// Também saíram três TSS de OUTROS SERVIÇOS DE ESGOTO, na mesma
+// data e pelo mesmo motivo: TESTE DE CORANTE OP, LAVAR REDE DE
+// ESGOTO PREVENTIVA e LIMPAR POÇO INSPEÇÃO/VISITA A VACUO.
 const EXCLUDED_TSS = [
   "RETIRAR LACRE NUMERADO","LIGAÇÃO DE ÁGUA - PROG AGUA LEGAL","DESCARGA EM REDE DE ÁGUA",
   "INSTALAR CAIXA D'ÁGUA","INSTALAR CAIXA UMA (PARTE CIVIL)","PREPARAR INSTALAÇÃO PARA CAIXA D'AGUA",
   "RESTABELECER LIGAÇÃO SERVIÇOS ADICIONAIS","LIGAÇÃO DE ESGOTO - PROG AGUA LEGAL",
-  "LIGAÇÃO DE ESGOTO - PROG SE LIGA NA REDE","TESTE DE CORANTE OP","SUPRIMIR LIGAÇÃO DE POÇO",
-  "LAVAR REDE DE ESGOTO PREVENTIVA","LIMPAR POÇO INSPEÇÃO/VISITA A VACUO",
+  "LIGAÇÃO DE ESGOTO - PROG SE LIGA NA REDE","SUPRIMIR LIGAÇÃO DE POÇO",
   "MANUTENÇÃO EM INSTALAÇÕES ESGOTO SABESP","PROLONGAR REDE DE ESGOTO",
   "REMANEJAR REDE DE ESGOTO","HIDRANTE VAZANDO",
 ];
+
+// A mesma pergunta estava escrita em quatro lugares, com redações
+// ligeiramente diferentes. Regra de negócio copiada é regra que
+// diverge: basta alguém mexer em uma cópia. Agora é uma só.
+function familiaTssVisivel(familia,tss){
+  const fam=String(familia||"").trim(), t=String(tss||"").trim();
+  if(EXCLUDED_DISPLAY.includes(fam)) return false;
+  if(EXCLUDED_TSS.includes(t)) return false;
+  return true;
+}
 const VALID_ATCS = [923, 929, 299];
 const UNITS = [
   { id:"geral", label:"Geral", atc:null, icon:"📊" },
@@ -1578,8 +1594,7 @@ function useGasAlerts(rows){
       const familia = String(r["Família"]||"").trim();
       const tss = String(r["TSS"]||"").trim();
       // Aplicar mesmos filtros do dashboard
-      if(EXCLUDED_DISPLAY.includes(familia)) return;
-      if(EXCLUDED_TSS.includes(tss)) return;
+      if(!familiaTssVisivel(familia,tss)) return;
       if(GAS_EXCLUDED_FAMILIES.includes(familia)) return;
       const atc = Number(r["ATC"]);
       if(!VALID_ATCS.includes(atc)) return;
@@ -1826,8 +1841,7 @@ function CarteiraView({rawRows,sess}){
     return rawRows.filter(r=>{
       const tss=String(r["TSS"]||"").trim();
       const fam=String(r["Família"]||"").trim();
-      if(EXCLUDED_DISPLAY.includes(fam)) return false;
-      if(EXCLUDED_TSS.includes(tss)) return false;
+      if(!familiaTssVisivel(fam,tss)) return false;
       if(isGloballyExcludedTss(tss)) return false;
       const atc=Number(r["ATC"]);
       if(!VALID_ATCS.includes(atc)) return false;
@@ -2821,10 +2835,10 @@ export default function App(){
   },[]);
 
   const currentUnit=UNITS.find(u=>u.id===activeUnit)||UNITS[0];
-  const filteredRows=useMemo(()=>rawRows?rawRows.filter(r=>(currentUnit.atc===null?VALID_ATCS.includes(Number(r["ATC"])):Number(r["ATC"])===currentUnit.atc)&&!EXCLUDED_DISPLAY.includes(String(r["Família"]||"").trim())&&!EXCLUDED_TSS.includes(String(r["TSS"]||"").trim())):[],[rawRows,currentUnit]);
+  const filteredRows=useMemo(()=>rawRows?rawRows.filter(r=>(currentUnit.atc===null?VALID_ATCS.includes(Number(r["ATC"])):Number(r["ATC"])===currentUnit.atc)&&familiaTssVisivel(r["Família"],r["TSS"])):[],[rawRows,currentUnit]);
   const unitCounts=useMemo(()=>{
     if(!rawRows)return{};const out={};
-    UNITS.forEach(u=>{const ur=rawRows.filter(r=>(u.atc===null?VALID_ATCS.includes(Number(r["ATC"])):Number(r["ATC"])===u.atc)&&!EXCLUDED_DISPLAY.includes(String(r["Família"]||"").trim())&&!EXCLUDED_TSS.includes(String(r["TSS"]||"").trim())&&!excludedTSS.has(String(r["TSS"]||"").trim()));
+    UNITS.forEach(u=>{const ur=rawRows.filter(r=>(u.atc===null?VALID_ATCS.includes(Number(r["ATC"])):Number(r["ATC"])===u.atc)&&familiaTssVisivel(r["Família"],r["TSS"])&&!excludedTSS.has(String(r["TSS"]||"").trim()));
       const p=ur.filter(r=>tempo(r["Tempo Residual"])==="prazo").length;const f=ur.filter(r=>tempo(r["Tempo Residual"])==="fora").length;out[u.id]={total:p+f,prazo:p,fora:f};});
     return out;
   },[rawRows,excludedTSS]);
