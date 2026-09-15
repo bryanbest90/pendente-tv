@@ -749,6 +749,135 @@ function abrirNoMapa(r){
   window.open(url,"_blank","noopener,noreferrer");
 }
 
+/* ── Observação por serviço ───────────────────────────────
+   O que isto resolve não é falta de campo para escrever — é
+   informação que hoje mora na cabeça de uma pessoa e sai de
+   férias com ela.
+
+   Por isso a nota NÃO fica em balão nem em passar o mouse:
+   esses dois só revelam para quem já desconfia que tem algo ali,
+   e quem precisa da nota é justamente quem não sabe que ela
+   existe. Ela ocupa uma linha inteira embaixo da OS, sempre
+   visível, com faixa âmbar na borda.
+
+   A busca é por numero_os, não pelo par com a TSS: quando a OS
+   migra de TSS a nota continua aparecendo, dizendo de onde veio.
+   ───────────────────────────────────────────────────────── */
+// A OS com observacao fica marcada por inteiro — linha e nota
+// dentro da mesma moldura ambar. A nota nao e uma coisa ao lado da
+// OS, e uma propriedade dela.
+const COR_NOTA="#e9b949";
+const FUNDO_NOTA="rgba(233,185,73,0.055)";
+const notaCache=new Map();   // numero_os -> [ {tss, nota, autor_nome, atualizado_em} ]
+async function carregarNotas(numeros){
+  const faltam=[...new Set(numeros.filter(Boolean))].filter(n=>!notaCache.has(n));
+  if(!faltam.length) return;
+  for(let i=0;i<faltam.length;i+=200){
+    const lote=faltam.slice(i,i+200);
+    const lista=lote.map(n=>`"${String(n).replace(/["\\]/g,m=>"\\"+m)}"`).join(",");
+    try{
+      const res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select=numero_os,tss,nota,autor_nome,autor_email,atualizado_em&numero_os=in.("+encodeURIComponent(lista)+")",{headers:HEADERS});
+      if(!res.ok) throw new Error("HTTP "+res.status);
+      for(const d of await res.json()){
+        if(!notaCache.get(d.numero_os)) notaCache.set(d.numero_os,[]);
+        notaCache.get(d.numero_os).push(d);
+      }
+      for(const n of lote) if(!notaCache.has(n)) notaCache.set(n,[]);
+    }catch(e){
+      // Falha de rede não pode virar "essa OS não tem observação":
+      // seria esconder exatamente o que a nota existe para mostrar.
+      console.warn("os_nota:",e.message||e);
+      return;
+    }
+  }
+}
+// Devolve a nota desta OS+TSS, ou a de outra TSS da mesma OS.
+function acharNota(numeroOS,tss){
+  const lista=notaCache.get(String(numeroOS??"").trim());
+  if(!lista?.length) return null;
+  const t=String(tss??"").trim();
+  const exata=lista.find(d=>String(d.tss).trim()===t);
+  if(exata) return {...exata,outraTss:null};
+  return {...lista[0],outraTss:lista[0].tss};
+}
+async function salvarNota(numeroOS,tss,texto,sess){
+  const corpo={numero_os:String(numeroOS).trim(),tss:String(tss).trim(),nota:texto.trim(),
+    autor_nome:sess?.perfil?.nome||null,autor_email:sess?.perfil?.email||null,
+    atualizado_em:new Date().toISOString()};
+  const manda=async cab=>fetch(SUPABASE_URL+"/rest/v1/os_nota?on_conflict=numero_os,tss",{
+    method:"POST",headers:{...cab,"Prefer":"return=minimal,resolution=merge-duplicates"},
+    body:JSON.stringify([corpo])});
+  // Sem login grava com a chave anonima: quem sabe do impedimento
+  // esta no campo e nao tem usuario no sistema.
+  if(!sess?.access_token){
+    const r=await manda(HEADERS);
+    if(!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+    notaCache.delete(String(numeroOS).trim());
+    return;
+  }
+  let res=await manda(authHeaders(await tokenFresco(sess)));
+  if(res.status===401&&sess?.refresh_token){sess.expires_at=0;res=await manda(authHeaders(await tokenFresco(sess)));}
+  if(!res.ok){
+    const txt=await res.text();
+    if(res.status===401) throw new Error("Sua sessão expirou. Entre de novo para gravar.");
+    throw new Error(`${res.status} ${txt}`);
+  }
+  notaCache.delete(String(numeroOS).trim());
+}
+async function apagarNota(numeroOS,tss,sess){
+  const cab=sess?.access_token?authHeaders(await tokenFresco(sess)):HEADERS;
+  const res=await fetch(SUPABASE_URL+`/rest/v1/os_nota?numero_os=eq.${encodeURIComponent(String(numeroOS).trim())}&tss=eq.${encodeURIComponent(String(tss).trim())}`,
+    {method:"DELETE",headers:cab});
+  if(!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  notaCache.delete(String(numeroOS).trim());
+}
+
+function NotaModal({linha,nota,sess,onClose,onSalvou}){
+  const os=String(linha["Número OS"]||"").trim();
+  const tss=String(linha["TSS"]||"").trim();
+  const [txt,setTxt]=useState(nota?.nota||"");
+  const [salvando,setSalvando]=useState(false);
+  const [erro,setErro]=useState("");
+  const gravar=async(apagar)=>{
+    setSalvando(true);setErro("");
+    try{
+      if(apagar) await apagarNota(os,nota.outraTss||tss,sess);
+      else await salvarNota(os,tss,txt,sess);
+      onSalvou();
+    }catch(e){setErro(String(e.message||e));setSalvando(false);}
+  };
+  return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+    <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:14,border:`1px solid ${C.border}`,width:"100%",maxWidth:540,padding:20,display:"flex",flexDirection:"column",gap:13}}>
+      <div>
+        <div style={{fontSize:15,fontWeight:700,color:C.text}}>{nota?"Editar observação":"Adicionar observação"}</div>
+        <div style={{fontSize:12.5,color:C.textMuted,marginTop:4}}>OS {os} · {tss}</div>
+        <div style={{fontSize:12.5,color:C.textDim,marginTop:2}}>{String(linha["Endereço"]||"").trim()}, {linha["Número"]}{linha["Bairro"]?" — "+linha["Bairro"]:""}</div>
+      </div>
+      <div style={{fontSize:12,color:C.textDim,lineHeight:1.55,background:C.cardAlt,padding:"9px 12px",borderRadius:8,border:`1px solid ${C.border}`}}>
+        Escreva o que a próxima pessoa precisa saber para não perder viagem.
+        Ex.: <i>precisa de laje pronta antes de nivelar o PV — obra do cliente</i>.
+      </div>
+      <textarea autoFocus value={txt} onChange={e=>setTxt(e.target.value)} rows={4}
+        placeholder="O que impede, o que falta, com quem falar…"
+        style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.border}`,
+          background:C.cardAlt,color:C.text,fontSize:13.5,fontFamily:"inherit",resize:"vertical",boxSizing:"border-box"}}/>
+      {nota&&<div style={{fontSize:11.5,color:C.textDim}}>
+        Última alteração por {nota.autor_nome||nota.autor_email||"alguém"} em {fmtDate(nota.atualizado_em)}
+      </div>}
+      {erro&&<div style={{fontSize:12,color:C.red,background:C.redBg,padding:"9px 12px",borderRadius:8,border:`1px solid ${C.redBorder}`,wordBreak:"break-word"}}>{erro}</div>}
+      <div style={{display:"flex",gap:10,justifyContent:"flex-end",alignItems:"center"}}>
+        {nota&&<button onClick={()=>gravar(true)} disabled={salvando}
+          style={{marginRight:"auto",padding:"9px 14px",borderRadius:8,border:`1px solid ${C.redBorder}`,background:"transparent",color:C.red,fontSize:12.5,cursor:"pointer"}}>Apagar</button>}
+        <button onClick={onClose} style={{padding:"9px 16px",borderRadius:8,border:`1px solid ${C.border}`,background:"transparent",color:C.textDim,fontSize:13,cursor:"pointer"}}>Cancelar</button>
+        <button onClick={()=>gravar(false)} disabled={!txt.trim()||salvando}
+          style={{padding:"9px 18px",borderRadius:8,border:"none",fontSize:13,fontWeight:700,
+            background:txt.trim()&&!salvando?C.accent:C.border,color:txt.trim()&&!salvando?"#0b1220":C.textDim,
+            cursor:txt.trim()&&!salvando?"pointer":"default"}}>{salvando?"Salvando...":"Salvar"}</button>
+      </div>
+    </div>
+  </div>;
+}
+
 /* ── Cadastro manual de coordenada ────────────────────────
    Para a viela que o Google nao acha e para a rua que nunca
    teve baixa no celular. O que entra aqui vai para a tabela
@@ -953,12 +1082,24 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
   const nExato=coordPorLinha.filter(c=>c?.tipo==="exato").length;
   const nInterp=coordPorLinha.filter(c=>c?.tipo==="interpolado").length;
   const nAprox=coordPorLinha.filter(c=>c?.tipo==="vizinho"||c?.tipo==="rua").length;
+  // Observações: valem para TODOS os serviços, não só vazamento.
+  const sess=React.useContext(SessaoCtx);
+  const [notaVer,setNotaVer]=useState(0);
+  const [editando,setEditando]=useState(null);   // {linha, nota}
+  useEffect(()=>{
+    let vivo=true;
+    carregarNotas(sorted.map(r=>String(r["Número OS"]||"").trim()))
+      .finally(()=>{if(vivo)setNotaVer(v=>v+1);});
+    return()=>{vivo=false;};
+  },[sorted]);
+  const notaPorLinha=useMemo(()=>sorted.map(r=>acharNota(r["Número OS"],r["TSS"])),[sorted,notaVer]);
+  const nNotas=notaPorLinha.filter(Boolean).length;
   const nMao=coordPorLinha.filter(c=>c?.tipo==="manual"||c?.tipo==="manual-rua").length;
   const nMapa=coordPorLinha.filter(c=>c?.tipo==="osm"&&!c.longa).length;
   const nLonga=coordPorLinha.filter(c=>c?.tipo==="osm"&&c.longa).length;
-  // Cadastro manual: so para quem importa. A TV roda sem login e
-  // nem ve o lapis.
-  const sess=React.useContext(SessaoCtx);
+  // Cadastro manual de coordenada: so para quem importa. A TV roda
+  // sem login e nem ve o lapis. (sess ja foi lido acima, para as
+  // observacoes.)
   const podeCadastrar=ehVazamento&&!!sess?.perfil?.pode_importar;
   const [cadastrando,setCadastrando]=useState(null);   // a linha aberta no formulario
   return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(4px)"}}>
@@ -966,6 +1107,9 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
       <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
         <div><div style={{fontSize:16,fontWeight:700,color:C.text}}>{familia}</div><div style={{fontSize:13,color:C.textDim,marginTop:2}}>{tssName?tssName+" · ":""}<span style={{color}}>{label}</span> · {rows.length} OS
           {totalGas>0&&<span style={{marginLeft:8,fontSize:12,color:C.amber,fontWeight:700,padding:"2px 9px",borderRadius:6,border:"1px solid rgba(245,158,11,0.4)",background:C.amberBg}}>🔥 {totalGas} com rede de gás</span>}
+          {nNotas>0&&<span title="Serviços com observação registrada por alguém da equipe"
+            style={{marginLeft:8,fontSize:12,color:"#e9b949",fontWeight:700,padding:"2px 9px",borderRadius:6,border:"1px solid rgba(233,185,73,0.35)",background:"rgba(233,185,73,0.08)"}}>
+            📝 {nNotas} com observação</span>}
           {ehVazamento&&<span title="Clique no endereço para abrir no Google Maps. Verde: a turma já executou nesse número. Âmbar: só a rua está mapeada, abre no meio dela. Cinza: fora da base, abre uma busca por texto."
             style={{marginLeft:8,fontSize:12,fontWeight:700,padding:"2px 9px",borderRadius:6,border:`1px solid ${C.border}`,background:C.cardAlt,color:C.textMuted,cursor:"help"}}>
             {coordCarregando?<span style={{color:C.textDim}}>📍 consultando a biblioteca…</span>
@@ -981,15 +1125,35 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
       <div style={{overflowY:"auto",flex:1}}>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
           <thead><tr style={{background:C.headerBg,position:"sticky",top:0,zIndex:1}}>
+            <th title="Observação do serviço" style={{padding:"10px 6px 10px 12px",width:30,borderBottom:`1px solid ${C.border}`}}/>
             {cols.map(col=><th key={col.key} onClick={()=>toggleSort(col.key)} style={{padding:"10px 12px",textAlign:"left",fontSize:11,fontWeight:700,color:modalSort.col===col.key?C.accent:C.textDim,textTransform:"uppercase",letterSpacing:0.5,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap",cursor:"pointer",userSelect:"none"}}>{col.label}{modalSort.col===col.key?(modalSort.asc?" ↑":" ↓"):""}</th>)}
           </tr></thead>
-          <tbody>{sorted.map((r,i)=>
-            <tr key={i} style={{background:i%2?C.cardAlt:"transparent"}} onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background=i%2?C.cardAlt:"transparent")}>
-              <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,fontVariantNumeric:"tabular-nums",fontWeight:600,color:C.accent}}>{r["Número OS"]}</td>
-              <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r["TSS"]}</td>
-              <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,fontWeight:600,color:C.textMuted}}>{r["SF"]}</td>
+          <tbody>{sorted.map((r,i)=>{
+            const nt=notaPorLinha[i];
+            return <React.Fragment key={i}>
+            <tr style={{background:nt?FUNDO_NOTA:(i%2?C.cardAlt:"transparent")}}
+              onMouseEnter={e=>{if(!nt)e.currentTarget.style.background=C.rowHover;}}
+              onMouseLeave={e=>{if(!nt)e.currentTarget.style.background=i%2?C.cardAlt:"transparent";}}>
+              {/* Botao da observacao. Sempre presente, nunca escondido
+                  atras de hover: quem precisa da nota e quem nao sabe
+                  que ela existe. */}
+              <td style={{padding:"8px 6px 8px 12px",borderBottom:nt?"none":`1px solid ${C.border}`,verticalAlign:"top",
+                ...(nt?{boxShadow:`inset 3px 0 0 ${COR_NOTA}`}:{})}}>
+                {nt
+                  ? <span onClick={e=>{e.stopPropagation();setEditando({linha:r,nota:nt});}} title="Editar a observação"
+                      style={{cursor:"pointer",fontSize:13,userSelect:"none"}}>📝</span>
+                  : <span onClick={e=>{e.stopPropagation();setEditando({linha:r,nota:null});}} title="Adicionar uma observação"
+                      style={{cursor:"pointer",userSelect:"none",display:"inline-flex",alignItems:"center",
+                        justifyContent:"center",width:20,height:20,borderRadius:6,fontSize:14,lineHeight:1,
+                        color:C.accent,border:`1px solid ${C.border}`,background:C.cardAlt,transition:"all 0.12s"}}
+                      onMouseEnter={e=>{e.currentTarget.style.background=C.accentBg;e.currentTarget.style.borderColor="rgba(59,130,246,0.45)";}}
+                      onMouseLeave={e=>{e.currentTarget.style.background=C.cardAlt;e.currentTarget.style.borderColor=C.border;}}>+</span>}
+              </td>
+              <td style={{padding:"8px 12px",borderBottom:nt?"none":`1px solid ${C.border}`,fontVariantNumeric:"tabular-nums",fontWeight:600,color:C.accent}}>{r["Número OS"]}</td>
+              <td style={{padding:"8px 12px",borderBottom:nt?"none":`1px solid ${C.border}`,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r["TSS"]}</td>
+              <td style={{padding:"8px 12px",borderBottom:nt?"none":`1px solid ${C.border}`,fontWeight:600,color:C.textMuted}}>{r["SF"]}</td>
               <td title={gasPorLinha[i]?"Rua com rede de gás Comgás: "+gasPorLinha[i]:undefined}
-                style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap",
+                style={{padding:"8px 12px",borderBottom:nt?"none":`1px solid ${C.border}`,whiteSpace:"nowrap",
                   ...(gasPorLinha[i]?{color:C.amber,fontWeight:700,background:C.amberBg,boxShadow:"inset 3px 0 0 "+C.amber}:{})}}>
                 {gasPorLinha[i]&&<span style={{marginRight:6}}>🔥</span>}
                 {ehVazamento?(()=>{const c=coordPorLinha[i];
@@ -1020,11 +1184,31 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
                       onMouseLeave={e=>(e.currentTarget.style.opacity=c?0.35:0.85)}>✏️</span>}
                   </>;})()
                  :<>{String(r["Endereço"]).trim()}, {r["Número"]}{r["Complemento"]?" - "+String(r["Complemento"]).trim():""}</>}</td>
-              <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`}}>{r["Bairro"]}</td>
-              <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`}}>{r["Município"]}</td>
-              <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,fontWeight:600,color:tempo(r["Tempo Residual"])==="fora"?C.red:C.green}}>{r["Tempo Residual"]}</td>
-              <td style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`}}>{r["Status da OS"]}</td>
-            </tr>)}</tbody>
+              <td style={{padding:"8px 12px",borderBottom:nt?"none":`1px solid ${C.border}`}}>{r["Bairro"]}</td>
+              <td style={{padding:"8px 12px",borderBottom:nt?"none":`1px solid ${C.border}`}}>{r["Município"]}</td>
+              <td style={{padding:"8px 12px",borderBottom:nt?"none":`1px solid ${C.border}`,fontWeight:600,color:tempo(r["Tempo Residual"])==="fora"?C.red:C.green}}>{r["Tempo Residual"]}</td>
+              <td style={{padding:"8px 12px",borderBottom:nt?"none":`1px solid ${C.border}`}}>{r["Status da OS"]}</td>
+            </tr>
+            {/* A nota ocupa uma linha inteira, com faixa ambar na borda.
+                Ela nao some nem encolhe: e o unico jeito de alcancar
+                quem abriu a tela sem saber que havia algo a saber. */}
+            {nt&&<tr style={{background:FUNDO_NOTA}}>
+              <td colSpan={cols.length+1} onClick={()=>setEditando({linha:r,nota:nt})}
+                style={{padding:"0 12px 8px 12px",borderBottom:`1px solid ${C.border}`,cursor:"pointer",
+                  boxShadow:`inset 3px 0 0 ${COR_NOTA}`}}>
+                {/* Nota costuma ser curta. Autor e data vao na mesma
+                    linha, depois de uma barra, para o bloco nao ficar
+                    mais alto que a propria OS. */}
+                <div style={{display:"flex",gap:9,flexWrap:"wrap",alignItems:"baseline",paddingLeft:2}}>
+                  <span style={{fontSize:13,color:C.text,lineHeight:1.45,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{nt.nota}</span>
+                  <span style={{fontSize:11,color:C.textDim}}>
+                    | {nt.autor_nome||nt.autor_email||"autor não registrado"} · {fmtDate(nt.atualizado_em)}
+                    {nt.outraTss&&<span style={{color:C.amber}}> · registrada em {nt.outraTss}</span>}
+                  </span>
+                </div>
+              </td>
+            </tr>}
+            </React.Fragment>;})}</tbody>
         </table>
       </div>
     </div>
@@ -1034,6 +1218,13 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
         setCadastrando(null);
         // A rua saiu do cache ao salvar; recarrega e repinta a tabela.
         carregarRuas(sorted.map(r=>ruaKey(r["Endereço"]))).then(()=>setCoordVer(v=>v+1));
+      }}/>}
+    {editando&&<NotaModal linha={editando.linha} nota={editando.nota} sess={sess}
+      onClose={()=>setEditando(null)}
+      onSalvou={()=>{
+        setEditando(null);
+        // A OS saiu do cache ao gravar; recarrega e repinta a tabela.
+        carregarNotas(sorted.map(r=>String(r["Número OS"]||"").trim())).then(()=>setNotaVer(v=>v+1));
       }}/>}
   </div>;
 }
