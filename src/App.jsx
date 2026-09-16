@@ -800,7 +800,7 @@ async function carregarNotas(numeros){
     const lote=faltam.slice(i,i+200);
     const lista=lote.map(n=>`"${String(n).replace(/["\\]/g,m=>"\\"+m)}"`).join(",");
     try{
-      const res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select=numero_os,tss,nota,autor_nome,autor_email,atualizado_em&numero_os=in.("+encodeURIComponent(lista)+")",{headers:HEADERS});
+      const res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select=numero_os,tss,nota,autor_nome,autor_email,atualizado_em,endereco,bairro,municipio,familia&numero_os=in.("+encodeURIComponent(lista)+")",{headers:HEADERS});
       if(!res.ok) throw new Error("HTTP "+res.status);
       for(const d of await res.json()){
         if(!notaCache.get(d.numero_os)) notaCache.set(d.numero_os,[]);
@@ -824,9 +824,15 @@ function acharNota(numeroOS,tss){
   if(exata) return {...exata,outraTss:null};
   return {...lista[0],outraTss:lista[0].tss};
 }
-async function salvarNota(numeroOS,tss,texto,sess){
+async function salvarNota(numeroOS,tss,texto,sess,linha){
+  // A nota guarda o proprio endereco. Sem isso ela vira uma linha
+  // sem endereco no dia em que a OS sai do pendente — e sai, e e
+  // justamente quando alguem vai querer entender o que houve.
+  const end=linha?[String(linha["Endereço"]||"").trim(),linha["Número"]].filter(x=>x!==""&&x!=null).join(", "):null;
   const corpo={numero_os:String(numeroOS).trim(),tss:String(tss).trim(),nota:texto.trim(),
     autor_nome:sess?.perfil?.nome||null,autor_email:sess?.perfil?.email||null,
+    endereco:end||null,bairro:linha?.["Bairro"]||null,
+    municipio:linha?.["Município"]||null,familia:linha?.["Família"]||null,
     atualizado_em:new Date().toISOString()};
   const manda=async cab=>fetch(SUPABASE_URL+"/rest/v1/os_nota?on_conflict=numero_os,tss",{
     method:"POST",headers:{...cab,"Prefer":"return=minimal,resolution=merge-duplicates"},
@@ -918,7 +924,7 @@ function padronizarNota(txt){
 async function fetchTodasNotas(){
   const todas=[];let de=0;const ps=1000;
   while(true){
-    const res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select=numero_os,tss,nota,autor_nome,autor_email,atualizado_em&order=atualizado_em.desc",
+    const res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select=numero_os,tss,nota,autor_nome,autor_email,atualizado_em,endereco,bairro,municipio,familia&order=atualizado_em.desc",
       {headers:{...HEADERS,"Range":de+"-"+(de+ps-1)}});
     if(!res.ok&&res.status!==206) throw new Error("Erro notas "+res.status);
     const d=await res.json();
@@ -987,8 +993,16 @@ function NotasModal({notas,rows,onClose,onEditar}){
               <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"baseline",fontSize:12.5}}>
                 <span style={{color:C.accent,fontWeight:600,...numStyle}}>{n.numero_os}</span>
                 <span style={{color:C.textMuted}}>{n.tss}</span>
-                {linha&&<span style={{color:C.textDim}}>· {String(linha["Endereço"]||"").trim()}, {linha["Número"]}{linha["Bairro"]?" — "+linha["Bairro"]:""}</span>}
-                {linha&&<span style={{color:tempo(linha["Tempo Residual"])==="fora"?C.red:C.green,fontWeight:600}}>{linha["Tempo Residual"]}</span>}
+                {(()=>{
+                  // O pendente e mais fresco, entao vem primeiro; o que
+                  // a nota guardou e a reserva de quando a OS ja saiu.
+                  const e=linha?[String(linha["Endereço"]||"").trim(),linha["Número"]].filter(x=>x!==""&&x!=null).join(", "):n.endereco;
+                  const b=linha?linha["Bairro"]:n.bairro;
+                  return e?<span style={{color:C.textDim}}>· {e}{b?" — "+b:""}</span>:null;
+                })()}
+                {linha
+                  ? <span style={{color:tempo(linha["Tempo Residual"])==="fora"?C.red:C.green,fontWeight:600}}>{linha["Tempo Residual"]}</span>
+                  : <span style={{color:C.textDim,fontSize:11}}>fora do pendente de hoje</span>}
                 {outraTss&&<span style={{color:C.amber,fontSize:11}}>a OS está hoje como {String(linha["TSS"]||"").trim()}</span>}
               </div>
               <div style={{display:"flex",gap:9,flexWrap:"wrap",alignItems:"baseline"}}>
@@ -1011,7 +1025,7 @@ function NotaModal({linha,nota,sess,onClose,onSalvou}){
     setSalvando(true);setErro("");
     try{
       if(apagar) await apagarNota(os,nota.outraTss||tss,sess);
-      else await salvarNota(os,tss,padronizarNota(txt),sess);
+      else await salvarNota(os,tss,padronizarNota(txt),sess,linha);
       onSalvou();
     }catch(e){setErro(String(e.message||e));setSalvando(false);}
   };
