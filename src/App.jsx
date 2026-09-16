@@ -59,11 +59,13 @@ function familiaTssVisivel(familia,tss){
   return true;
 }
 const VALID_ATCS = [923, 929, 299];
+// A sigla existe para a lateral recolhida: sem emoji, era o unico
+// conteudo do item e a barra ficava com caixas em branco.
 const UNITS = [
-  { id:"geral", label:"Geral", atc:null, icon:"📊" },
-  { id:"interlagos", label:"Interlagos", atc:923, icon:"🏙️" },
-  { id:"grajau", label:"Grajaú", atc:929, icon:"🌊" },
-  { id:"embu", label:"Embu-Guaçu", atc:299, icon:"🌿" },
+  { id:"geral", label:"Geral", atc:null, sigla:"GE" },
+  { id:"interlagos", label:"Interlagos", atc:923, sigla:"IN" },
+  { id:"grajau", label:"Grajaú", atc:929, sigla:"GR" },
+  { id:"embu", label:"Embu-Guaçu", atc:299, sigla:"EG" },
 ];
 const UNIT_TO_HISTORICO = { geral: null, interlagos: "Interlagos", grajau: "Grajau", embu: "Embu-Guacu" };
 
@@ -787,6 +789,9 @@ function abrirNoMapa(r){
 // OS, e uma propriedade dela.
 const COR_NOTA="#e9b949";
 const FUNDO_NOTA="rgba(233,185,73,0.055)";
+// Equivalentes ambar do sideActive/sideHover, que sao azuis.
+const FUNDO_NOTA_ATIVO="rgba(233,185,73,0.14)";
+const HOVER_NOTA="rgba(233,185,73,0.07)";
 const notaCache=new Map();   // numero_os -> [ {tss, nota, autor_nome, atualizado_em} ]
 async function carregarNotas(numeros){
   const faltam=[...new Set(numeros.filter(Boolean))].filter(n=>!notaCache.has(n));
@@ -904,6 +909,96 @@ function padronizarNota(txt){
   t=t.replace(/\s+/g," ").trim();
   if(/[A-Z0-9ÀÜ)\]]$/.test(t)) t+=".";      // ponto final
   return t;
+}
+
+// Todas as notas de uma vez, para o menu lateral e o modal de
+// Notas. Paginada como as demais buscas: sem isso o Supabase
+// devolveria so as 1000 primeiras e as mais antigas sumiriam sem
+// aviso, que e o erro que ja nos mordeu no historico.
+async function fetchTodasNotas(){
+  const todas=[];let de=0;const ps=1000;
+  while(true){
+    const res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select=numero_os,tss,nota,autor_nome,autor_email,atualizado_em&order=atualizado_em.desc",
+      {headers:{...HEADERS,"Range":de+"-"+(de+ps-1)}});
+    if(!res.ok&&res.status!==206) throw new Error("Erro notas "+res.status);
+    const d=await res.json();
+    if(!d?.length) break;
+    for(const x of d) todas.push(x);
+    if(d.length<ps) break;
+    de+=ps;
+  }
+  return todas;
+}
+
+/* ── Modal de Notas ───────────────────────────────────────
+   Todas as observacoes num lugar so: o que esta travado na
+   carteira inteira, sem precisar abrir familia por familia.
+
+   TODA nota aparece, sem excecao. Quando o pendente tem a OS, a
+   linha mostra endereco e prazo junto; quando nao tem, mostra o
+   que existe — OS, TSS e o texto — em vez de sumir.
+
+   Eu ja tentei esconder a nota sem par no pendente, e estava
+   errado: par nao achado nao prova OS resolvida, prova so que o
+   casamento falhou, e esconder transforma uma duvida minha em
+   informacao perdida para quem le.
+   ───────────────────────────────────────────────────────── */
+function NotasModal({notas,rows,onClose,onEditar}){
+  // Casa pelos digitos: numero de OS ja apareceu com espaco sobrando
+  // e ja veio como numero em vez de texto, e um espaco nao pode
+  // decidir se a informacao chega ou nao em quem le.
+  const soDigitos=v=>String(v??"").replace(/\D/g,"");
+  const porOS=useMemo(()=>{
+    const m=new Map();
+    for(const r of rows||[]){
+      const os=soDigitos(r["Número OS"]);
+      if(!os) continue;
+      if(!m.has(os)) m.set(os,[]);
+      m.get(os).push(r);
+    }
+    return m;
+  },[rows]);
+  const lista=useMemo(()=>(notas||[]).map(n=>{
+    const cands=porOS.get(soDigitos(n.numero_os))||[];
+    const linha=cands.find(r=>String(r["TSS"]||"").trim()===String(n.tss).trim())||cands[0]||null;
+    return {n,linha,outraTss:!!linha&&String(linha["TSS"]||"").trim()!==String(n.tss).trim()};
+  }),[notas,porOS]);
+
+  return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(4px)"}}>
+    <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:RAIO,border:`1px solid ${C.border}`,width:"100%",maxWidth:1100,maxHeight:"82vh",display:"flex",flexDirection:"column",overflow:"hidden",animation:"modalIn 0.2s ease"}}>
+      <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+        <div>
+          <div style={{fontSize:16,fontWeight:700,color:C.text}}>Observações</div>
+          <div style={{fontSize:13,color:C.textDim,marginTop:2}}>
+            <span style={{color:COR_NOTA,fontWeight:700,...numStyle}}>{lista.length}</span> serviço{lista.length===1?"":"s"} com observação
+          </div>
+        </div>
+        <button onClick={onClose} style={{background:"transparent",border:"none",color:C.textDim,fontSize:22,cursor:"pointer",padding:"4px 8px"}}>✕</button>
+      </div>
+      <div style={{overflowY:"auto",flex:1,padding:"10px 14px 16px"}}>
+        {lista.length===0&&<div style={{padding:"28px 6px",textAlign:"center",color:C.textDim,fontSize:13}}>
+          Nenhuma observação registrada ainda. Abra uma família, clique no + ao lado de uma OS e escreva a primeira.
+        </div>}
+        {lista.map(({n,linha,outraTss})=>
+            <div key={n.numero_os+"|"+n.tss}
+              onClick={()=>onEditar({linha:linha||{"Número OS":n.numero_os,"TSS":n.tss},nota:{...n,outraTss:outraTss?n.tss:null}})}
+              style={{display:"flex",flexDirection:"column",gap:4,padding:"10px 12px",marginBottom:6,cursor:"pointer",
+                background:FUNDO_NOTA,borderLeft:`3px solid ${COR_NOTA}`}}>
+              <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"baseline",fontSize:12.5}}>
+                <span style={{color:C.accent,fontWeight:600,...numStyle}}>{n.numero_os}</span>
+                <span style={{color:C.textMuted}}>{n.tss}</span>
+                {linha&&<span style={{color:C.textDim}}>· {String(linha["Endereço"]||"").trim()}, {linha["Número"]}{linha["Bairro"]?" — "+linha["Bairro"]:""}</span>}
+                {linha&&<span style={{color:tempo(linha["Tempo Residual"])==="fora"?C.red:C.green,fontWeight:600}}>{linha["Tempo Residual"]}</span>}
+                {outraTss&&<span style={{color:C.amber,fontSize:11}}>a OS está hoje como {String(linha["TSS"]||"").trim()}</span>}
+              </div>
+              <div style={{display:"flex",gap:9,flexWrap:"wrap",alignItems:"baseline"}}>
+                <span style={{fontSize:13,color:C.text,lineHeight:1.45,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{n.nota}</span>
+                <span style={{fontSize:11,color:C.textDim}}>| {n.autor_nome||n.autor_email||"autor não registrado"} · {fmtDate(n.atualizado_em)}</span>
+              </div>
+            </div>)}
+      </div>
+    </div>
+  </div>;
 }
 
 function NotaModal({linha,nota,sess,onClose,onSalvou}){
@@ -1756,16 +1851,17 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx}){
 const btnTiny={padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:600,border:`1px solid ${C.border}`,background:"transparent",color:C.textDim,cursor:"pointer"};
 
 /* ── Sidebar ── */
-function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed}){
+function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,nNotas,onNotas}){
   return <div style={{width:collapsed?56:210,minWidth:collapsed?56:210,background:C.sidebar,borderRight:`1px solid ${C.border}`,display:"flex",flexDirection:"column",transition:"width 0.25s ease,min-width 0.25s ease",overflow:"hidden",flexShrink:0}}>
     <div style={{padding:collapsed?"16px 0":"16px 16px",display:"flex",alignItems:"center",justifyContent:collapsed?"center":"space-between",borderBottom:`1px solid ${C.border}`,minHeight:56}}>
       {!collapsed&&<span style={{fontSize:13,fontWeight:800,color:C.accent,letterSpacing:0.5,textTransform:"uppercase",whiteSpace:"nowrap"}}>Unidades</span>}
       <button onClick={()=>setCollapsed(!collapsed)} style={{background:"transparent",border:"none",color:C.textDim,cursor:"pointer",fontSize:16,padding:4,display:"flex"}}>{collapsed?"▶":"◀"}</button>
     </div>
-    <div style={{flex:1,padding:"8px 0"}}>
+    <div style={{padding:"8px 0"}}>
       {UNITS.map(u=>{const active=activeUnit===u.id;const counts=unitCounts[u.id]||{total:0,prazo:0,fora:0};
         return <div key={u.id} onClick={()=>setActiveUnit(u.id)} style={{padding:collapsed?"12px 0":"10px 16px",margin:collapsed?"2px 6px":"2px 8px",borderRadius:RAIO,cursor:"pointer",background:active?C.sideActive:"transparent",borderLeft:`2px solid ${active?C.accent:"transparent"}`,transition:"all 0.15s",display:"flex",alignItems:"center",justifyContent:collapsed?"center":"flex-start",gap:10}}
           onMouseEnter={e=>{if(!active)e.currentTarget.style.background=C.sideHover;}} onMouseLeave={e=>{if(!active)e.currentTarget.style.background="transparent";}}>
+          {collapsed&&<span style={{fontSize:12,fontWeight:600,color:active?C.accent:C.textDim,...numStyle}}>{u.sigla}</span>}
           {!collapsed&&<div style={{flex:1,minWidth:0}}>
             <div style={{fontSize:13,fontWeight:700,color:active?C.text:C.textMuted,whiteSpace:"nowrap"}}>{u.label}</div>
             <div style={{fontSize:11,color:C.textDim,marginTop:2,display:"flex",gap:8}}>
@@ -1774,6 +1870,35 @@ function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed}){
           </div>}
         </div>;})}
     </div>
+    {/* Notas tem exatamente a mesma forma de uma unidade — mesmo
+        recuo, mesmo canto, mesma faixa na borda, mesmo fundo de
+        selecionado. So a cor muda: ambar no lugar do azul, porque
+        nao e uma unidade, e uma visao que atravessa todas.
+        O traco em cima e do agrupador, nao do item, para o item
+        manter o formato dos vizinhos. */}
+    <div style={{borderTop:`1px solid ${C.border}`,marginTop:6,paddingTop:8}}>
+      <div onClick={onNotas} title="Todos os serviços com observação"
+        style={{padding:collapsed?"12px 0":"10px 16px",margin:collapsed?"2px 6px":"2px 8px",
+          borderRadius:RAIO,cursor:"pointer",
+          background:nNotas>0?FUNDO_NOTA_ATIVO:"transparent",
+          borderLeft:`2px solid ${nNotas>0?COR_NOTA:"transparent"}`,
+          transition:"all 0.15s",display:"flex",alignItems:"center",
+          justifyContent:collapsed?"center":"flex-start",gap:10,
+          ...(nNotas>0?{animation:"gasPulse 2s infinite"}:{})}}
+        onMouseEnter={e=>{if(!nNotas)e.currentTarget.style.background=HOVER_NOTA;}}
+        onMouseLeave={e=>{if(!nNotas)e.currentTarget.style.background="transparent";}}>
+        {collapsed
+          ? <span style={{fontSize:12,fontWeight:600,color:nNotas>0?COR_NOTA:C.textDim,...numStyle}}>{nNotas>0?nNotas:"NT"}</span>
+          : <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:13,fontWeight:700,color:nNotas>0?C.text:C.textMuted,whiteSpace:"nowrap"}}>Notas</div>
+              <div style={{fontSize:11,color:C.textDim,marginTop:2,display:"flex",gap:8}}>
+                <span style={{color:nNotas>0?COR_NOTA:C.textDim,...numStyle}}>{nNotas}</span>
+                <span>{nNotas===1?"com observação":"com observação"}</span>
+              </div>
+            </div>}
+      </div>
+    </div>
+    <div style={{flex:1}}/>
   </div>;
 }
 
@@ -3059,6 +3184,9 @@ export default function App(){
   const [sideCollapsed,setSideCollapsed]=useState(false);
   const [historico,setHistorico]=useState(null);
   const [showGasModal,setShowGasModal]=useState(false);
+  const [notas,setNotas]=useState([]);
+  const [showNotas,setShowNotas]=useState(false);
+  const [notaAberta,setNotaAberta]=useState(null);   // edicao vinda do modal de Notas
   const [activeTab,setActiveTab]=useState("pendente");
   const [sess,setSess]=useState(null);          // sessão do Supabase Auth (só a aba Produção usa)
   const [showLogin,setShowLogin]=useState(false);
@@ -3097,6 +3225,9 @@ export default function App(){
     try{const data=await fetchRows();if(data.rows?.length>0){setRawRows(data.rows);setUpdatedAt(data.updatedAt);cacheRows(data.rows,data.updatedAt);loaded=true;}}catch(e){flash("Erro Supabase: "+e.message);}
     if(!loaded){const cached=loadCache();if(cached?.rows?.length>0){setRawRows(cached.rows);setUpdatedAt(cached.updatedAt);flash("Usando dados em cache");}}
     try{const hist=await fetchHistorico();if(hist?.length>0)setHistorico(hist);}catch(e){console.warn("Historico indisponivel:",e.message);}
+    // Nota indisponivel nao derruba a tela, mas tambem nao pode
+    // passar por "nenhuma nota": o menu some e ninguem desconfia.
+    try{setNotas(await fetchTodasNotas());}catch(e){console.warn("Notas indisponiveis:",e.message);}
     setLoading(false);
   })();},[]);
 
@@ -3146,7 +3277,7 @@ export default function App(){
   </div>;
 
   return <SessaoCtx.Provider value={sess}><div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:FONTE_UI,display:"flex"}}>
-    {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed}/>}
+    {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed} nNotas={notas.length} onNotas={()=>setShowNotas(true)}/>}
     <div style={{flex:1,padding:"24px 16px",overflowY:"auto",minHeight:"100vh"}}>
       <div style={{maxWidth:activeTab==="producao"?1180:960,margin:"0 auto"}}>
         <div style={{marginBottom:24,textAlign:"center"}}>
@@ -3209,6 +3340,14 @@ export default function App(){
           <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label} historico={historico} activeUnit={activeUnit}/>
         </div>}
         {activeTab==="pendente"&&showGasModal&&gas.alerts.length>0&&<GasAlertModal alerts={gas.alerts} onIgnore={gas.doIgnore} onClose={()=>setShowGasModal(false)}/>}
+        {showNotas&&<NotasModal notas={notas} rows={rawRows} onClose={()=>setShowNotas(false)}
+          onEditar={x=>setNotaAberta(x)}/>}
+        {notaAberta&&<NotaModal linha={notaAberta.linha} nota={notaAberta.nota} sess={sess}
+          onClose={()=>setNotaAberta(null)}
+          onSalvou={async()=>{
+            setNotaAberta(null);
+            try{setNotas(await fetchTodasNotas());}catch(e){console.warn("Notas:",e.message);}
+          }}/>}
         <div style={{textAlign:"center",padding:"32px 16px 16px",color:C.textDim,fontSize:11,letterSpacing:0.3,opacity:0.6}}>Desenvolvido por Bryan Mendes Deodato, todos os direitos reservados</div>
       </div>
     </div>
