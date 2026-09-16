@@ -17,6 +17,25 @@ const SessaoCtx = React.createContext(null);
 // aba Pendente por causa da prestadora. São três TSS próprias —
 // DESOBSTRUIR REDE DE ESGOTO, DESOBSTRUIR RAMAL DE ESGOTO e
 // DESOBSTRUIR RETORNO PARA IMOVEL.
+/* ━━━ VISUAL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   Leitura de instrumento, com a paleta de sempre — nenhum hex
+   foi trocado. O que dá o caráter é a forma:
+
+   · cartão que não fecha: dois colchetes de canto em fio de 1px
+   · escala de dez traços atrás da barra de proporção — "42%"
+     deixa de ser número que se lê e vira posição que se vê
+   · rótulo minúsculo, em caixa alta, bem espaçado
+   · número em mono, largura de dígito igual, coluna que não dança
+   · brilho no próprio número, e só quando ele é o vermelho;
+     moldura brilhando em todo bloco é enfeite, e enfeite em tela
+     de trabalho vira ruído
+   · canto reto e nenhum emoji
+   ───────────────────────────────────────────────────────── */
+const FONTE_UI  = `Saira,-apple-system,"Segoe UI",sans-serif`;
+const FONTE_NUM = `"Azeret Mono",ui-monospace,SFMono-Regular,monospace`;
+const numStyle  = {fontFamily:FONTE_NUM,fontVariantNumeric:"tabular-nums",letterSpacing:"-0.04em"};
+const RAIO      = 2;
+
 const EXCLUDED_DISPLAY = ["VISTORIA","CORTE SUPRESSÃO ADM","FISCALIZAÇÃO","SERV COMPLEMENTAR","ABASTECIMENTO"];
 // Também saíram três TSS de OUTROS SERVIÇOS DE ESGOTO, na mesma
 // data e pelo mesmo motivo: TESTE DE CORANTE OP, LAVAR REDE DE
@@ -832,6 +851,61 @@ async function apagarNota(numeroOS,tss,sess){
   notaCache.delete(String(numeroOS).trim());
 }
 
+/* ── Padronização da nota ─────────────────────────────────
+   Nota é escrita por muita gente diferente, em pressa, às vezes
+   pelo celular. Sem padronizar, a mesma informação aparece de
+   cinco jeitos e a tabela vira colcha de retalho.
+
+   O que é feito, e é seguro porque é determinístico:
+   caixa alta, espaço sobrando removido, espaço antes de vírgula
+   e ponto corrigido, pontuação repetida reduzida, ponto final
+   garantido, e acento devolvido numa lista fechada de palavras
+   do nosso vocabulário.
+
+   O que NÃO é feito, de propósito: correção ortográfica de
+   verdade. Corretor automático troca palavra por palavra
+   parecida, e numa nota de campo isso muda o significado — "PV"
+   viraria "PVC", "SF" viraria "SE". Errar a grafia atrapalha;
+   trocar a palavra engana. Por isso a tela mostra exatamente
+   como vai ficar gravado, antes de salvar.
+   ───────────────────────────────────────────────────────── */
+const ACENTOS = {
+  NAO:"NÃO",SAO:"SÃO",AGUA:"ÁGUA",POCO:"POÇO",INSPECAO:"INSPEÇÃO",EXECUCAO:"EXECUÇÃO",
+  MANUTENCAO:"MANUTENÇÃO",OBSTRUCAO:"OBSTRUÇÃO",DESOBSTRUCAO:"DESOBSTRUÇÃO",
+  SUPRESSAO:"SUPRESSÃO",LIGACAO:"LIGAÇÃO",REPOSICAO:"REPOSIÇÃO",PAVIMENTACAO:"PAVIMENTAÇÃO",
+  ESCAVACAO:"ESCAVAÇÃO",SITUACAO:"SITUAÇÃO",AUTORIZACAO:"AUTORIZAÇÃO",PROGRAMACAO:"PROGRAMAÇÃO",
+  LOCALIZACAO:"LOCALIZAÇÃO",INTERDICAO:"INTERDIÇÃO",LIBERACAO:"LIBERAÇÃO",PERMISSAO:"PERMISSÃO",
+  CONCESSIONARIA:"CONCESSIONÁRIA",PROPRIETARIO:"PROPRIETÁRIO",RESPONSAVEL:"RESPONSÁVEL",
+  SERVICO:"SERVIÇO",SERVICOS:"SERVIÇOS",ENDERECO:"ENDEREÇO",NUMERO:"NÚMERO",
+  VEICULO:"VEÍCULO",CAMINHAO:"CAMINHÃO",MAQUINA:"MÁQUINA",MAQUINARIO:"MAQUINÁRIO",
+  NECESSARIO:"NECESSÁRIO",POSSIVEL:"POSSÍVEL",IMPOSSIVEL:"IMPOSSÍVEL",DIFICIL:"DIFÍCIL",
+  TRAFEGO:"TRÁFEGO",ONIBUS:"ÔNIBUS",HORARIO:"HORÁRIO",PROXIMO:"PRÓXIMO",PROXIMA:"PRÓXIMA",
+  TERCA:"TERÇA",SABADO:"SÁBADO",MES:"MÊS",ATE:"ATÉ",JA:"JÁ",SO:"SÓ",APOS:"APÓS",ALEM:"ALÉM",
+  POREM:"PORÉM",TAMBEM:"TAMBÉM",NIVEL:"NÍVEL",CALCADA:"CALÇADA",ARVORE:"ÁRVORE",
+  PREDIO:"PRÉDIO",IMOVEL:"IMÓVEL",PROVISORIO:"PROVISÓRIO",PENDENCIA:"PENDÊNCIA",
+  HIDROMETRO:"HIDRÔMETRO",VALVULA:"VÁLVULA",TAMPAO:"TAMPÃO",PRESSAO:"PRESSÃO",
+  PARALELEPIPEDO:"PARALELEPÍPEDO",TERCEIRO:"TERCEIRO",FERIAS:"FÉRIAS",VOLTARA:"VOLTARÁ",
+  SERA:"SERÁ",ESTARA:"ESTARÁ",PRECISARA:"PRECISARÁ",EQUIPE:"EQUIPE",OBRIGATORIO:"OBRIGATÓRIO",
+};
+function padronizarNota(txt){
+  let t=String(txt??"");
+  t=t.replace(/\r\n?/g,"\n").split("\n").map(l=>l.trim()).filter(Boolean).join(" ");
+  t=t.replace(/\s+/g," ").trim();
+  if(!t) return "";
+  t=t.toLocaleUpperCase("pt-BR");
+  // Acento devolvido so em palavra inteira: "NAO" vira "NÃO",
+  // mas "NAOTAL" fica como esta.
+  t=t.replace(/[A-ZÀ-Ü]+/g,p=>ACENTOS[p]||p);
+  t=t.replace(/\s+([,.;:!?])/g,"$1");      // espaço antes de pontuação
+  t=t.replace(/([,;:])(?=\S)/g,"$1 ");     // falta de espaço depois
+  t=t.replace(/(\.{3}|[.?!])(?=[A-ZÀ-Ü])/g,"$1 ");  // frase colada na anterior
+  t=t.replace(/\.{3,}/g,"...");            // reticências exageradas
+  t=t.replace(/([!?])\1+/g,"$1");          // !!! e ???
+  t=t.replace(/\s+/g," ").trim();
+  if(/[A-Z0-9ÀÜ)\]]$/.test(t)) t+=".";      // ponto final
+  return t;
+}
+
 function NotaModal({linha,nota,sess,onClose,onSalvou}){
   const os=String(linha["Número OS"]||"").trim();
   const tss=String(linha["TSS"]||"").trim();
@@ -842,7 +916,7 @@ function NotaModal({linha,nota,sess,onClose,onSalvou}){
     setSalvando(true);setErro("");
     try{
       if(apagar) await apagarNota(os,nota.outraTss||tss,sess);
-      else await salvarNota(os,tss,txt,sess);
+      else await salvarNota(os,tss,padronizarNota(txt),sess);
       onSalvou();
     }catch(e){setErro(String(e.message||e));setSalvando(false);}
   };
@@ -1025,17 +1099,45 @@ function CoordModal({linha,sess,onClose,onSalvou}){
 
 /* ── Pill / Bar / SummaryCard / Check ── */
 function Pill({value,color,bg,border,onClick,clickable}){
-  return <span onClick={onClick} style={{display:"inline-flex",alignItems:"center",justifyContent:"center",minWidth:46,padding:"5px 14px",borderRadius:8,fontSize:15,fontWeight:700,fontVariantNumeric:"tabular-nums",color,background:bg,border:`1px solid ${border}`,cursor:clickable?"pointer":"default",transition:"transform 0.1s,box-shadow 0.15s"}}
+  return <span onClick={onClick} style={{...numStyle,textShadow:color===C.red?`0 0 14px ${C.red}55`:undefined,display:"inline-flex",alignItems:"center",justifyContent:"center",minWidth:46,padding:"5px 14px",borderRadius:RAIO,fontSize:15,fontWeight:600,color,background:bg,border:`1px solid ${border}`,cursor:clickable?"pointer":"default",transition:"transform 0.1s,box-shadow 0.15s"}}
     onMouseEnter={e=>{if(clickable){e.currentTarget.style.transform="scale(1.08)";e.currentTarget.style.boxShadow=`0 0 12px ${color}33`;}}}
     onMouseLeave={e=>{if(clickable){e.currentTarget.style.transform="scale(1)";e.currentTarget.style.boxShadow="none";}}}>{value}</span>;
 }
 function Bar({prazo,fora,total}){if(!total)return null;const pP=(prazo/total)*100,pF=(fora/total)*100;
-  return <div style={{display:"flex",alignItems:"center",gap:10,width:"100%"}}><div style={{flex:1,height:8,borderRadius:4,background:C.border,overflow:"hidden",display:"flex"}}><div style={{width:`${pP}%`,background:`linear-gradient(90deg,${C.green},#34d399)`,transition:"width 0.5s"}}/><div style={{width:`${pF}%`,background:`linear-gradient(90deg,#f87171,${C.red})`,transition:"width 0.5s"}}/></div><span style={{fontSize:12,color:C.textDim,minWidth:36,textAlign:"right"}}>{pF.toFixed(0)}%</span></div>;
+  // No painel a barra ganha escala atrás: dez traços de 10%, como
+  // instrumento marca. Sem ela "42%" é um número que se lê; com
+  // ela, é uma posição que se vê. E as cores ficam chapadas, que o
+  // gradiente borra justamente a divisa entre os dois pedaços.
+  return <div style={{display:"flex",alignItems:"center",gap:10,width:"100%"}}>
+    <div style={{flex:1,position:"relative"}}>
+      <div style={{height:7,borderRadius:1,background:C.cardAlt,overflow:"hidden",display:"flex"}}>
+        <div style={{width:`${pP}%`,background:C.green,transition:"width 0.5s"}}/>
+        <div style={{width:`${pF}%`,background:C.red,transition:"width 0.5s",boxShadow:`0 0 10px ${C.red}66`}}/>
+      </div>
+      <div style={{position:"absolute",inset:0,pointerEvents:"none",opacity:.5,
+        backgroundImage:`repeating-linear-gradient(90deg,${C.border} 0 1px,transparent 1px 10%)`}}/>
+    </div>
+    <span style={{fontSize:12,color:pF>=50?C.red:C.textDim,minWidth:36,textAlign:"right",...numStyle}}>{pF.toFixed(0)}%</span></div>;
 }
 function SummaryCard({label,value,color,icon,onClick}){
-  return <div onClick={onClick} style={{flex:1,minWidth:120,background:C.card,borderRadius:14,padding:"16px 18px",border:`1px solid ${C.border}`,display:"flex",flexDirection:"column",gap:4,cursor:onClick?"pointer":"default"}}>
-    <span style={{fontSize:11,color:C.textDim,letterSpacing:0.5,textTransform:"uppercase"}}>{label}</span>
-    <div style={{display:"flex",alignItems:"baseline",gap:6}}><span style={{fontSize:28,fontWeight:800,color,fontVariantNumeric:"tabular-nums"}}>{value.toLocaleString("pt-BR")}</span><span style={{fontSize:15}}>{icon}</span></div>
+  // No painel o cartão não fecha: só dois colchetes de canto em fio
+  // de 1px. E o brilho sai do próprio número, e só do vermelho —
+  // moldura brilhando em todo bloco é enfeite, e enfeite em tela de
+  // trabalho vira ruído.
+  const alerta=color===C.red;
+  return <div onClick={onClick} style={{flex:1,minWidth:120,background:C.card,
+    borderRadius:RAIO,padding:"14px 16px",border:`1px solid ${C.border}`,
+    display:"flex",flexDirection:"column",gap:2,cursor:onClick?"pointer":"default",
+    position:"relative",overflow:"hidden"}}>
+    <><span style={{position:"absolute",top:0,left:0,width:11,height:1,background:color,opacity:.8}}/>
+              <span style={{position:"absolute",top:0,left:0,width:1,height:11,background:color,opacity:.8}}/>
+              <span style={{position:"absolute",bottom:0,right:0,width:11,height:1,background:C.border}}/>
+              <span style={{position:"absolute",bottom:0,right:0,width:1,height:11,background:C.border}}/></>
+    <span style={{fontSize:9.5,color:C.textDim,letterSpacing:"0.2em",textTransform:"uppercase"}}>{label}</span>
+    <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+      <span style={{fontSize:30,fontWeight:500,color,...numStyle,
+        textShadow:alerta?`0 0 18px ${C.red}55`:undefined}}>{value.toLocaleString("pt-BR")}</span>
+      </div>
   </div>;
 }
 function Check({checked,onChange}){
@@ -1126,7 +1228,7 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
           <thead><tr style={{background:C.headerBg,position:"sticky",top:0,zIndex:1}}>
             <th title="Observação do serviço" style={{padding:"10px 6px 10px 12px",width:30,borderBottom:`1px solid ${C.border}`}}/>
-            {cols.map(col=><th key={col.key} onClick={()=>toggleSort(col.key)} style={{padding:"10px 12px",textAlign:"left",fontSize:11,fontWeight:700,color:modalSort.col===col.key?C.accent:C.textDim,textTransform:"uppercase",letterSpacing:0.5,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap",cursor:"pointer",userSelect:"none"}}>{col.label}{modalSort.col===col.key?(modalSort.asc?" ↑":" ↓"):""}</th>)}
+            {cols.map(col=><th key={col.key} onClick={()=>toggleSort(col.key)} style={{padding:"10px 12px",textAlign:"left",fontSize:9.5,fontWeight:500,color:modalSort.col===col.key?C.accent:C.textDim,textTransform:"uppercase",letterSpacing:"0.18em",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap",cursor:"pointer",userSelect:"none"}}>{col.label}{modalSort.col===col.key?(modalSort.asc?" ↑":" ↓"):""}</th>)}
           </tr></thead>
           <tbody>{sorted.map((r,i)=>{
             const nt=notaPorLinha[i];
@@ -1537,7 +1639,7 @@ function HistoricoChart({historico,activeUnit}){
   const varTotal = primeiro&&ultimo ? ultimo.total-primeiro.total : 0;
   const varFora = primeiro&&ultimo ? ultimo.fora_prazo-primeiro.fora_prazo : 0;
 
-  return <div style={{background:C.card,borderRadius:14,border:`1px solid ${C.border}`,marginBottom:16,overflow:"hidden"}}>
+  return <div style={{background:C.card,borderRadius:RAIO,border:`1px solid ${C.border}`,marginBottom:16,overflow:"hidden"}}>
     <div onClick={()=>setShowChart(!showChart)} style={{padding:"14px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",borderBottom:showChart?`1px solid ${C.border}`:"none"}}
       onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
       <div style={{display:"flex",alignItems:"center",gap:10}}>
@@ -1662,13 +1764,12 @@ function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed}){
     </div>
     <div style={{flex:1,padding:"8px 0"}}>
       {UNITS.map(u=>{const active=activeUnit===u.id;const counts=unitCounts[u.id]||{total:0,prazo:0,fora:0};
-        return <div key={u.id} onClick={()=>setActiveUnit(u.id)} style={{padding:collapsed?"12px 0":"10px 16px",margin:collapsed?"2px 6px":"2px 8px",borderRadius:10,cursor:"pointer",background:active?C.sideActive:"transparent",borderLeft:active?`3px solid ${C.accent}`:"3px solid transparent",transition:"all 0.15s",display:"flex",alignItems:"center",justifyContent:collapsed?"center":"flex-start",gap:10}}
+        return <div key={u.id} onClick={()=>setActiveUnit(u.id)} style={{padding:collapsed?"12px 0":"10px 16px",margin:collapsed?"2px 6px":"2px 8px",borderRadius:RAIO,cursor:"pointer",background:active?C.sideActive:"transparent",borderLeft:`2px solid ${active?C.accent:"transparent"}`,transition:"all 0.15s",display:"flex",alignItems:"center",justifyContent:collapsed?"center":"flex-start",gap:10}}
           onMouseEnter={e=>{if(!active)e.currentTarget.style.background=C.sideHover;}} onMouseLeave={e=>{if(!active)e.currentTarget.style.background="transparent";}}>
-          <span style={{fontSize:collapsed?20:17}}>{u.icon}</span>
           {!collapsed&&<div style={{flex:1,minWidth:0}}>
             <div style={{fontSize:13,fontWeight:700,color:active?C.text:C.textMuted,whiteSpace:"nowrap"}}>{u.label}</div>
             <div style={{fontSize:11,color:C.textDim,marginTop:2,display:"flex",gap:8}}>
-              <span style={{color:C.green}}>{counts.prazo}</span><span style={{color:C.red}}>{counts.fora}</span><span>({counts.total})</span>
+              <span style={{color:C.green,...numStyle}}>{counts.prazo}</span><span style={{color:C.red,...numStyle}}>{counts.fora}</span><span style={numStyle}>({counts.total})</span>
             </div>
           </div>}
         </div>;})}
@@ -1695,7 +1796,7 @@ function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitL
       <SummaryCard label="No prazo" value={totalPrazo} color={C.green} icon="✅"/>
       <SummaryCard label="Fora do prazo" value={totalFora} color={C.red} icon="⚠️"/>
     </div>
-    <div style={{background:C.card,borderRadius:10,padding:"12px 18px",marginBottom:16,border:`1px solid ${C.border}`}}>
+    <div style={{background:C.card,borderRadius:RAIO,padding:"12px 18px",marginBottom:16,border:`1px solid ${C.border}`}}>
       <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
         <span style={{fontSize:12,color:C.textDim}}>Distribuição — {unitLabel}</span>
         <span style={{fontSize:12,color:C.red,fontWeight:700}}>{total>0?((totalFora/total)*100).toFixed(1):0}% fora</span>
@@ -1704,15 +1805,15 @@ function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitL
     </div>
     {historico&&historico.length>0&&<HistoricoChart historico={historico} activeUnit={activeUnit}/>}
     <div style={{fontSize:12,color:C.textDim,marginBottom:10,padding:"0 4px",display:"flex",gap:16,flexWrap:"wrap"}}>
-      <span>▶ Clique na família para filtrar TSS</span>
-      <span>🔢 Clique nos números para ver as OS</span>
+      <span>Clique na família para filtrar TSS</span>
+      <span>Clique nos números para ver as OS</span>
     </div>
-    <div style={{background:C.card,borderRadius:14,border:`1px solid ${C.border}`,overflow:"hidden"}}>
+    <div style={{background:C.card,borderRadius:RAIO,border:`1px solid ${C.border}`,overflow:"hidden"}}>
       <div style={{overflowX:"auto"}}>
         <table style={{width:"100%",borderCollapse:"collapse",minWidth:600}}>
           <thead><tr style={{background:C.headerBg}}>
             {[{key:"name",label:"Família"},{key:"prazo",label:"No Prazo"},{key:"fora",label:"Fora do Prazo"},{key:"total",label:"Total"},{key:"pct",label:"Proporção"}].map(col=>
-              <th key={col.key} onClick={()=>onSort(col.key)} style={{padding:"12px 16px",textAlign:col.key==="name"?"left":"center",fontSize:11,fontWeight:700,color:sortBy===col.key?C.accent:C.textDim,textTransform:"uppercase",letterSpacing:0.8,cursor:"pointer",userSelect:"none",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{col.label}{sortBy===col.key?" ↓":""}</th>
+              <th key={col.key} onClick={()=>onSort(col.key)} style={{padding:"12px 16px",textAlign:col.key==="name"?"left":"center",fontSize:9.5,fontWeight:500,color:sortBy===col.key?C.accent:C.textDim,textTransform:"uppercase",letterSpacing:"0.2em",cursor:"pointer",userSelect:"none",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{col.label}{sortBy===col.key?" ↓":""}</th>
             )}
           </tr></thead>
           <tbody>{sortedFams.map((f,i)=><FamilyRow key={f.name} fam={f.name} rows={f.rows} excludedTSS={excludedTSS} onToggleTSS={onToggleTSS} onToggleAll={onToggleAll} idx={i}/>)}</tbody>
@@ -2431,7 +2532,7 @@ function CarteiraView({rawRows,sess}){
     </div>}
 
     {loadingCarteira?<div style={{padding:40,textAlign:"center",color:C.textDim}}>Carregando dados da carteira...</div>:
-    <div style={{background:C.card,borderRadius:14,border:`1px solid ${C.border}`,overflow:"hidden"}}>
+    <div style={{background:C.card,borderRadius:RAIO,border:`1px solid ${C.border}`,overflow:"hidden"}}>
       <div>
         <table style={{width:"100%",borderCollapse:"collapse",tableLayout:"fixed"}}>
           <colgroup>
@@ -3044,12 +3145,12 @@ export default function App(){
     <span>Carregando dados do Supabase…</span><style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
   </div>;
 
-  return <SessaoCtx.Provider value={sess}><div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"'Inter',-apple-system,sans-serif",display:"flex"}}>
+  return <SessaoCtx.Provider value={sess}><div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:FONTE_UI,display:"flex"}}>
     {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed}/>}
     <div style={{flex:1,padding:"24px 16px",overflowY:"auto",minHeight:"100vh"}}>
       <div style={{maxWidth:activeTab==="producao"?1180:960,margin:"0 auto"}}>
         <div style={{marginBottom:24,textAlign:"center"}}>
-          <h1 style={{fontSize:22,fontWeight:800,margin:0,letterSpacing:-0.5,background:"linear-gradient(135deg,#60a5fa,#3b82f6,#818cf8)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>
+          <h1 style={{fontSize:17,fontWeight:500,margin:0,letterSpacing:"0.2em",textTransform:"uppercase",color:C.text,fontFamily:FONTE_NUM}}>
             {activeTab==="pendente"?"Controle de Prazos — OS Pendentes":activeTab==="carteira"?"Acompanhamento de Carteira":"Produção por Equipes"}
           </h1>
           <p style={{color:C.textDim,margin:"6px 0 0",fontSize:13}}>
@@ -3064,7 +3165,7 @@ export default function App(){
                   background:activeTab===tab.id?C.accentBg:"transparent",color:activeTab===tab.id?C.accent:C.textMuted,transition:"all 0.15s",display:"flex",alignItems:"center",gap:6}}
                 onMouseEnter={e=>{if(activeTab!==tab.id)e.currentTarget.style.background=C.rowHover;}}
                 onMouseLeave={e=>{if(activeTab!==tab.id)e.currentTarget.style.background="transparent";}}>
-                {tab.icon} {tab.label}
+                {tab.label}
               </button>
             )}
             {!sess&&<button onClick={()=>setShowLogin(true)} title="Área restrita"
@@ -3094,7 +3195,7 @@ export default function App(){
         {activeTab==="pendente"&&rawRows&&<div style={{animation:"fadeIn 0.35s ease"}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 16px",background:C.card,borderRadius:10,border:`1px solid ${C.border}`,marginBottom:16,flexWrap:"wrap",gap:8}}>
             <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-              <span style={{fontSize:12,padding:"2px 10px",borderRadius:8,background:C.accentBg,color:C.accent,border:"1px solid rgba(59,130,246,0.2)",fontWeight:700}}>{currentUnit.icon} {currentUnit.label}</span>
+              <span style={{fontSize:12,padding:"2px 10px",borderRadius:8,background:C.accentBg,color:C.accent,border:"1px solid rgba(59,130,246,0.2)",fontWeight:700}}>{currentUnit.label}</span>
               <span style={{fontSize:12,color:C.textDim}}>Atualizado: {fmtDate(updatedAt)}</span>
             </div>
             <div style={{display:"flex",gap:8}}>
