@@ -940,14 +940,19 @@ async function fetchTodasNotas(){
    Todas as observacoes num lugar so: o que esta travado na
    carteira inteira, sem precisar abrir familia por familia.
 
-   TODA nota aparece, sem excecao. Quando o pendente tem a OS, a
-   linha mostra endereco e prazo junto; quando nao tem, mostra o
-   que existe — OS, TSS e o texto — em vez de sumir.
+   A nota vive enquanto a OS esta no pendente. Baixada a OS, ela
+   sai do pendente e a nota sai da lista junto — sem ninguem
+   precisar arrumar nada.
 
-   Eu ja tentei esconder a nota sem par no pendente, e estava
-   errado: par nao achado nao prova OS resolvida, prova so que o
-   casamento falhou, e esconder transforma uma duvida minha em
-   informacao perdida para quem le.
+   O perigo dessa regra e confundir "OS resolvida" com "casamento
+   falhou": nos dois casos a nota some do mesmo jeito, e no segundo
+   e informacao perdida. Por isso o casamento compara so os DIGITOS
+   do numero da OS — espaco sobrando e numero gravado como texto ja
+   apareceram aqui, e nenhum dos dois pode decidir se a informacao
+   chega em quem le.
+
+   A linha continua na tabela os_nota, com endereco e tudo, caso um
+   dia valha montar uma visao de historico.
    ───────────────────────────────────────────────────────── */
 function NotasModal({notas,rows,onClose,onEditar}){
   // Casa pelos digitos: numero de OS ja apareceu com espaco sobrando
@@ -968,7 +973,7 @@ function NotasModal({notas,rows,onClose,onEditar}){
     const cands=porOS.get(soDigitos(n.numero_os))||[];
     const linha=cands.find(r=>String(r["TSS"]||"").trim()===String(n.tss).trim())||cands[0]||null;
     return {n,linha,outraTss:!!linha&&String(linha["TSS"]||"").trim()!==String(n.tss).trim()};
-  }),[notas,porOS]);
+  }).filter(x=>x.linha),[notas,porOS]);
 
   return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(4px)"}}>
     <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:RAIO,border:`1px solid ${C.border}`,width:"100%",maxWidth:1100,maxHeight:"82vh",display:"flex",flexDirection:"column",overflow:"hidden",animation:"modalIn 0.2s ease"}}>
@@ -983,11 +988,11 @@ function NotasModal({notas,rows,onClose,onEditar}){
       </div>
       <div style={{overflowY:"auto",flex:1,padding:"10px 14px 16px"}}>
         {lista.length===0&&<div style={{padding:"28px 6px",textAlign:"center",color:C.textDim,fontSize:13}}>
-          Nenhuma observação registrada ainda. Abra uma família, clique no + ao lado de uma OS e escreva a primeira.
+          Nenhuma observação em OS do pendente de hoje. Abra uma família, clique no + ao lado de uma OS e escreva.
         </div>}
         {lista.map(({n,linha,outraTss})=>
             <div key={n.numero_os+"|"+n.tss}
-              onClick={()=>onEditar({linha:linha||{"Número OS":n.numero_os,"TSS":n.tss},nota:{...n,outraTss:outraTss?n.tss:null}})}
+              onClick={()=>onEditar({linha,nota:{...n,outraTss:outraTss?n.tss:null}})}
               style={{display:"flex",flexDirection:"column",gap:4,padding:"10px 12px",marginBottom:6,cursor:"pointer",
                 background:FUNDO_NOTA,borderLeft:`3px solid ${COR_NOTA}`}}>
               <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"baseline",fontSize:12.5}}>
@@ -1000,9 +1005,7 @@ function NotasModal({notas,rows,onClose,onEditar}){
                   const b=linha?linha["Bairro"]:n.bairro;
                   return e?<span style={{color:C.textDim}}>· {e}{b?" — "+b:""}</span>:null;
                 })()}
-                {linha
-                  ? <span style={{color:tempo(linha["Tempo Residual"])==="fora"?C.red:C.green,fontWeight:600}}>{linha["Tempo Residual"]}</span>
-                  : <span style={{color:C.textDim,fontSize:11}}>fora do pendente de hoje</span>}
+                <span style={{color:tempo(linha["Tempo Residual"])==="fora"?C.red:C.green,fontWeight:600}}>{linha["Tempo Residual"]}</span>
                 {outraTss&&<span style={{color:C.amber,fontSize:11}}>a OS está hoje como {String(linha["TSS"]||"").trim()}</span>}
               </div>
               <div style={{display:"flex",gap:9,flexWrap:"wrap",alignItems:"baseline"}}>
@@ -3280,6 +3283,18 @@ export default function App(){
     return out;
   },[rawRows,excludedTSS]);
 
+  // Uma conta so, usada pela lateral E pelo modal. Se cada um
+  // filtrasse por conta propria, o menu diria 8 e a lista abriria
+  // com 6 — e contagem que nao bate com a lista e pior que
+  // contagem nenhuma. Casa pelos digitos, pelo mesmo motivo do
+  // modal: espaco sobrando nao pode esconder informacao.
+  const notasDoPendente=useMemo(()=>{
+    if(!rawRows?.length) return [];
+    const digitos=v=>String(v??"").replace(/\D/g,"");
+    const noPendente=new Set(rawRows.map(r=>digitos(r["Número OS"])).filter(Boolean));
+    return notas.filter(n=>noPendente.has(digitos(n.numero_os)));
+  },[notas,rawRows]);
+
   const onDrop=useCallback(e=>{e.preventDefault();setDragOver(false);handleFile(e.dataTransfer.files[0]);},[handleFile]);
 
   // Gas alerts (usa rawRows sem filtro de unidade)
@@ -3291,7 +3306,7 @@ export default function App(){
   </div>;
 
   return <SessaoCtx.Provider value={sess}><div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:FONTE_UI,display:"flex"}}>
-    {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed} nNotas={notas.length} onNotas={()=>setShowNotas(true)}/>}
+    {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed} nNotas={notasDoPendente.length} onNotas={()=>setShowNotas(true)}/>}
     <div style={{flex:1,padding:"24px 16px",overflowY:"auto",minHeight:"100vh"}}>
       <div style={{maxWidth:activeTab==="producao"?1180:960,margin:"0 auto"}}>
         <div style={{marginBottom:24,textAlign:"center"}}>
@@ -3354,7 +3369,7 @@ export default function App(){
           <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label} historico={historico} activeUnit={activeUnit}/>
         </div>}
         {activeTab==="pendente"&&showGasModal&&gas.alerts.length>0&&<GasAlertModal alerts={gas.alerts} onIgnore={gas.doIgnore} onClose={()=>setShowGasModal(false)}/>}
-        {showNotas&&<NotasModal notas={notas} rows={rawRows} onClose={()=>setShowNotas(false)}
+        {showNotas&&<NotasModal notas={notasDoPendente} rows={rawRows} onClose={()=>setShowNotas(false)}
           onEditar={x=>setNotaAberta(x)}/>}
         {notaAberta&&<NotaModal linha={notaAberta.linha} nota={notaAberta.nota} sess={sess}
           onClose={()=>setNotaAberta(null)}
