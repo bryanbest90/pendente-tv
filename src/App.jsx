@@ -787,6 +787,38 @@ function abrirNoMapa(r){
 // A OS com observacao fica marcada por inteiro — linha e nota
 // dentro da mesma moldura ambar. A nota nao e uma coisa ao lado da
 // OS, e uma propriedade dela.
+// As tags do dia a dia. Para criar uma nova, acrescente aqui: e o
+// unico lugar, e o banco de proposito nao limita a lista.
+// "data:true" faz o formulario pedir uma data junto.
+const TAGS=[
+  {id:"OUVIDORIA",     cor:"#f87171"},
+  {id:"CONVIAS",       cor:"#60a5fa"},
+  {id:"GEOINFRA",      cor:"#a78bfa"},
+  {id:"LAJE",          cor:"#e9b949"},
+  {id:"AGENDADO",      cor:"#34d399", data:true},
+  {id:"CAMINHÃO",      cor:"#2dd4bf"},
+  {id:"CARRO PEQUENO", cor:"#94a3b8"},
+];
+const TAG_POR_ID=Object.fromEntries(TAGS.map(t=>[t.id,t]));
+const corDaTag=id=>TAG_POR_ID[id]?.cor||"#94a3b8";
+const fmtDia=iso=>{try{const[a,m,d]=String(iso).slice(0,10).split("-");return `${d}/${m}`;}catch{return iso;}};
+
+// Uma etiqueta. "vencido" so existe no AGENDADO: data que ja passou
+// quer dizer que a equipe nao foi no dia marcado, e isso e
+// justamente o que alguem precisa ver.
+function Etiqueta({id,dia,pequena}){
+  const cor=corDaTag(id);
+  const vencido=id==="AGENDADO"&&dia&&String(dia).slice(0,10)<new Date().toISOString().slice(0,10);
+  return <span title={vencido?"O dia agendado já passou":undefined}
+    style={{display:"inline-flex",alignItems:"center",gap:5,padding:pequena?"1px 7px":"2px 9px",
+      borderRadius:RAIO,fontSize:pequena?10:10.5,fontWeight:700,letterSpacing:"0.06em",
+      whiteSpace:"nowrap",color:vencido?C.red:cor,
+      background:vencido?C.redBg:"transparent",
+      border:`1px solid ${vencido?C.redBorder:cor+"55"}`}}>
+    {id}{dia&&<span style={{...numStyle,fontWeight:600,opacity:.95}}>{fmtDia(dia)}</span>}
+  </span>;
+}
+
 const COR_NOTA="#e9b949";
 const FUNDO_NOTA="rgba(233,185,73,0.055)";
 // Equivalentes ambar do sideActive/sideHover, que sao azuis.
@@ -800,7 +832,7 @@ async function carregarNotas(numeros){
     const lote=faltam.slice(i,i+200);
     const lista=lote.map(n=>`"${String(n).replace(/["\\]/g,m=>"\\"+m)}"`).join(",");
     try{
-      const res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select=numero_os,tss,nota,autor_nome,autor_email,atualizado_em,endereco,bairro,municipio,familia&numero_os=in.("+encodeURIComponent(lista)+")",{headers:HEADERS});
+      const res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select=numero_os,tss,nota,autor_nome,autor_email,atualizado_em,endereco,bairro,municipio,familia,tags,agendado_para&numero_os=in.("+encodeURIComponent(lista)+")",{headers:HEADERS});
       if(!res.ok) throw new Error("HTTP "+res.status);
       for(const d of await res.json()){
         if(!notaCache.get(d.numero_os)) notaCache.set(d.numero_os,[]);
@@ -824,12 +856,13 @@ function acharNota(numeroOS,tss){
   if(exata) return {...exata,outraTss:null};
   return {...lista[0],outraTss:lista[0].tss};
 }
-async function salvarNota(numeroOS,tss,texto,sess,linha){
+async function salvarNota(numeroOS,tss,texto,sess,linha,tags,dia){
   // A nota guarda o proprio endereco. Sem isso ela vira uma linha
   // sem endereco no dia em que a OS sai do pendente — e sai, e e
   // justamente quando alguem vai querer entender o que houve.
   const end=linha?[String(linha["Endereço"]||"").trim(),linha["Número"]].filter(x=>x!==""&&x!=null).join(", "):null;
-  const corpo={numero_os:String(numeroOS).trim(),tss:String(tss).trim(),nota:texto.trim(),
+  const corpo={numero_os:String(numeroOS).trim(),tss:String(tss).trim(),nota:texto.trim()||null,
+    tags:tags||[],agendado_para:(tags||[]).includes("AGENDADO")?(dia||null):null,
     autor_nome:sess?.perfil?.nome||null,autor_email:sess?.perfil?.email||null,
     endereco:end||null,bairro:linha?.["Bairro"]||null,
     municipio:linha?.["Município"]||null,familia:linha?.["Família"]||null,
@@ -924,7 +957,7 @@ function padronizarNota(txt){
 async function fetchTodasNotas(){
   const todas=[];let de=0;const ps=1000;
   while(true){
-    const res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select=numero_os,tss,nota,autor_nome,autor_email,atualizado_em,endereco,bairro,municipio,familia&order=atualizado_em.desc",
+    const res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select=numero_os,tss,nota,autor_nome,autor_email,atualizado_em,endereco,bairro,municipio,familia,tags,agendado_para&order=atualizado_em.desc",
       {headers:{...HEADERS,"Range":de+"-"+(de+ps-1)}});
     if(!res.ok&&res.status!==206) throw new Error("Erro notas "+res.status);
     const d=await res.json();
@@ -954,7 +987,8 @@ async function fetchTodasNotas(){
    A linha continua na tabela os_nota, com endereco e tudo, caso um
    dia valha montar uma visao de historico.
    ───────────────────────────────────────────────────────── */
-function NotasModal({notas,rows,onClose,onEditar}){
+function NotasModal({notas,rows,onClose,onEditar,filtroInicial}){
+  const [filtro,setFiltro]=useState(filtroInicial||null);   // etiqueta escolhida, ou nenhuma
   // Casa pelos digitos: numero de OS ja apareceu com espaco sobrando
   // e ja veio como numero em vez de texto, e um espaco nao pode
   // decidir se a informacao chega ou nao em quem le.
@@ -974,6 +1008,15 @@ function NotasModal({notas,rows,onClose,onEditar}){
     const linha=cands.find(r=>String(r["TSS"]||"").trim()===String(n.tss).trim())||cands[0]||null;
     return {n,linha,outraTss:!!linha&&String(linha["TSS"]||"").trim()!==String(n.tss).trim()};
   }).filter(x=>x.linha),[notas,porOS]);
+  // Contagem por etiqueta, sobre o que esta na tela. E a resposta
+  // para "o que esta travando a carteira" — que o texto livre
+  // nunca deu.
+  const porTag=useMemo(()=>{
+    const m=new Map();
+    for(const {n} of lista) for(const t of n.tags||[]) m.set(t,(m.get(t)||0)+1);
+    return m;
+  },[lista]);
+  const visiveis=useMemo(()=>filtro?lista.filter(({n})=>(n.tags||[]).includes(filtro)):lista,[lista,filtro]);
 
   return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(4px)"}}>
     <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:RAIO,border:`1px solid ${C.border}`,width:"100%",maxWidth:1100,maxHeight:"82vh",display:"flex",flexDirection:"column",overflow:"hidden",animation:"modalIn 0.2s ease"}}>
@@ -981,16 +1024,29 @@ function NotasModal({notas,rows,onClose,onEditar}){
         <div>
           <div style={{fontSize:16,fontWeight:700,color:C.text}}>Observações</div>
           <div style={{fontSize:13,color:C.textDim,marginTop:2}}>
-            <span style={{color:COR_NOTA,fontWeight:700,...numStyle}}>{lista.length}</span> serviço{lista.length===1?"":"s"} com observação
+            <span style={{color:COR_NOTA,fontWeight:700,...numStyle}}>{visiveis.length}</span> serviço{visiveis.length===1?"":"s"}
+            {filtro?<> com a etiqueta <b style={{color:corDaTag(filtro)}}>{filtro}</b></>:" com observação"}
           </div>
         </div>
         <button onClick={onClose} style={{background:"transparent",border:"none",color:C.textDim,fontSize:22,cursor:"pointer",padding:"4px 8px"}}>✕</button>
       </div>
+      {porTag.size>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap",padding:"11px 20px",borderBottom:`1px solid ${C.border}`,flexShrink:0}}>
+        <span onClick={()=>setFiltro(null)}
+          style={{cursor:"pointer",userSelect:"none",padding:"4px 11px",borderRadius:RAIO,fontSize:11,fontWeight:700,
+            letterSpacing:"0.05em",color:filtro?C.textDim:C.text,
+            border:`1px solid ${filtro?C.border:C.textDim}`}}>TODAS</span>
+        {TAGS.filter(t=>porTag.get(t.id)).map(t=>{const on=filtro===t.id;
+          return <span key={t.id} onClick={()=>setFiltro(on?null:t.id)}
+            style={{cursor:"pointer",userSelect:"none",padding:"4px 11px",borderRadius:RAIO,fontSize:11,fontWeight:700,
+              letterSpacing:"0.05em",display:"inline-flex",gap:6,alignItems:"center",
+              color:on?t.cor:C.textDim,border:`1px solid ${on?t.cor:C.border}`,background:on?t.cor+"14":"transparent"}}>
+            {t.id}<span style={{...numStyle,color:on?t.cor:C.textDim}}>{porTag.get(t.id)}</span></span>;})}
+      </div>}
       <div style={{overflowY:"auto",flex:1,padding:"10px 14px 16px"}}>
-        {lista.length===0&&<div style={{padding:"28px 6px",textAlign:"center",color:C.textDim,fontSize:13}}>
+        {visiveis.length===0&&<div style={{padding:"28px 6px",textAlign:"center",color:C.textDim,fontSize:13}}>
           Nenhuma observação em OS do pendente de hoje. Abra uma família, clique no + ao lado de uma OS e escreva.
         </div>}
-        {lista.map(({n,linha,outraTss})=>
+        {visiveis.map(({n,linha,outraTss})=>
             <div key={n.numero_os+"|"+n.tss}
               onClick={()=>onEditar({linha,nota:{...n,outraTss:outraTss?n.tss:null}})}
               style={{display:"flex",flexDirection:"column",gap:4,padding:"10px 12px",marginBottom:6,cursor:"pointer",
@@ -1008,8 +1064,9 @@ function NotasModal({notas,rows,onClose,onEditar}){
                 <span style={{color:tempo(linha["Tempo Residual"])==="fora"?C.red:C.green,fontWeight:600}}>{linha["Tempo Residual"]}</span>
                 {outraTss&&<span style={{color:C.amber,fontSize:11}}>a OS está hoje como {String(linha["TSS"]||"").trim()}</span>}
               </div>
-              <div style={{display:"flex",gap:9,flexWrap:"wrap",alignItems:"baseline"}}>
-                <span style={{fontSize:13,color:C.text,lineHeight:1.45,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{n.nota}</span>
+              <div style={{display:"flex",gap:9,flexWrap:"wrap",alignItems:"center"}}>
+                {(n.tags||[]).map(t=><Etiqueta key={t} id={t} dia={t==="AGENDADO"?n.agendado_para:null}/>)}
+                {n.nota&&<span style={{fontSize:13,color:C.text,lineHeight:1.45,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{n.nota}</span>}
                 <span style={{fontSize:11,color:C.textDim}}>| {n.autor_nome||n.autor_email||"autor não registrado"} · {fmtDate(n.atualizado_em)}</span>
               </div>
             </div>)}
@@ -1022,13 +1079,18 @@ function NotaModal({linha,nota,sess,onClose,onSalvou}){
   const os=String(linha["Número OS"]||"").trim();
   const tss=String(linha["TSS"]||"").trim();
   const [txt,setTxt]=useState(nota?.nota||"");
+  const [tags,setTags]=useState(nota?.tags||[]);
+  const [dia,setDia]=useState(nota?.agendado_para?String(nota.agendado_para).slice(0,10):"");
   const [salvando,setSalvando]=useState(false);
   const [erro,setErro]=useState("");
+  const marcar=id=>setTags(t=>t.includes(id)?t.filter(x=>x!==id):[...t,id]);
+  const precisaData=tags.includes("AGENDADO")&&!dia;
+  const vazia=!txt.trim()&&tags.length===0;
   const gravar=async(apagar)=>{
     setSalvando(true);setErro("");
     try{
       if(apagar) await apagarNota(os,nota.outraTss||tss,sess);
-      else await salvarNota(os,tss,padronizarNota(txt),sess,linha);
+      else await salvarNota(os,tss,padronizarNota(txt),sess,linha,tags,dia);
       onSalvou();
     }catch(e){setErro(String(e.message||e));setSalvando(false);}
   };
@@ -1043,8 +1105,26 @@ function NotaModal({linha,nota,sess,onClose,onSalvou}){
         Escreva o que a próxima pessoa precisa saber para não perder viagem.
         Ex.: <i>precisa de laje pronta antes de nivelar o PV — obra do cliente</i>.
       </div>
-      <textarea autoFocus value={txt} onChange={e=>setTxt(e.target.value)} rows={4}
-        placeholder="O que impede, o que falta, com quem falar…"
+      <div>
+        <div style={{fontSize:11.5,color:C.textDim,marginBottom:7}}>Etiquetas — o que classifica esta OS</div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          {TAGS.map(t=>{const on=tags.includes(t.id);
+            return <span key={t.id} onClick={()=>marcar(t.id)}
+              style={{cursor:"pointer",userSelect:"none",padding:"5px 11px",borderRadius:RAIO,
+                fontSize:11.5,fontWeight:700,letterSpacing:"0.05em",transition:"all 0.12s",
+                color:on?t.cor:C.textDim,border:`1px solid ${on?t.cor:C.border}`,
+                background:on?t.cor+"14":"transparent"}}>{t.id}</span>;})}
+        </div>
+        {tags.includes("AGENDADO")&&<div style={{marginTop:9,display:"flex",alignItems:"center",gap:9,flexWrap:"wrap"}}>
+          <span style={{fontSize:12,color:C.textMuted}}>Agendado para</span>
+          <input type="date" value={dia} onChange={e=>setDia(e.target.value)}
+            style={{padding:"7px 10px",borderRadius:RAIO,border:`1px solid ${precisaData?C.redBorder:C.border}`,
+              background:C.cardAlt,color:C.text,fontSize:13,fontFamily:"inherit",colorScheme:"dark"}}/>
+          {precisaData&&<span style={{fontSize:11.5,color:C.red}}>AGENDADO sem data não diz nada — escolha o dia</span>}
+        </div>}
+      </div>
+      <textarea value={txt} onChange={e=>setTxt(e.target.value)} rows={3}
+        placeholder="Detalhe que a etiqueta não cobre: com quem falar, o que falta…"
         style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.border}`,
           background:C.cardAlt,color:C.text,fontSize:13.5,fontFamily:"inherit",resize:"vertical",boxSizing:"border-box"}}/>
       {nota&&<div style={{fontSize:11.5,color:C.textDim}}>
@@ -1055,10 +1135,11 @@ function NotaModal({linha,nota,sess,onClose,onSalvou}){
         {nota&&<button onClick={()=>gravar(true)} disabled={salvando}
           style={{marginRight:"auto",padding:"9px 14px",borderRadius:8,border:`1px solid ${C.redBorder}`,background:"transparent",color:C.red,fontSize:12.5,cursor:"pointer"}}>Apagar</button>}
         <button onClick={onClose} style={{padding:"9px 16px",borderRadius:8,border:`1px solid ${C.border}`,background:"transparent",color:C.textDim,fontSize:13,cursor:"pointer"}}>Cancelar</button>
-        <button onClick={()=>gravar(false)} disabled={!txt.trim()||salvando}
-          style={{padding:"9px 18px",borderRadius:8,border:"none",fontSize:13,fontWeight:700,
-            background:txt.trim()&&!salvando?C.accent:C.border,color:txt.trim()&&!salvando?"#0b1220":C.textDim,
-            cursor:txt.trim()&&!salvando?"pointer":"default"}}>{salvando?"Salvando...":"Salvar"}</button>
+        {(()=>{const ok=!vazia&&!precisaData&&!salvando;
+          return <button onClick={()=>gravar(false)} disabled={!ok}
+            style={{padding:"9px 18px",borderRadius:RAIO,border:"none",fontSize:13,fontWeight:700,
+              background:ok?C.accent:C.border,color:ok?"#0b1220":C.textDim,
+              cursor:ok?"pointer":"default"}}>{salvando?"Salvando...":"Salvar"}</button>;})()}
       </div>
     </div>
   </div>;
@@ -1413,8 +1494,9 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
                 {/* Nota costuma ser curta. Autor e data vao na mesma
                     linha, depois de uma barra, para o bloco nao ficar
                     mais alto que a propria OS. */}
-                <div style={{display:"flex",gap:9,flexWrap:"wrap",alignItems:"baseline",paddingLeft:2}}>
-                  <span style={{fontSize:13,color:C.text,lineHeight:1.45,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{nt.nota}</span>
+                <div style={{display:"flex",gap:9,flexWrap:"wrap",alignItems:"center",paddingLeft:2}}>
+                  {(nt.tags||[]).map(t=><Etiqueta key={t} id={t} dia={t==="AGENDADO"?nt.agendado_para:null} pequena/>)}
+                  {nt.nota&&<span style={{fontSize:13,color:C.text,lineHeight:1.45,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{nt.nota}</span>}
                   <span style={{fontSize:11,color:C.textDim}}>
                     | {nt.autor_nome||nt.autor_email||"autor não registrado"} · {fmtDate(nt.atualizado_em)}
                     {nt.outraTss&&<span style={{color:C.amber}}> · registrada em {nt.outraTss}</span>}
@@ -1868,7 +1950,7 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx}){
 const btnTiny={padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:600,border:`1px solid ${C.border}`,background:"transparent",color:C.textDim,cursor:"pointer"};
 
 /* ── Sidebar ── */
-function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,nNotas,onNotas}){
+function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,nNotas,onNotas,tagsNotas}){
   return <div style={{width:collapsed?56:210,minWidth:collapsed?56:210,background:C.sidebar,borderRight:`1px solid ${C.border}`,display:"flex",flexDirection:"column",transition:"width 0.25s ease,min-width 0.25s ease",overflow:"hidden",flexShrink:0}}>
     <div style={{padding:collapsed?"16px 0":"16px 16px",display:"flex",alignItems:"center",justifyContent:collapsed?"center":"space-between",borderBottom:`1px solid ${C.border}`,minHeight:56}}>
       {!collapsed&&<span style={{fontSize:13,fontWeight:800,color:C.accent,letterSpacing:0.5,textTransform:"uppercase",whiteSpace:"nowrap"}}>Unidades</span>}
@@ -1894,7 +1976,7 @@ function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,nNo
         O traco em cima e do agrupador, nao do item, para o item
         manter o formato dos vizinhos. */}
     <div style={{borderTop:`1px solid ${C.border}`,marginTop:6,paddingTop:8}}>
-      <div onClick={onNotas} title="Todos os serviços com observação"
+      <div onClick={()=>onNotas(null)} title="Todos os serviços com observação"
         style={{padding:collapsed?"12px 0":"10px 16px",margin:collapsed?"2px 6px":"2px 8px",
           borderRadius:RAIO,cursor:"pointer",
           background:nNotas>0?FUNDO_NOTA_ATIVO:"transparent",
@@ -1910,10 +1992,26 @@ function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,nNo
               <div style={{fontSize:13,fontWeight:700,color:nNotas>0?C.text:C.textMuted,whiteSpace:"nowrap"}}>Notas</div>
               <div style={{fontSize:11,color:C.textDim,marginTop:2,display:"flex",gap:8}}>
                 <span style={{color:nNotas>0?COR_NOTA:C.textDim,...numStyle}}>{nNotas}</span>
-                <span>{nNotas===1?"com observação":"com observação"}</span>
+                <span>com observação</span>
               </div>
             </div>}
       </div>
+      {/* As etiquetas ficam subordinadas ao item Notas: recuadas,
+          menores e sem faixa na borda. Sao um recorte do mesmo
+          conteudo, nao itens de mesmo nivel. */}
+      {!collapsed&&tagsNotas?.length>0&&<div style={{padding:"2px 8px 6px 8px",display:"flex",flexDirection:"column",gap:1}}>
+        {tagsNotas.map(t=>
+          <div key={t.id} onClick={()=>onNotas(t.id)} title={`Ver só as OS com a etiqueta ${t.id}`}
+            style={{display:"flex",alignItems:"center",gap:8,padding:"4px 8px 4px 16px",borderRadius:RAIO,
+              cursor:"pointer",transition:"background 0.12s"}}
+            onMouseEnter={e=>(e.currentTarget.style.background=C.sideHover)}
+            onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
+            <span style={{width:6,height:6,borderRadius:"50%",background:t.cor,flexShrink:0}}/>
+            <span style={{fontSize:11.5,color:C.textMuted,flex:1,minWidth:0,overflow:"hidden",
+              textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.id}</span>
+            <span style={{fontSize:11,color:t.cor,...numStyle}}>{t.n}</span>
+          </div>)}
+      </div>}
     </div>
     <div style={{flex:1}}/>
   </div>;
@@ -3203,6 +3301,7 @@ export default function App(){
   const [showGasModal,setShowGasModal]=useState(false);
   const [notas,setNotas]=useState([]);
   const [showNotas,setShowNotas]=useState(false);
+  const [filtroNota,setFiltroNota]=useState(null);
   const [notaAberta,setNotaAberta]=useState(null);   // edicao vinda do modal de Notas
   const [activeTab,setActiveTab]=useState("pendente");
   const [sess,setSess]=useState(null);          // sessão do Supabase Auth (só a aba Produção usa)
@@ -3295,6 +3394,15 @@ export default function App(){
     return notas.filter(n=>noPendente.has(digitos(n.numero_os)));
   },[notas,rawRows]);
 
+  // Etiquetas da lateral: so as que tem alguma OS hoje, na ordem
+  // em que TAGS as declara — ordem fixa e mais facil de decorar do
+  // que ordem por quantidade, que muda todo dia.
+  const tagsNotas=useMemo(()=>{
+    const conta=new Map();
+    for(const n of notasDoPendente) for(const t of n.tags||[]) conta.set(t,(conta.get(t)||0)+1);
+    return TAGS.filter(t=>conta.get(t.id)).map(t=>({id:t.id,cor:t.cor,n:conta.get(t.id)}));
+  },[notasDoPendente]);
+
   const onDrop=useCallback(e=>{e.preventDefault();setDragOver(false);handleFile(e.dataTransfer.files[0]);},[handleFile]);
 
   // Gas alerts (usa rawRows sem filtro de unidade)
@@ -3306,7 +3414,7 @@ export default function App(){
   </div>;
 
   return <SessaoCtx.Provider value={sess}><div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:FONTE_UI,display:"flex"}}>
-    {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed} nNotas={notasDoPendente.length} onNotas={()=>setShowNotas(true)}/>}
+    {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed} nNotas={notasDoPendente.length} onNotas={t=>{setFiltroNota(t);setShowNotas(true);}} tagsNotas={tagsNotas}/>}
     <div style={{flex:1,padding:"24px 16px",overflowY:"auto",minHeight:"100vh"}}>
       <div style={{maxWidth:activeTab==="producao"?1180:960,margin:"0 auto"}}>
         <div style={{marginBottom:24,textAlign:"center"}}>
@@ -3369,7 +3477,7 @@ export default function App(){
           <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label} historico={historico} activeUnit={activeUnit}/>
         </div>}
         {activeTab==="pendente"&&showGasModal&&gas.alerts.length>0&&<GasAlertModal alerts={gas.alerts} onIgnore={gas.doIgnore} onClose={()=>setShowGasModal(false)}/>}
-        {showNotas&&<NotasModal notas={notasDoPendente} rows={rawRows} onClose={()=>setShowNotas(false)}
+        {showNotas&&<NotasModal notas={notasDoPendente} rows={rawRows} filtroInicial={filtroNota} onClose={()=>setShowNotas(false)}
           onEditar={x=>setNotaAberta(x)}/>}
         {notaAberta&&<NotaModal linha={notaAberta.linha} nota={notaAberta.nota} sess={sess}
           onClose={()=>setNotaAberta(null)}
