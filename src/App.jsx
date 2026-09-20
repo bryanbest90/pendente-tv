@@ -17,6 +17,73 @@ const SessaoCtx = React.createContext(null);
 // aba Pendente por causa da prestadora. São três TSS próprias —
 // DESOBSTRUIR REDE DE ESGOTO, DESOBSTRUIR RAMAL DE ESGOTO e
 // DESOBSTRUIR RETORNO PARA IMOVEL.
+/* ━━━ AGRUPAMENTO DE TSS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   Duas TSS que sao o mesmo trabalho no mesmo endereco aparecem
+   juntas. Na transformacao de ligacao, a casa 1 sai numa TSS e as
+   demais na outra: separadas, a tela sugere duas obras onde ha
+   uma.
+   ───────────────────────────────────────────────────────── */
+const TSS_JUNTAS=[
+  {nome:"TRANSFORMAÇÃO LIG COM APROV RAMAL",
+   membros:["TRANSFORMAÇÃO LIG EXIST COM APROV RAMAL","TRANSFORMAÇÃO LIG NOVA COM APROV RAMAL"]},
+  {nome:"TRANSFORMAÇÃO LIG SEM APROV RAMAL",
+   membros:["TRANSFORMAÇÃO LIG EXIST SEM APROV RAMAL","TRANSFORMAÇÃO LIG NOVA SEM APROV RAMAL"]},
+];
+const TSS_PARA_GRUPO={};
+TSS_JUNTAS.forEach(g=>g.membros.forEach(m=>{TSS_PARA_GRUPO[m]=g.nome;}));
+const grupoDaTss=t=>TSS_PARA_GRUPO[String(t??"").trim()]||String(t??"").trim();
+
+/* ━━━ SUBGRUPOS DENTRO DA FAMILIA ━━━━━━━━━━━━━━━━━━━━━━━
+   REPOSIÇÃO tem 45 TSS diferentes, e abrir a familia despejava
+   todas de uma vez. Separadas por tipo de material, viram duas
+   listas que alguem consegue ler.
+
+   O que nao estiver em nenhum subgrupo cai em "Outros" — nunca
+   some. Na base de 13 meses ha 14 TSS de REPOSIÇÃO fora das duas
+   listas, entre elas REPOR ASFALTO A FRIO e ATERRAR VALA; sem o
+   Outros, essas 91 execucoes teriam desaparecido da tela sem
+   ninguem notar.
+
+   CIMENTADO aparece nas duas grafias de proposito: a lista veio
+   escrita "CIMENTATO" e o GEOCALL grava "CIMENTADO". Aceitar as
+   duas custa uma linha e evita 16 OS caindo em Outros sem motivo
+   aparente.
+   ───────────────────────────────────────────────────────── */
+const SUBGRUPOS={
+  "REPOSIÇÃO":[
+    {nome:"Asfalto", tss:[
+      "FRESAR E RECAPEAR PAV ASF RETRABALHO","FRESAR E RECAPEAR PAVIMENTO ASFALTICO",
+      "FRESAR RECAPEAR PAVIMENTO ASFALTICO INV",
+      "REPOR ASFALTO","REPOR ASFALTO INV","REPOR ASFALTO RETRABALHO",
+      "REPOR CAPA ASFALTICA","REPOR CAPA ASFALTICA INV","REPOR CAPA ASFALTICA RETRABALHO",
+      // sugestao minha, pelo material — mova se discordar
+      "REPOR ASFALTO A FRIO","REPOR ASFALTO A FRIO INV","REPOR ASFALTO A FRIO RETRABALHO",
+      "REPOR CAPA ASFALTICA ECOLOGICA","REPOR CAPA ASFALTICA ECOLOGICA INV",
+    ]},
+    {nome:"Piso", tss:[
+      "REPOR BLOQUETE","REPOR BLOQUETE INV","REPOR BLOQUETE RETRABALHO",
+      "REPOR CONCRETO","REPOR CONCRETO INV","REPOR CONCRETO RETRABALHO",
+      "REPOR GUIA","REPOR GUIA INV","REPOR GUIA RETRABALHO",
+      "REPOR PASSEIO ADJACENTE CIMENTADO","REPOR PASSEIO ADJACENTE CIMENTADO INV","REPOR PASSEIO ADJACENTE CIMENTADO RETRABALHO",
+      "REPOR PASSEIO ADJACENTE ESPECIAL","REPOR PASSEIO ADJACENTE ESPECIAL INV","REPOR PASSEIO ADJACENTE ESPECIAL RETRABALHO",
+      "REPOR PASSEIO RETRABALHO",
+      "REPOR PISO INTERNO ESPECIAL","REPOR PISO INTERNO ESPECIAL INV","REPOR PISO INTERNO ESPECIAL RETRABALHO",
+      "REPOR SARJETA","REPOR SARJETA INV","REPOR SARJETA RETRABALHO",
+      "REPOR PASSEIO OPOSTO CIMENTATO","REPOR PASSEIO OPOSTO CIMENTATO INV","REPOR PASSEIO OPOSTO CIMENTATO RETRABALHO",
+      "REPOR PASSEIO OPOSTO CIMENTADO","REPOR PASSEIO OPOSTO CIMENTADO INV","REPOR PASSEIO OPOSTO CIMENTADO RETRABALHO",
+      "REPOR PASSEIO OPOSTO ESPECIAL","REPOR PASSEIO OPOSTO ESPECIAL INV","REPOR PASSEIO OPOSTO ESPECIAL RETRABALHO",
+      // sugestao minha, pelo material — mova se discordar
+      "REPOR PISO INTERNO CIMENTADO","REPOR PISO INTERNO CIMENTADO INV",
+      "REPOR PARALELO","REPOR PARALELO INV",
+    ]},
+  ],
+};
+const SUB_POR_FAMILIA={};
+for(const [fam,gs] of Object.entries(SUBGRUPOS)){
+  const m={}; gs.forEach(g=>g.tss.forEach(t=>{m[t]=g.nome;}));
+  SUB_POR_FAMILIA[fam]={ordem:gs.map(g=>g.nome),de:m};
+}
+
 /* ━━━ VISUAL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    Leitura de instrumento, com a paleta de sempre — nenhum hex
    foi trocado. O que dá o caráter é a forma:
@@ -246,6 +313,43 @@ async function fetchDiarioOS(dia){
   }
   return allRows;
 }
+/* ── Desde quando a OS está na carteira ──────────────────────
+   O pendente do GEOCALL é uma foto do agora: não diz há quanto
+   tempo a OS está lá. Quem sabe é a nossa própria série diária.
+
+   Não trazemos a série inteira para o navegador — pedimos ao
+   banco só as OS que entraram DEPOIS da data escolhida, que é um
+   punhado, e o resto se resolve com um Set. Trazer tudo seria
+   dezenas de milhares de linhas para responder uma pergunta que
+   cabe num filtro do Postgres.
+   ───────────────────────────────────────────────────────────── */
+async function fetchEntradaDesde(dia){
+  const os=[];let from=0;const ps=1000;
+  while(true){
+    const res=await fetch(SUPABASE_URL+`/rest/v1/v_os_entrada?entrou_em=gte.${dia}&select=numero_os`,
+      {headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
+    if(!res.ok&&res.status!==206){
+      const txt=await res.text().catch(()=>"");
+      if(res.status===404||/v_os_entrada/.test(txt))
+        throw new Error("a view v_os_entrada ainda não existe no banco — rode sql/entrada_carteira.sql");
+      throw new Error("HTTP "+res.status);
+    }
+    const data=await res.json();
+    if(!data?.length)break;
+    os.push(...data.map(r=>String(r.numero_os??"").replace(/\D/g,"")));
+    if(data.length<ps)break;
+    from+=ps;
+  }
+  // Primeiro dia guardado: antes disso a pergunta não tem resposta,
+  // e é melhor a tela avisar do que fingir que tem.
+  let primeiroDia=null;
+  try{
+    const r=await fetch(SUPABASE_URL+"/rest/v1/v_os_entrada?select=primeiro_dia_da_serie&limit=1",{headers:{...HEADERS}});
+    if(r.ok)primeiroDia=(await r.json())?.[0]?.primeiro_dia_da_serie??null;
+  }catch{}
+  return{osSet:new Set(os.filter(Boolean)),primeiroDia};
+}
+
 // Execuções confirmadas (relatório Dados Operacionais / Registro de Falhas).
 // Fonte da verdade do que foi EXECUTADO — o que sai da carteira sem estar
 // aqui saiu por outro motivo (cancelamento, erro de base, encerramento).
@@ -1906,13 +2010,53 @@ function HistoricoChart({historico,activeUnit}){
 /* ── Family Row ── */
 function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx}){
   const [expanded,setExpanded]=useState(false);const [modal,setModal]=useState(null);
+  const [subAberto,setSubAberto]=useState(()=>new Set());
   const activeRows=rows.filter(r=>!excludedTSS.has(String(r["TSS"]||"").trim()));
-  const tssGroups=useMemo(()=>{const m={};rows.forEach(r=>{const tss=String(r["TSS"]||"").trim();if(!m[tss])m[tss]={all:[],prazo:[],fora:[]};m[tss].all.push(r);const st=tempo(r["Tempo Residual"]);if(st)m[tss][st].push(r);});return Object.entries(m).sort(([a],[b])=>a.localeCompare(b)).map(([name,d])=>({name,...d}));},[rows]);
+  // Os grupos guardam os MEMBROS, nao so o nome: o filtro de TSS e
+  // o modal continuam trabalhando com a TSS crua do GEOCALL, que e
+  // o que existe na linha. O agrupamento e so de apresentacao.
+  const tssGroups=useMemo(()=>{
+    const m={};
+    rows.forEach(r=>{
+      const crua=String(r["TSS"]||"").trim();
+      const nome=grupoDaTss(crua);
+      if(!m[nome])m[nome]={all:[],prazo:[],fora:[],membros:new Set()};
+      m[nome].membros.add(crua);
+      m[nome].all.push(r);
+      const st=tempo(r["Tempo Residual"]);if(st)m[nome][st].push(r);
+    });
+    return Object.entries(m).sort(([a],[b])=>a.localeCompare(b))
+      .map(([name,d])=>({name,...d,membros:[...d.membros]}));
+  },[rows]);
   const prazo=activeRows.filter(r=>tempo(r["Tempo Residual"])==="prazo").length;
   const fora=activeRows.filter(r=>tempo(r["Tempo Residual"])==="fora").length;
-  const total=prazo+fora;const allNames=tssGroups.map(t=>t.name);
+  const total=prazo+fora;
+  const allNames=tssGroups.flatMap(t=>t.membros);
   const allOff=allNames.every(n=>excludedTSS.has(n));const someOff=allNames.some(n=>excludedTSS.has(n));const filterActive=someOff&&!allOff;
-  const openModal=(tipo,tssName)=>{let f=activeRows;if(tssName)f=f.filter(r=>String(r["TSS"]).trim()===tssName);f=f.filter(r=>tempo(r["Tempo Residual"])===tipo).sort((a,b)=>tempoDays(a["Tempo Residual"])-tempoDays(b["Tempo Residual"]));if(f.length>0)setModal({rows:f,tipo,tssName});};
+  const openModal=(tipo,tssName,membros)=>{let f=activeRows;
+    if(membros)f=f.filter(r=>membros.includes(String(r["TSS"]).trim()));
+    f=f.filter(r=>tempo(r["Tempo Residual"])===tipo).sort((a,b)=>tempoDays(a["Tempo Residual"])-tempoDays(b["Tempo Residual"]));
+    if(f.length>0)setModal({rows:f,tipo,tssName});};
+  // Familia com subgrupos abre nos subitens, nao nas 45 TSS.
+  // "Outros" recolhe o que nao esta em lista nenhuma — nunca some.
+  const sub=SUB_POR_FAMILIA[String(fam||"").trim().toUpperCase()];
+  const blocos=useMemo(()=>{
+    if(!sub) return null;
+    const porSub={};
+    for(const g of tssGroups){
+      const nome=sub.de[g.name]||"Outros";
+      (porSub[nome]||(porSub[nome]=[])).push(g);
+    }
+    return [...sub.ordem,"Outros"].filter(n=>porSub[n]?.length).map(n=>{
+      const gs=porSub[n];
+      const membros=gs.flatMap(g=>g.membros);
+      const ligados=gs.filter(g=>!g.membros.every(m=>excludedTSS.has(m)));
+      return {nome:n,grupos:gs,membros,
+        all:gs.reduce((a,g)=>a+g.all.length,0),
+        prazo:ligados.reduce((a,g)=>a+g.prazo.length,0),
+        fora:ligados.reduce((a,g)=>a+g.fora.length,0)};
+    });
+  },[sub,tssGroups,excludedTSS]);
   if(total===0&&!expanded)return null;
   return <>
     <tr style={{background:idx%2===0?"transparent":C.cardAlt,cursor:"pointer"}} onClick={()=>setExpanded(!expanded)} onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background=idx%2===0?"transparent":C.cardAlt)}>
@@ -1933,15 +2077,47 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx}){
           <button onClick={e=>{e.stopPropagation();onToggleAll(allNames,true);}} style={btnTiny}>Todos</button>
           <button onClick={e=>{e.stopPropagation();onToggleAll(allNames,false);}} style={btnTiny}>Nenhum</button>
         </div>
-        {tssGroups.map(t=>{const on=!excludedTSS.has(t.name);const tP=on?t.prazo.length:0,tF=on?t.fora.length:0;
-          return <div key={t.name} style={{display:"flex",alignItems:"center",gap:10,padding:"5px 6px",borderRadius:6,opacity:on?1:0.45,transition:"opacity 0.15s"}}
-            onMouseEnter={e=>(e.currentTarget.style.background="rgba(255,255,255,0.02)")} onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
-            <Check checked={on} onChange={()=>onToggleTSS(t.name)}/>
-            <span style={{fontSize:13,color:C.text,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.name}</span>
-            <span style={{fontSize:12,color:C.textDim,marginRight:4}}>{t.all.length}</span>
-            <Pill value={tP} color={C.green} bg={C.greenBg} border={C.greenBorder} clickable={on&&tP>0} onClick={e=>{e.stopPropagation();if(on&&tP>0)openModal("prazo",t.name);}}/>
-            <Pill value={tF} color={C.red} bg={C.redBg} border={C.redBorder} clickable={on&&tF>0} onClick={e=>{e.stopPropagation();if(on&&tF>0)openModal("fora",t.name);}}/>
-          </div>;})}
+        {(()=>{
+          const linhaTss=t=>{
+            const on=!t.membros.every(m=>excludedTSS.has(m));
+            const tP=on?t.prazo.length:0,tF=on?t.fora.length:0;
+            return <div key={t.name} style={{display:"flex",alignItems:"center",gap:10,padding:"5px 6px",borderRadius:RAIO,opacity:on?1:0.45,transition:"opacity 0.15s"}}
+              onMouseEnter={e=>(e.currentTarget.style.background="rgba(255,255,255,0.02)")} onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
+              <Check checked={on} onChange={()=>onToggleAll(t.membros,!on)}/>
+              <span title={t.membros.length>1?"Reúne: "+t.membros.join(" · "):undefined}
+                style={{fontSize:13,color:C.text,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                {t.name}{t.membros.length>1&&<span style={{color:C.textDim,fontSize:11,marginLeft:7}}>EXIST + NOVA</span>}
+              </span>
+              <span style={{fontSize:12,color:C.textDim,marginRight:4,...numStyle}}>{t.all.length}</span>
+              <Pill value={tP} color={C.green} bg={C.greenBg} border={C.greenBorder} clickable={on&&tP>0} onClick={e=>{e.stopPropagation();if(on&&tP>0)openModal("prazo",t.name,t.membros);}}/>
+              <Pill value={tF} color={C.red} bg={C.redBg} border={C.redBorder} clickable={on&&tF>0} onClick={e=>{e.stopPropagation();if(on&&tF>0)openModal("fora",t.name,t.membros);}}/>
+            </div>;
+          };
+          if(!blocos) return tssGroups.map(linhaTss);
+          return blocos.map(b=>{
+            const aberto=subAberto.has(b.nome);
+            const on=!b.membros.every(m=>excludedTSS.has(m));
+            return <div key={b.nome} style={{marginBottom:4}}>
+              <div onClick={()=>setSubAberto(s=>{const n=new Set(s);n.has(b.nome)?n.delete(b.nome):n.add(b.nome);return n;})}
+                style={{display:"flex",alignItems:"center",gap:10,padding:"7px 6px",borderRadius:RAIO,cursor:"pointer",
+                  background:aberto?"rgba(255,255,255,0.03)":"transparent",opacity:on?1:0.45}}
+                onMouseEnter={e=>{if(!aberto)e.currentTarget.style.background="rgba(255,255,255,0.02)";}}
+                onMouseLeave={e=>{if(!aberto)e.currentTarget.style.background="transparent";}}>
+                <span style={{fontSize:10,color:C.textDim,width:10,display:"inline-block",transform:aberto?"rotate(90deg)":"none",transition:"transform 0.15s"}}>▶</span>
+                <Check checked={on} onChange={()=>onToggleAll(b.membros,!on)}/>
+                <span style={{fontSize:13,fontWeight:600,color:C.text,flex:1,minWidth:0}}>
+                  {b.nome}<span style={{color:C.textDim,fontWeight:400,fontSize:11,marginLeft:8}}>{b.grupos.length} TSS</span>
+                </span>
+                <span style={{fontSize:12,color:C.textDim,marginRight:4,...numStyle}}>{b.all}</span>
+                <Pill value={on?b.prazo:0} color={C.green} bg={C.greenBg} border={C.greenBorder} clickable={on&&b.prazo>0} onClick={e=>{e.stopPropagation();if(on&&b.prazo>0)openModal("prazo",b.nome,b.membros);}}/>
+                <Pill value={on?b.fora:0} color={C.red} bg={C.redBg} border={C.redBorder} clickable={on&&b.fora>0} onClick={e=>{e.stopPropagation();if(on&&b.fora>0)openModal("fora",b.nome,b.membros);}}/>
+              </div>
+              {aberto&&<div style={{paddingLeft:26,borderLeft:`1px solid ${C.border}`,marginLeft:5}}>
+                {b.grupos.map(linhaTss)}
+              </div>}
+            </div>;
+          });
+        })()}
       </div>
     </td></tr>}
     {modal&&<OSModal rows={modal.rows} familia={fam} tssName={modal.tssName} tipo={modal.tipo} onClose={()=>setModal(null)}/>}
@@ -3304,6 +3480,9 @@ export default function App(){
   const [filtroNota,setFiltroNota]=useState(null);
   const [notaAberta,setNotaAberta]=useState(null);   // edicao vinda do modal de Notas
   const [activeTab,setActiveTab]=useState("pendente");
+  const [desde,setDesde]=useState("");        // "a carteira desta data para frente" (AAAA-MM-DD)
+  const [entrada,setEntrada]=useState(null);  // {osSet,primeiroDia} das OS que entraram a partir de `desde`
+  const [buscandoDesde,setBuscandoDesde]=useState(false);
   const [sess,setSess]=useState(null);          // sessão do Supabase Auth (só a aba Produção usa)
   const [showLogin,setShowLogin]=useState(false);
   const inputRef=useRef();
@@ -3373,14 +3552,36 @@ export default function App(){
     try{const hist=await fetchHistorico();if(hist?.length>0)setHistorico(hist);}catch{}
   },[]);
 
+  // Busca no banco quem entrou a partir da data. Roda quando a data
+  // muda; data vazia limpa o filtro sem ir ao servidor.
+  useEffect(()=>{
+    if(!desde){setEntrada(null);return;}
+    let vivo=true;setBuscandoDesde(true);
+    (async()=>{
+      try{const e=await fetchEntradaDesde(desde);if(vivo)setEntrada(e);}
+      catch(err){if(vivo){setEntrada(null);setDesde("");flash("Erro no filtro por data: "+err.message);}}
+      finally{if(vivo)setBuscandoDesde(false);}
+    })();
+    return()=>{vivo=false;};
+  },[desde]);
+
   const currentUnit=UNITS.find(u=>u.id===activeUnit)||UNITS[0];
-  const filteredRows=useMemo(()=>rawRows?rawRows.filter(r=>(currentUnit.atc===null?VALID_ATCS.includes(Number(r["ATC"])):Number(r["ATC"])===currentUnit.atc)&&familiaTssVisivel(r["Família"],r["TSS"])):[],[rawRows,currentUnit]);
+  const filteredRows=useMemo(()=>{
+    if(!rawRows)return[];
+    const dig=v=>String(v??"").replace(/\D/g,"");
+    return rawRows.filter(r=>(currentUnit.atc===null?VALID_ATCS.includes(Number(r["ATC"])):Number(r["ATC"])===currentUnit.atc)
+      &&familiaTssVisivel(r["Família"],r["TSS"])
+      &&(!entrada||entrada.osSet.has(dig(r["Número OS"]))));
+  },[rawRows,currentUnit,entrada]);
   const unitCounts=useMemo(()=>{
     if(!rawRows)return{};const out={};
-    UNITS.forEach(u=>{const ur=rawRows.filter(r=>(u.atc===null?VALID_ATCS.includes(Number(r["ATC"])):Number(r["ATC"])===u.atc)&&familiaTssVisivel(r["Família"],r["TSS"])&&!excludedTSS.has(String(r["TSS"]||"").trim()));
+    // O filtro de data vale aqui tambem: lateral dizendo 174 e lista
+    // abrindo com 40 e pior do que nao ter contagem nenhuma.
+    const dig=v=>String(v??"").replace(/\D/g,"");
+    UNITS.forEach(u=>{const ur=rawRows.filter(r=>(u.atc===null?VALID_ATCS.includes(Number(r["ATC"])):Number(r["ATC"])===u.atc)&&familiaTssVisivel(r["Família"],r["TSS"])&&!excludedTSS.has(String(r["TSS"]||"").trim())&&(!entrada||entrada.osSet.has(dig(r["Número OS"]))));
       const p=ur.filter(r=>tempo(r["Tempo Residual"])==="prazo").length;const f=ur.filter(r=>tempo(r["Tempo Residual"])==="fora").length;out[u.id]={total:p+f,prazo:p,fora:f};});
     return out;
-  },[rawRows,excludedTSS]);
+  },[rawRows,excludedTSS,entrada]);
 
   // Uma conta so, usada pela lateral E pelo modal. Se cada um
   // filtrasse por conta propria, o menu diria 8 e a lista abriria
@@ -3465,6 +3666,29 @@ export default function App(){
             <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
               <span style={{fontSize:12,padding:"2px 10px",borderRadius:8,background:C.accentBg,color:C.accent,border:"1px solid rgba(59,130,246,0.2)",fontWeight:700}}>{currentUnit.label}</span>
               <span style={{fontSize:12,color:C.textDim}}>Atualizado: {fmtDate(updatedAt)}</span>
+              {/* Carteira a partir de uma data — só o que ENTROU dessa data em diante */}
+              <span style={{width:1,height:14,background:C.border}}/>
+              <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:C.textDim}}>
+                Entrou a partir de
+                <input type="date" value={desde} max={new Date().toISOString().slice(0,10)}
+                  onChange={e=>setDesde(e.target.value)}
+                  style={{fontSize:12,fontFamily:FONTE_UI,color:desde?C.accent:C.textDim,background:desde?C.accentBg:"transparent",
+                    border:`1px solid ${desde?"rgba(59,130,246,0.35)":C.border}`,borderRadius:RAIO,padding:"3px 8px",colorScheme:"dark"}}/>
+              </label>
+              {buscandoDesde&&<span style={{fontSize:11,color:C.textDim}}>buscando…</span>}
+              {desde&&!buscandoDesde&&entrada&&<>
+                <span style={{...numStyle,fontSize:11,color:C.accent,background:C.accentBg,border:"1px solid rgba(59,130,246,0.25)",
+                  borderRadius:RAIO,padding:"2px 8px",fontWeight:700}}>
+                  {filteredRows.length} de {rawRows.length} OS
+                </span>
+                <button onClick={()=>setDesde("")} title="Limpar o filtro de data"
+                  style={{fontSize:11,color:C.textDim,cursor:"pointer",background:"transparent",border:"none",padding:"2px 4px"}}>✕ limpar</button>
+                {entrada.primeiroDia&&desde<entrada.primeiroDia&&
+                  <span title={`A série de fotos diárias começa em ${fmtDiaShort(entrada.primeiroDia)}. Antes disso ninguém guardou a data de entrada, então tudo que já estava na carteira nesse dia aparece como se tivesse entrado nele.`}
+                    style={{fontSize:11,color:C.amber,background:C.amberBg,border:"1px solid rgba(245,158,11,0.3)",borderRadius:RAIO,padding:"2px 8px",fontWeight:600}}>
+                    ⚠ só sabemos desde {fmtDiaShort(entrada.primeiroDia)}
+                  </span>}
+              </>}
             </div>
             <div style={{display:"flex",gap:8}}>
               {gas.alerts.length>0&&<button onClick={()=>setShowGasModal(true)}
