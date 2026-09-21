@@ -1449,7 +1449,10 @@ function Check({checked,onChange}){
 
 /* ── OS Modal ── */
 function OSModal({rows,familia,tssName,tipo,onClose}){
-  const label=tipo==="prazo"?"No Prazo":"Fora do Prazo";const color=tipo==="prazo"?C.green:C.red;
+  // "busca" vem do campo de pesquisa da lateral: a OS pode ter linhas
+  // no prazo e fora, entao o cabecalho nao afirma nenhum dos dois.
+  const label=tipo==="prazo"?"No Prazo":tipo==="fora"?"Fora do Prazo":"Busca por OS";
+  const color=tipo==="prazo"?C.green:tipo==="fora"?C.red:C.accent;
   const [modalSort,setModalSort]=useState({col:null,asc:true});
   const cols=[
     {key:"os",label:"Nº OS",get:r=>r["Número OS"]},{key:"tss",label:"TSS",get:r=>r["TSS"]},{key:"sf",label:"SF",get:r=>r["SF"]},
@@ -2139,7 +2142,15 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx}){
 const btnTiny={padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:600,border:`1px solid ${C.border}`,background:"transparent",color:C.textDim,cursor:"pointer"};
 
 /* ── Sidebar ── */
-function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,nNotas,onNotas,tagsNotas}){
+function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,nNotas,onNotas,tagsNotas,onBuscarOS}){
+  const [busca,setBusca]=useState("");
+  const [avisoBusca,setAvisoBusca]=useState("");
+  const buscar=()=>{
+    const q=busca.replace(/\D/g,"");
+    if(!q){setAvisoBusca("Digite o número da OS");return;}
+    const aviso=onBuscarOS(q);          // null = achou e abriu o modal
+    setAvisoBusca(aviso||"");
+  };
   return <div style={{width:collapsed?56:210,minWidth:collapsed?56:210,background:C.sidebar,borderRight:`1px solid ${C.border}`,display:"flex",flexDirection:"column",transition:"width 0.25s ease,min-width 0.25s ease",overflow:"hidden",flexShrink:0}}>
     <div style={{padding:collapsed?"16px 0":"16px 16px",display:"flex",alignItems:"center",justifyContent:collapsed?"center":"space-between",borderBottom:`1px solid ${C.border}`,minHeight:56}}>
       {!collapsed&&<span style={{fontSize:13,fontWeight:800,color:C.accent,letterSpacing:0.5,textTransform:"uppercase",whiteSpace:"nowrap"}}>Unidades</span>}
@@ -2201,6 +2212,28 @@ function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,nNo
             <span style={{fontSize:11,color:t.cor,...numStyle}}>{t.n}</span>
           </div>)}
       </div>}
+    </div>
+    {/* Busca de OS: mesmo agrupador com traco em cima. Recolhida, a
+        lateral mostra so a lupa — clicar nela abre a lateral com o
+        cursor ja no campo. */}
+    <div style={{borderTop:`1px solid ${C.border}`,marginTop:6,padding:collapsed?"10px 0":"10px 12px 6px"}}>
+      {collapsed
+        ? <div onClick={()=>{setCollapsed(false);setTimeout(()=>document.getElementById("busca-os")?.focus(),300);}}
+            title="Buscar OS" style={{textAlign:"center",cursor:"pointer",fontSize:14,color:C.textDim,padding:"4px 0"}}>🔍</div>
+        : <>
+            <div style={{fontSize:10,color:C.textDim,letterSpacing:"0.15em",textTransform:"uppercase",marginBottom:6,paddingLeft:4}}>Buscar OS</div>
+            <div style={{display:"flex",gap:4}}>
+              <input id="busca-os" value={busca} inputMode="numeric" placeholder="Nº da OS"
+                onChange={e=>{setBusca(e.target.value);if(avisoBusca)setAvisoBusca("");}}
+                onKeyDown={e=>{if(e.key==="Enter")buscar();}}
+                style={{flex:1,minWidth:0,fontSize:12,padding:"6px 8px",borderRadius:RAIO,border:`1px solid ${C.border}`,
+                  background:C.card,color:C.text,outline:"none",...numStyle}}/>
+              <button onClick={buscar} title="Buscar"
+                style={{fontSize:12,padding:"0 9px",borderRadius:RAIO,border:"1px solid rgba(59,130,246,0.3)",
+                  background:C.accentBg,color:C.accent,cursor:"pointer"}}>↵</button>
+            </div>
+            {avisoBusca&&<div style={{fontSize:11,color:C.amber,marginTop:6,paddingLeft:4,lineHeight:1.35}}>{avisoBusca}</div>}
+          </>}
     </div>
     <div style={{flex:1}}/>
   </div>;
@@ -3492,6 +3525,7 @@ export default function App(){
   const [showNotas,setShowNotas]=useState(false);
   const [filtroNota,setFiltroNota]=useState(null);
   const [notaAberta,setNotaAberta]=useState(null);   // edicao vinda do modal de Notas
+  const [buscaModal,setBuscaModal]=useState(null);   // {rows,familia} da OS pesquisada
   const [activeTab,setActiveTab]=useState("pendente");
   const [desde,setDesde]=useState("");        // "a carteira desta data para frente" (AAAA-MM-DD)
   const [entrada,setEntrada]=useState(null);  // {osSet,primeiroDia} das OS que entraram a partir de `desde`
@@ -3620,6 +3654,30 @@ export default function App(){
     return TAGS.filter(t=>conta.get(t.id)).map(t=>({id:t.id,cor:t.cor,n:conta.get(t.id)}));
   },[notasDoPendente]);
 
+  // Busca de OS. Procura no pendente INTEIRO, nao so na unidade ou na
+  // data escolhida: quem digita um numero quer achar a OS, e "nao
+  // encontrada" por causa de um filtro esquecido seria resposta errada.
+  // Devolve null quando abre o modal, ou o aviso para mostrar.
+  const buscarOS=useCallback(q=>{
+    if(!rawRows?.length) return "Pendente ainda carregando";
+    const dig=v=>String(v??"").replace(/\D/g,"");
+    const validas=rawRows.filter(r=>VALID_ATCS.includes(Number(r["ATC"])));
+    let achou=validas.filter(r=>dig(r["Número OS"])===q);
+    // Sem o numero exato, aceita parte dele (os ultimos digitos,
+    // que e como se fala a OS no dia a dia) — so com 5+ digitos,
+    // senao qualquer "12" devolve meia carteira.
+    if(!achou.length&&q.length>=5) achou=validas.filter(r=>dig(r["Número OS"]).includes(q));
+    if(!achou.length&&q.length<5) return "Digite o número completo, ou pelo menos os 5 últimos dígitos";
+    if(!achou.length) return "OS não está no pendente — pode já ter sido baixada";
+    const visiveis=achou.filter(r=>familiaTssVisivel(r["Família"],r["TSS"]));
+    if(!visiveis.length) return `Está no pendente, mas em ${String(achou[0]["Família"]).trim()}, que o painel não mostra`;
+    const nOS=new Set(visiveis.map(r=>dig(r["Número OS"]))).size;
+    if(nOS>10) return `${nOS} OS terminam com esses dígitos — digite mais números`;
+    const fams=[...new Set(visiveis.map(r=>String(r["Família"]||"").trim()))];
+    setBuscaModal({rows:visiveis,familia:fams.length===1?fams[0]:fams.join(" · ")});
+    return null;
+  },[rawRows]);
+
   const onDrop=useCallback(e=>{e.preventDefault();setDragOver(false);handleFile(e.dataTransfer.files[0]);},[handleFile]);
 
   // Gas alerts (usa rawRows sem filtro de unidade)
@@ -3631,7 +3689,7 @@ export default function App(){
   </div>;
 
   return <SessaoCtx.Provider value={sess}><div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:FONTE_UI,display:"flex"}}>
-    {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed} nNotas={notasDoPendente.length} onNotas={t=>{setFiltroNota(t);setShowNotas(true);}} tagsNotas={tagsNotas}/>}
+    {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed} nNotas={notasDoPendente.length} onNotas={t=>{setFiltroNota(t);setShowNotas(true);}} tagsNotas={tagsNotas} onBuscarOS={buscarOS}/>}
     <div style={{flex:1,padding:"24px 16px",overflowY:"auto",minHeight:"100vh"}}>
       <div style={{maxWidth:activeTab==="producao"?1180:960,margin:"0 auto"}}>
         <div style={{marginBottom:24,textAlign:"center"}}>
@@ -3717,6 +3775,7 @@ export default function App(){
           <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label} historico={historico} activeUnit={activeUnit}/>
         </div>}
         {activeTab==="pendente"&&showGasModal&&gas.alerts.length>0&&<GasAlertModal alerts={gas.alerts} onIgnore={gas.doIgnore} onClose={()=>setShowGasModal(false)}/>}
+        {buscaModal&&<OSModal rows={buscaModal.rows} familia={buscaModal.familia} tipo="busca" onClose={()=>setBuscaModal(null)}/>}
         {showNotas&&<NotasModal notas={notasDoPendente} rows={rawRows} filtroInicial={filtroNota} onClose={()=>setShowNotas(false)}
           onEditar={x=>setNotaAberta(x)}/>}
         {notaAberta&&<NotaModal linha={notaAberta.linha} nota={notaAberta.nota} sess={sess}
