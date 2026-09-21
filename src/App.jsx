@@ -51,7 +51,7 @@ const grupoDaTss=t=>TSS_PARA_GRUPO[String(t??"").trim()]||String(t??"").trim();
    ───────────────────────────────────────────────────────── */
 const SUBGRUPOS={
   "REPOSIÇÃO":[
-    {nome:"ASFALTO", tss:[
+    {nome:"Asfalto", tss:[
       "FRESAR E RECAPEAR PAV ASF RETRABALHO","FRESAR E RECAPEAR PAVIMENTO ASFALTICO",
       "FRESAR RECAPEAR PAVIMENTO ASFALTICO INV",
       "REPOR ASFALTO","REPOR ASFALTO INV","REPOR ASFALTO RETRABALHO",
@@ -60,7 +60,7 @@ const SUBGRUPOS={
       "REPOR ASFALTO A FRIO","REPOR ASFALTO A FRIO INV","REPOR ASFALTO A FRIO RETRABALHO",
       "REPOR CAPA ASFALTICA ECOLOGICA","REPOR CAPA ASFALTICA ECOLOGICA INV",
     ]},
-    {nome:"PISO", tss:[
+    {nome:"Piso", tss:[
       "REPOR BLOQUETE","REPOR BLOQUETE INV","REPOR BLOQUETE RETRABALHO",
       "REPOR CONCRETO","REPOR CONCRETO INV","REPOR CONCRETO RETRABALHO",
       "REPOR GUIA","REPOR GUIA INV","REPOR GUIA RETRABALHO",
@@ -2057,12 +2057,20 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx}){
         fora:ligados.reduce((a,g)=>a+g.fora.length,0)};
     });
   },[sub,tssGroups,excludedTSS]);
-  if(total===0&&!expanded)return null;
+  // Some so a familia que nao tem dado nenhum de prazo. Antes a regra
+  // era "total===0", e total conta so as TSS marcadas: bastava clicar
+  // "Nenhum" e recolher para a familia sumir — sem a linha, nao havia
+  // onde clicar "Todos", e como o filtro fica salvo no navegador, ela
+  // continuava sumida a cada visita.
+  const semDado=rows.every(r=>!tempo(r["Tempo Residual"]));
+  if(semDado&&!expanded)return null;
   return <>
-    <tr style={{background:idx%2===0?"transparent":C.cardAlt,cursor:"pointer"}} onClick={()=>setExpanded(!expanded)} onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background=idx%2===0?"transparent":C.cardAlt)}>
+    <tr style={{background:idx%2===0?"transparent":C.cardAlt,cursor:"pointer",opacity:allOff&&!expanded?0.5:1}} onClick={()=>setExpanded(!expanded)} onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background=idx%2===0?"transparent":C.cardAlt)}>
       <td style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}><div style={{display:"flex",alignItems:"center",gap:8}}>
         <span style={{fontSize:10,color:C.textDim,transition:"transform 0.15s",display:"inline-block",transform:expanded?"rotate(90deg)":"rotate(0deg)"}}>▶</span>
         <span style={{fontSize:14,fontWeight:700}}>{fam}</span>
+        {allOff&&<span title="Todas as TSS desta família estão desmarcadas. Abra e clique em Todos para voltar."
+          style={{fontSize:10,padding:"1px 7px",borderRadius:8,background:"rgba(148,163,184,0.1)",color:C.textDim,border:`1px solid ${C.border}`,fontWeight:700}}>tudo desmarcado</span>}
         {filterActive&&<span style={{fontSize:10,padding:"1px 7px",borderRadius:8,background:C.amberBg,color:C.amber,border:"1px solid rgba(245,158,11,0.25)",fontWeight:700}}>filtrado</span>}
       </div></td>
       <td style={{padding:"12px 16px",textAlign:"center",borderBottom:`1px solid ${C.border}`}}><Pill value={prazo} color={C.green} bg={C.greenBg} border={C.greenBorder} clickable={prazo>0} onClick={e=>{e.stopPropagation();if(prazo>0)openModal("prazo");}}/></td>
