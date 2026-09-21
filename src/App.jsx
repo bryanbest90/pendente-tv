@@ -951,14 +951,16 @@ async function carregarNotas(numeros){
     }
   }
 }
-// Devolve a nota desta OS+TSS, ou a de outra TSS da mesma OS.
+// Devolve a nota DESTA OS+TSS, e so dela. A nota e do servico, nao
+// da OS: quando a OS migra (o vazamento e resolvido e ela vira
+// reposicao), a nota do vazamento fica para tras. Antes ela seguia
+// a OS para a TSS nova, e a lista de notas so crescia.
 function acharNota(numeroOS,tss){
   const lista=notaCache.get(String(numeroOS??"").trim());
   if(!lista?.length) return null;
   const t=String(tss??"").trim();
   const exata=lista.find(d=>String(d.tss).trim()===t);
-  if(exata) return {...exata,outraTss:null};
-  return {...lista[0],outraTss:lista[0].tss};
+  return exata?{...exata,outraTss:null}:null;
 }
 async function salvarNota(numeroOS,tss,texto,sess,linha,tags,dia){
   // A nota guarda o proprio endereco. Sem isso ela vira uma linha
@@ -1077,9 +1079,10 @@ async function fetchTodasNotas(){
    Todas as observacoes num lugar so: o que esta travado na
    carteira inteira, sem precisar abrir familia por familia.
 
-   A nota vive enquanto a OS esta no pendente. Baixada a OS, ela
-   sai do pendente e a nota sai da lista junto — sem ninguem
-   precisar arrumar nada.
+   A nota vive enquanto o SERVICO (par OS+TSS) esta no pendente.
+   Resolvida aquela TSS, a nota sai da lista junto — mesmo que a
+   OS continue aberta em outra TSS, como o vazamento que vira
+   reposicao. Ninguem precisa arrumar nada.
 
    O perigo dessa regra e confundir "OS resolvida" com "casamento
    falhou": nos dois casos a nota some do mesmo jeito, e no segundo
@@ -1108,9 +1111,11 @@ function NotasModal({notas,rows,onClose,onEditar,filtroInicial}){
     return m;
   },[rows]);
   const lista=useMemo(()=>(notas||[]).map(n=>{
+    // So o par exato: nota de TSS que ja saiu do pendente nao aparece,
+    // mesmo que a OS continue aberta em outra TSS.
     const cands=porOS.get(soDigitos(n.numero_os))||[];
-    const linha=cands.find(r=>String(r["TSS"]||"").trim()===String(n.tss).trim())||cands[0]||null;
-    return {n,linha,outraTss:!!linha&&String(linha["TSS"]||"").trim()!==String(n.tss).trim()};
+    const linha=cands.find(r=>String(r["TSS"]||"").trim()===String(n.tss).trim())||null;
+    return {n,linha,outraTss:false};
   }).filter(x=>x.linha),[notas,porOS]);
   // Contagem por etiqueta, sobre o que esta na tela. E a resposta
   // para "o que esta travando a carteira" — que o texto livre
@@ -3599,8 +3604,11 @@ export default function App(){
   const notasDoPendente=useMemo(()=>{
     if(!rawRows?.length) return [];
     const digitos=v=>String(v??"").replace(/\D/g,"");
-    const noPendente=new Set(rawRows.map(r=>digitos(r["Número OS"])).filter(Boolean));
-    return notas.filter(n=>noPendente.has(digitos(n.numero_os)));
+    // Pelo par OS+TSS, nao so pela OS: resolvida a TSS da nota, ela
+    // sai da lista e das etiquetas, ainda que a OS siga em outra TSS.
+    const par=(os,tss)=>digitos(os)+"§"+String(tss??"").trim();
+    const noPendente=new Set(rawRows.map(r=>par(r["Número OS"],r["TSS"])));
+    return notas.filter(n=>noPendente.has(par(n.numero_os,n.tss)));
   },[notas,rawRows]);
 
   // Etiquetas da lateral: so as que tem alguma OS hoje, na ordem
