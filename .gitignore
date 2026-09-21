@@ -11,3 +11,5 @@ scripts/ruas_osm.json
 scripts/ruas_osm.parcial.json
 src/coordBase.json
 scripts/config.json
+scripts/enderecos_ligacao.csv
+src/coordBase.json

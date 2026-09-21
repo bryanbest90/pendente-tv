@@ -802,10 +802,37 @@ const numKey=s=>String(s??"").normalize("NFD").replace(/[\u0300-\u036f]/g,"")
 const distM=(a,b)=>{const R=6371000,p1=a[0]*Math.PI/180,p2=b[0]*Math.PI/180,dl=(b[1]-a[1])*Math.PI/180;
   const h=Math.sin((p2-p1)/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;
   return 2*R*Math.asin(Math.sqrt(h));};
-function acharCoord(endereco,numero){
-  const ent=coordCache.get(ruaKey(endereco));
-  if(!ent) return null;
+// Rua homonima: a regiao tem 8 "RUA QUATRO", e o numero 72 existe em
+// tres delas. Quem separa e o SF da OS — ele e o setor da ligacao da
+// Sabesp em 99,8% das OS. Os pontos de ligacao (p[5]==="L") trazem o
+// setor em p[7]; os de execucao nao sabem o setor.
+function acharCoord(endereco,numero,sf){
+  const ent0=coordCache.get(ruaKey(endereco));
+  if(!ent0) return null;
   const alvo=parseInt(String(numero??"").replace(/\D/g,""),10);
+  const setor=parseInt(String(sf??"").replace(/\D/g,""),10);
+  // 1. ligacao da casa, no setor da OS: o caso comum, e o mais certo
+  const ligs=(ent0.p||[]).filter(p=>p[5]==="L");
+  if(Number.isFinite(alvo)){
+    const noNum=ligs.filter(p=>p[2]===alvo);
+    const certo=Number.isFinite(setor)?noNum.filter(p=>p[7]===setor):noNum;
+    if(certo.length===1){
+      // cadastro a mao continua ganhando: se alguem marcou, e porque o automatico errou
+      const mm=(ent0.m||[]).find(p=>p[4]!=="osm"&&p[2]===alvo);
+      if(mm) return {lat:mm[0],lon:mm[1],tipo:"manual",quando:mm[3]};
+      const c=certo[0];
+      return {lat:c[0],lon:c[1],tipo:"exato",ligacao:true,sf:c[7],obs:0,desvio:0};
+    }
+  }
+  // 2. Sem a ligacao exata: se a rua existe em mais de um setor, so vale
+  //    a nuvem do setor da OS. Os pontos de execucao ficam de fora — nao
+  //    da para saber de qual das ruas homonimas eles sao.
+  let ent=ent0;
+  const setores=new Set(ligs.map(p=>p[7]));
+  if(setores.size>1){
+    const doSetor=Number.isFinite(setor)?ligs.filter(p=>p[7]===setor):[];
+    ent={...ent0,p:doSetor};
+  }
   const cad=ent.m||[];
   const mao=cad.filter(p=>p[4]!=="osm"), doMapa=cad.filter(p=>p[4]==="osm");
   // A ordem aqui e a ordem da confianca, e ela e deliberada:
@@ -865,7 +892,7 @@ function acharAuto(ent,alvo){
   return {lat:p[0],lon:p[1],tipo:"rua",obs:p[3],desvio:p[4]};
 }
 function abrirNoMapa(r){
-  const c=acharCoord(r["Endereço"],r["Número"]);
+  const c=acharCoord(r["Endereço"],r["Número"],r["SF"]);
   const url=c
     ? `https://www.google.com/maps/search/?api=1&query=${c.lat},${c.lon}`
     : `https://www.google.com/maps/search/?api=1&query=`+encodeURIComponent(
@@ -1484,7 +1511,7 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
     return()=>{vivo=false;};
   },[sorted,ehVazamento]);
   const coordPorLinha=useMemo(()=>ehVazamento
-    ? sorted.map(r=>acharCoord(r["Endereço"],r["Número"]))
+    ? sorted.map(r=>acharCoord(r["Endereço"],r["Número"],r["SF"]))
     : [],[sorted,ehVazamento,coordVer]);
   const nExato=coordPorLinha.filter(c=>c?.tipo==="exato").length;
   const nInterp=coordPorLinha.filter(c=>c?.tipo==="interpolado").length;
@@ -1573,6 +1600,7 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
                             :doMapa?`Tirada do mapa do OpenStreetMap — o nome aparece em um só lugar na região, então a rua é esta (${kmTxt}). Abre no meio dela, sem o número.`
                             :c?.tipo==="manual"?`Cadastrada à mão neste número${quando?" em "+quando:""}`
                             :c?.tipo==="manual-rua"?`Rua cadastrada à mão${quando?" em "+quando:""} — abre no ponto marcado, o número não foi informado`
+                            :c?.ligacao?`Coordenada exata — ligação da Sabesp neste número, setor ${c.sf}`
                             :c?.tipo==="exato"?`Coordenada exata — ${c.obs} execução${c.obs>1?"ões":""} neste número, dispersão ${c.desvio} m`
                             :c?.tipo==="interpolado"?`Número não mapeado — posição calculada entre os nº ${c.entre[0]} e ${c.entre[1]}, que já foram executados`
                             :c?.tipo==="vizinho"?`Número não mapeado — abre no vizinho conhecido mais próximo, ${c.casas} número${c.casas>1?"s":""} de distância`
