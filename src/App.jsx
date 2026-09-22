@@ -1211,6 +1211,70 @@ function NotasModal({notas,rows,onClose,onEditar,filtroInicial}){
   </div>;
 }
 
+/* ── Rodar a leitura de ouvidorias sob pedido ─────────────
+   Só aparece para quem tem pode_importar (o Bryan). Escolhe o
+   período e os e-mails; o site chama /api/ouvidoria (função da
+   Vercel, que guarda o token) e ela dispara a tarefa que lê esses
+   e-mails e marca OUVIDORIA nas OS que estão no pendente.
+   Os remetentes ficam guardados neste navegador para a próxima vez.
+   ───────────────────────────────────────────────────────── */
+const OUV_REMETENTES_PADRAO=["amichael@sabesp.com.br","snmsilva@sabesp.com.br"];
+const diaISO=d=>new Date(d.getTime()-d.getTimezoneOffset()*6e4).toISOString().slice(0,10);
+function OuvidoriaRodarModal({sess,onClose}){
+  const hoje=diaISO(new Date());
+  const [de,setDe]=useState(diaISO(new Date(Date.now()-864e5)));
+  const [ate,setAte]=useState(hoje);
+  const [lista,setLista]=useState(()=>{try{const v=JSON.parse(localStorage.getItem("ouv-remetentes")||"null");return Array.isArray(v)&&v.length?v:OUV_REMETENTES_PADRAO;}catch{return OUV_REMETENTES_PADRAO;}});
+  const [novo,setNovo]=useState("");
+  const [estado,setEstado]=useState(null);   // {tipo:"ok"|"erro"|"indo", msg, link}
+  const emailOk=e=>/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+  const guardar=l=>{setLista(l);try{localStorage.setItem("ouv-remetentes",JSON.stringify(l));}catch{}};
+  const add=()=>{const e=novo.trim().toLowerCase();if(!emailOk(e))return;if(!lista.includes(e))guardar([...lista,e]);setNovo("");};
+  const rodar=async()=>{
+    setEstado({tipo:"indo",msg:"Disparando…"});
+    try{
+      const res=await fetch("/api/ouvidoria",{method:"POST",
+        headers:{"Content-Type":"application/json","Authorization":"Bearer "+await tokenFresco(sess)},
+        body:JSON.stringify({de,ate,remetentes:lista})});
+      const j=await res.json().catch(()=>({}));
+      if(!res.ok) throw new Error(j.erro||("HTTP "+res.status));
+      setEstado({tipo:"ok",msg:"Rodando. Leva alguns minutos; as etiquetas aparecem ao clicar em ↻ Atualizar.",link:j.sessao});
+    }catch(e){setEstado({tipo:"erro",msg:String(e.message||e)});}
+  };
+  const campo={padding:"7px 10px",borderRadius:RAIO,border:`1px solid ${C.border}`,background:C.cardAlt,color:C.text,fontSize:13,fontFamily:"inherit",colorScheme:"dark"};
+  const pode=lista.length>0&&de&&ate&&de<=ate&&estado?.tipo!=="indo";
+  return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+    <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:14,border:`1px solid ${C.border}`,width:"100%",maxWidth:480,padding:20,display:"flex",flexDirection:"column",gap:14}}>
+      <div>
+        <div style={{fontSize:15,fontWeight:700,color:C.text}}>Ler ouvidorias do e-mail</div>
+        <div style={{fontSize:12.5,color:C.textDim,marginTop:4,lineHeight:1.5}}>Procura as OS nos e-mails desses remetentes, no período escolhido, e marca <Etiqueta id="OUVIDORIA" pequena/> nas que estão no pendente.</div>
+      </div>
+      <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",fontSize:12.5,color:C.textMuted}}>
+        De <input type="date" value={de} max={ate} onChange={e=>setDe(e.target.value)} style={campo}/>
+        até <input type="date" value={ate} min={de} max={hoje} onChange={e=>setAte(e.target.value)} style={campo}/>
+      </div>
+      <div>
+        <div style={{fontSize:11.5,color:C.textDim,marginBottom:7}}>E-mails de quem</div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+          {lista.map(e=><span key={e} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 8px",borderRadius:RAIO,border:`1px solid ${C.border}`,fontSize:12,color:C.text}}>
+            {e}<span onClick={()=>guardar(lista.filter(x=>x!==e))} title="Tirar" style={{cursor:"pointer",color:C.textDim}}>✕</span></span>)}
+        </div>
+        <div style={{display:"flex",gap:6,marginTop:8}}>
+          <input value={novo} onChange={e=>setNovo(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")add();}} placeholder="acrescentar e-mail" style={{...campo,flex:1,minWidth:0}}/>
+          <button onClick={add} disabled={!emailOk(novo.trim())} style={{...campo,cursor:"pointer",color:C.accent}}>+</button>
+        </div>
+      </div>
+      {estado&&<div style={{fontSize:12.5,lineHeight:1.5,color:estado.tipo==="erro"?C.red:estado.tipo==="ok"?C.green:C.textMuted}}>
+        {estado.msg}{estado.link&&<> <a href={estado.link} target="_blank" rel="noreferrer" style={{color:C.accent}}>ver execução</a></>}</div>}
+      <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
+        <button onClick={onClose} style={{fontSize:12.5,padding:"7px 14px",borderRadius:RAIO,border:`1px solid ${C.border}`,background:"transparent",color:C.textMuted,cursor:"pointer"}}>Fechar</button>
+        <button onClick={rodar} disabled={!pode} style={{fontSize:12.5,fontWeight:700,padding:"7px 16px",borderRadius:RAIO,cursor:pode?"pointer":"default",
+          border:`1px solid ${corDaTag("OUVIDORIA")}`,background:corDaTag("OUVIDORIA")+"1a",color:corDaTag("OUVIDORIA"),opacity:pode?1:0.5}}>Rodar</button>
+      </div>
+    </div>
+  </div>;
+}
+
 function NotaModal({linha,nota,sess,onClose,onSalvou}){
   const os=String(linha["Número OS"]||"").trim();
   const tss=String(linha["TSS"]||"").trim();
@@ -3551,6 +3615,7 @@ export default function App(){
   const [showGasModal,setShowGasModal]=useState(false);
   const [notas,setNotas]=useState([]);
   const [showNotas,setShowNotas]=useState(false);
+  const [showOuvRodar,setShowOuvRodar]=useState(false);
   const [filtroNota,setFiltroNota]=useState(null);
   const [notaAberta,setNotaAberta]=useState(null);   // edicao vinda do modal de Notas
   const [buscaModal,setBuscaModal]=useState(null);   // {rows,familia} da OS pesquisada
@@ -3797,6 +3862,8 @@ export default function App(){
                 style={{fontSize:12,color:C.amber,cursor:"pointer",fontWeight:700,padding:"4px 14px",borderRadius:6,border:"1px solid rgba(245,158,11,0.4)",background:C.amberBg,display:"flex",alignItems:"center",gap:6,animation:"gasPulse 2s infinite"}}>
                 🔥 Gás ({gas.alerts.length})
               </button>}
+              {sess?.perfil?.pode_importar&&<button onClick={()=>setShowOuvRodar(true)} title="Ler ouvidorias do e-mail e marcar a etiqueta"
+                style={{fontSize:12,color:corDaTag("OUVIDORIA"),cursor:"pointer",fontWeight:600,padding:"4px 12px",borderRadius:6,border:`1px solid ${corDaTag("OUVIDORIA")}55`,background:"transparent"}}>Ouvidoria</button>}
               <button onClick={refresh} style={{fontSize:12,color:C.accent,cursor:"pointer",fontWeight:600,padding:"4px 12px",borderRadius:6,border:"1px solid rgba(59,130,246,0.3)",background:C.accentBg}}>↻ Atualizar</button>
             </div>
           </div>
@@ -3806,6 +3873,7 @@ export default function App(){
         {buscaModal&&<OSModal rows={buscaModal.rows} familia={buscaModal.familia} tipo="busca" onClose={()=>setBuscaModal(null)}/>}
         {showNotas&&<NotasModal notas={notasDoPendente} rows={rawRows} filtroInicial={filtroNota} onClose={()=>setShowNotas(false)}
           onEditar={x=>setNotaAberta(x)}/>}
+        {showOuvRodar&&sess?.perfil?.pode_importar&&<OuvidoriaRodarModal sess={sess} onClose={()=>setShowOuvRodar(false)}/>}
         {notaAberta&&<NotaModal linha={notaAberta.linha} nota={notaAberta.nota} sess={sess}
           onClose={()=>setNotaAberta(null)}
           onSalvou={async()=>{
