@@ -3692,6 +3692,54 @@ export default function App(){
     try{const hist=await fetchHistorico();if(hist?.length>0)setHistorico(hist);}catch{}
   },[]);
 
+  // Atualização sozinha. A cada minuto pergunta ao banco duas coisas
+  // pequenas: quando o pendente foi gravado pela última vez e como
+  // estão as notas (quantas + a mais recente). Só baixa tudo de novo se
+  // algo mudou — são 2 requisições minúsculas por minuto, não 1000 OS.
+  // Com a aba escondida não pergunta nada; ao voltar, confere na hora.
+  // O robô grava o pendente_meta só DEPOIS de subir todas as OS, então
+  // nunca se pega um pendente pela metade.
+  const vigia=useRef({pend:null,notas:null});
+  useEffect(()=>{
+    let vivo=true,rodando=false;
+    const conferir=async()=>{
+      if(!vivo||rodando||document.hidden)return;
+      rodando=true;
+      try{
+        const [m,n]=await Promise.all([
+          fetch(SUPABASE_URL+"/rest/v1/pendente_meta?id=eq.1&select=updated_at",{headers:HEADERS}).then(r=>r.ok?r.json():null),
+          fetch(SUPABASE_URL+"/rest/v1/os_nota?select=atualizado_em&order=atualizado_em.desc&limit=1",
+            {headers:{...HEADERS,"Prefer":"count=exact"}}).then(async r=>r.ok?`${r.headers.get("content-range")}|${(await r.json())[0]?.atualizado_em||""}`:null),
+        ]);
+        const pend=m?.[0]?.updated_at||null;
+        const v=vigia.current;
+        if(pend&&v.pend&&pend!==v.pend){
+          const data=await fetchRows();
+          if(vivo&&data.rows?.length>0){setRawRows(data.rows);setUpdatedAt(data.updatedAt);cacheRows(data.rows,data.updatedAt);
+            flash("Pendente atualizado ✓ ("+data.rows.length+" OS)");
+            try{const hist=await fetchHistorico();if(vivo&&hist?.length>0)setHistorico(hist);}catch{}}
+        }
+        if(n&&v.notas&&n!==v.notas){
+          const todas=await fetchTodasNotas();
+          if(vivo){
+            // Reescreve o cache sem esvaziar: um modal aberto continua com
+            // as notas na tela, agora ja atualizadas.
+            const porOS=new Map();for(const d of todas){const k=String(d.numero_os).trim();if(!porOS.has(k))porOS.set(k,[]);porOS.get(k).push(d);}
+            for(const k of [...notaCache.keys()]) notaCache.set(k,porOS.get(k)||[]);
+            setNotas(todas);}
+        }
+        if(pend)v.pend=pend;
+        if(n)v.notas=n;
+      }catch(e){console.warn("Atualização automática:",e.message||e);}
+      finally{rodando=false;}
+    };
+    conferir();
+    const t=setInterval(conferir,60000);
+    const aoVoltar=()=>{if(!document.hidden)conferir();};
+    document.addEventListener("visibilitychange",aoVoltar);
+    return()=>{vivo=false;clearInterval(t);document.removeEventListener("visibilitychange",aoVoltar);};
+  },[]);
+
   // Busca no banco quem entrou a partir da data. Roda quando a data
   // muda; data vazia limpa o filtro sem ir ao servidor.
   useEffect(()=>{
