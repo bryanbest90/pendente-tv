@@ -1590,6 +1590,10 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
       .finally(()=>{if(vivo)setNotaVer(v=>v+1);});
     return()=>{vivo=false;};
   },[sorted]);
+  // A atualização automática reescreve o cache e avisa; o modal aberto
+  // redesenha com as etiquetas novas sem precisar fechar e abrir.
+  useEffect(()=>{const f=()=>setNotaVer(v=>v+1);window.addEventListener("notas-mudaram",f);
+    return()=>window.removeEventListener("notas-mudaram",f);},[]);
   const notaPorLinha=useMemo(()=>sorted.map(r=>acharNota(r["Número OS"],r["TSS"])),[sorted,notaVer]);
   const nNotas=notaPorLinha.filter(Boolean).length;
   const nMao=coordPorLinha.filter(c=>c?.tipo==="manual"||c?.tipo==="manual-rua").length;
@@ -3726,7 +3730,8 @@ export default function App(){
             // as notas na tela, agora ja atualizadas.
             const porOS=new Map();for(const d of todas){const k=String(d.numero_os).trim();if(!porOS.has(k))porOS.set(k,[]);porOS.get(k).push(d);}
             for(const k of [...notaCache.keys()]) notaCache.set(k,porOS.get(k)||[]);
-            setNotas(todas);}
+            setNotas(todas);
+            window.dispatchEvent(new Event("notas-mudaram"));}
         }
         if(pend)v.pend=pend;
         if(n)v.notas=n;
