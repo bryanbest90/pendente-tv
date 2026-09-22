@@ -1559,24 +1559,29 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
     matchGasStreet(String(r["Endereço"]||"").trim())
   ),[sorted]);
   const totalGas=gasPorLinha.filter(Boolean).length;
-  // Teste do mapa: so na familia de vazamento, para medir a cobertura
-  // da base num universo pequeno antes de valer para tudo.
-  const ehVazamento=matchFamiliaVazamento(familia);
+  // O mapa comecou so no vazamento, para medir a cobertura da base num
+  // universo pequeno. Medida, passou a valer para todas as familias.
+  // Em ligacao NOVA a casa muitas vezes ainda nao tem ligacao cadastrada:
+  // ai nao existe ponto exato, e o endereco abre pelo vizinho conhecido
+  // mais proximo ou pela rua. O icone e o texto ao passar o mouse dizem
+  // qual e o caso — e o que impede de mandar equipe achando que o ponto
+  // e certo.
+  const mostraMapa=true;
   // A base agora esta no Supabase, entao pedir as ruas deste modal
   // antes de calcular. coordVer so existe para recalcular o memo
   // quando a resposta chega.
   const [coordVer,setCoordVer]=useState(0);
   const [coordCarregando,setCoordCarregando]=useState(false);
   useEffect(()=>{
-    if(!ehVazamento) return;
+    if(!mostraMapa) return;
     let vivo=true; setCoordCarregando(true);
     carregarRuas(sorted.map(r=>ruaKey(r["Endereço"])))
       .finally(()=>{if(vivo){setCoordCarregando(false);setCoordVer(v=>v+1);}});
     return()=>{vivo=false;};
-  },[sorted,ehVazamento]);
-  const coordPorLinha=useMemo(()=>ehVazamento
+  },[sorted,mostraMapa]);
+  const coordPorLinha=useMemo(()=>mostraMapa
     ? sorted.map(r=>acharCoord(r["Endereço"],r["Número"],r["SF"]))
-    : [],[sorted,ehVazamento,coordVer]);
+    : [],[sorted,mostraMapa,coordVer]);
   const nExato=coordPorLinha.filter(c=>c?.tipo==="exato").length;
   const nInterp=coordPorLinha.filter(c=>c?.tipo==="interpolado").length;
   const nAprox=coordPorLinha.filter(c=>c?.tipo==="vizinho"||c?.tipo==="rua").length;
@@ -1602,7 +1607,7 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
   // Cadastro manual de coordenada: so para quem importa. A TV roda
   // sem login e nem ve o lapis. (sess ja foi lido acima, para as
   // observacoes.)
-  const podeCadastrar=ehVazamento&&!!sess?.perfil?.pode_importar;
+  const podeCadastrar=mostraMapa&&!!sess?.perfil?.pode_importar;
   const [cadastrando,setCadastrando]=useState(null);   // a linha aberta no formulario
   return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(4px)"}}>
     <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:16,border:`1px solid ${C.border}`,width:"100%",maxWidth:1400,maxHeight:"80vh",display:"flex",flexDirection:"column",overflow:"hidden",animation:"modalIn 0.2s ease"}}>
@@ -1612,7 +1617,7 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
           {nNotas>0&&<span title="Serviços com observação registrada por alguém da equipe"
             style={{marginLeft:8,fontSize:12,color:"#e9b949",fontWeight:700,padding:"2px 9px",borderRadius:6,border:"1px solid rgba(233,185,73,0.35)",background:"rgba(233,185,73,0.08)"}}>
             📝 {nNotas} com observação</span>}
-          {ehVazamento&&<span title="Clique no endereço para abrir no Google Maps. Verde: a turma já executou nesse número. Âmbar: só a rua está mapeada, abre no meio dela. Cinza: fora da base, abre uma busca por texto."
+          {mostraMapa&&<span title="Clique no endereço para abrir no Google Maps. Verde: a turma já executou nesse número. Âmbar: só a rua está mapeada, abre no meio dela. Cinza: fora da base, abre uma busca por texto."
             style={{marginLeft:8,fontSize:12,fontWeight:700,padding:"2px 9px",borderRadius:6,border:`1px solid ${C.border}`,background:C.cardAlt,color:C.textMuted,cursor:"help"}}>
             {coordCarregando?<span style={{color:C.textDim}}>📍 consultando a biblioteca…</span>
              :<>📍 <span style={{color:C.green}}>{nExato} exatos</span> · <span style={{color:"#38bdf8"}}>{nInterp} interpolados</span> · <span style={{color:C.amber}}>{nAprox} aproximados</span>
@@ -1658,7 +1663,7 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
                 style={{padding:"8px 12px",borderBottom:nt?"none":`1px solid ${C.border}`,whiteSpace:"nowrap",
                   ...(gasPorLinha[i]?{color:C.amber,fontWeight:700,background:C.amberBg,boxShadow:"inset 3px 0 0 "+C.amber}:{})}}>
                 {gasPorLinha[i]&&<span style={{marginRight:6}}>🔥</span>}
-                {ehVazamento?(()=>{const c=coordPorLinha[i];
+                {mostraMapa?(()=>{const c=coordPorLinha[i];
                   const manual=c?.tipo==="manual"||c?.tipo==="manual-rua";
                   const doMapa=c?.tipo==="osm";
                   const cor=manual?"#a78bfa":doMapa?(c.longa?C.amber:"#2dd4bf"):c?.tipo==="exato"?C.green:c?.tipo==="interpolado"?"#38bdf8":c?C.amber:C.textDim;
