@@ -1275,6 +1275,645 @@ function OuvidoriaRodarModal({sess,onClose}){
   </div>;
 }
 
+/* ── Itinerário ───────────────────────────────────────────
+   O que esta tela faz: separa o que PODE ser feito no dia,
+   distribui entre as equipes daquele tipo de serviço juntando o que
+   é perto, e põe em ordem de visita. A palavra final é sua: tudo
+   que ela sugere pode ser tirado, trocado de equipe e reordenado.
+
+   Três coisas nunca entram, e isso é regra dura, não preferência:
+   OS com impedimento na nota (LAJE, GEOINFRA, CONVIAS), OS marcada
+   para outro dia (AGENDADO), e OS que já está no itinerário de
+   outra equipe no mesmo dia. Itinerário que manda equipe para um
+   serviço travado perde a confiança da turma no primeiro dia.
+
+   O que está guardado é o par (numero_os, tss) — o mesmo do resto
+   do sistema — porque a mesma OS pode ter o vazamento com uma
+   equipe e a reposição com outra.
+   ───────────────────────────────────────────────────────── */
+const TAGS_TRAVA=["LAJE","GEOINFRA","CONVIAS"];
+const TIPOS_FAM=[            // usado quando a TSS ainda não tem tipo medido
+  [/DESOBSTR/,"DESOBSTRUÇÃO"],[/ASFALT|CAPA|FRESAR/,"ASFALTO"],[/REPOR|REPOSI|PASSEIO|PISO|CONCRETO|BLOQUETE|GUIA|SARJETA/,"REPOSIÇÃO"],
+  [/LIGAÇÃO DE ÁGUA|TRANSFORMAÇÃO|CAVALETE MULTIPLO|CAV MÚLTIPLO/,"LIGAÇÃO"],[/ESGOTO|POÇO|CAIXA/,"ESGOTO"],
+  [/SUPRIMIR|REATIVAR|RELIGAR|HIDRÔMETRO|FALTA DE ÁGUA|REGISTRO DO CAVALETE/,"MOTO"],[/VAZAMENTO|RAMAL|REDE DE ÁGUA|CAVALETE/,"VAZAMENTO"],
+];
+const tipoDoServico=(tss,familia,mapa)=>mapa?.[String(tss||"").trim()]
+  ||(TIPOS_FAM.find(([re])=>re.test(String(tss||"")+" "+String(familia||"")))||[])[1]||"OUTROS";
+
+// "-3d,4h,10m" vira minutos (negativo = fora do prazo). Serve para
+// ordenar por urgência de verdade, não pelo texto.
+function minutosResiduais(txt){
+  const s=String(txt??"");const neg=s.trim().startsWith("-");
+  const g=n=>{const m=s.match(new RegExp("(\\d+)"+n));return m?+m[1]:0;};
+  const v=g("d")*1440+g("h")*60+g("m");
+  return neg?-v:v;
+}
+const distKm=(a,b)=>{const R=6371,r=x=>x*Math.PI/180;
+  const h=Math.sin(r(b.lat-a.lat)/2)**2+Math.cos(r(a.lat))*Math.cos(r(b.lat))*Math.sin(r(b.lon-a.lon)/2)**2;
+  return 2*R*Math.asin(Math.sqrt(h));};
+
+async function fetchEquipes(){
+  const r=await fetch(SUPABASE_URL+"/rest/v1/equipe?select=*&order=tipo.asc,nome.asc",{headers:HEADERS});
+  if(r.status===404) return null;                 // tabela ainda não criada
+  if(!r.ok) throw new Error("equipe "+r.status);
+  return r.json();
+}
+async function fetchTssTipo(){
+  const r=await fetch(SUPABASE_URL+"/rest/v1/tss_tipo?select=tss,tipo,confianca",{headers:HEADERS});
+  if(!r.ok) return {};
+  const out={};for(const x of await r.json()) out[String(x.tss).trim()]=x.tipo;
+  return out;
+}
+async function fetchCanteiros(){
+  const r=await fetch(SUPABASE_URL+"/rest/v1/canteiro?select=*&order=nome.asc",{headers:HEADERS});
+  if(!r.ok) return [];                            // tabela ainda nao criada: segue sem canteiro
+  return r.json();
+}
+async function fetchItinerario(dia){
+  const r=await fetch(SUPABASE_URL+`/rest/v1/itinerario?dia=eq.${dia}&select=*&order=equipe.asc,ordem.asc`,{headers:HEADERS});
+  if(!r.ok) return [];
+  return r.json();
+}
+async function salvarItinerario(dia,linhas,sess){
+  const cab=authHeaders(await tokenFresco(sess));
+  const del=await fetch(SUPABASE_URL+`/rest/v1/itinerario?dia=eq.${dia}`,{method:"DELETE",headers:cab});
+  if(!del.ok) throw new Error(`${del.status} ${await del.text()}`);
+  if(!linhas.length) return;
+  const res=await fetch(SUPABASE_URL+"/rest/v1/itinerario",{method:"POST",headers:{...cab,"Prefer":"return=minimal"},
+    body:JSON.stringify(linhas)});
+  if(!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+}
+
+// Frentes na ordem em que a operação pensa nelas. OUTROS não entra:
+// é o estado de "ainda não definido", não uma frente de verdade.
+const TIPOS_ORD=["VAZAMENTO","LIGAÇÃO","ESGOTO","DESOBSTRUÇÃO","REPOSIÇÃO","ASFALTO","OBRAS","MOTO"];
+
+async function salvarEquipe(nome,campos,sess){
+  const cab=authHeaders(await tokenFresco(sess));
+  const r=await fetch(SUPABASE_URL+`/rest/v1/equipe?nome=eq.${encodeURIComponent(nome)}`,
+    {method:"PATCH",headers:{...cab,"Prefer":"return=representation"},body:JSON.stringify(campos)});
+  if(!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  const j=await r.json();
+  return j[0]||null;
+}
+
+/* ── Cadastro da equipe ───────────────────────────────────
+   O que a equipe atende sai daqui, e é o que o Sugerir obedece.
+
+   Dois níveis, de propósito. A FRENTE é o que resolve 95% dos
+   casos: marcou VAZAMENTO, a equipe recebe todas as TSS de
+   vazamento, inclusive as que forem cadastradas amanhã. A exceção
+   por TSS é para o resto: a equipe de asfalto que também faz
+   passeio, a de ligação que não faz cavalete múltiplo. Cadastrar
+   153 TSS na mão em 59 equipes ninguém faz duas vezes — por isso a
+   frente é a base e a TSS é o remendo.
+   ───────────────────────────────────────────────────────── */
+function EquipeModal({equipe,equipes,canteiros,tssTipo,sess,onClose,onSalvou}){
+  const [tipos,setTipos]=useState(()=>Array.isArray(equipe.tipos)&&equipe.tipos.length
+    ?[...equipe.tipos]:(equipe.tipo&&equipe.tipo!=="OUTROS"?[equipe.tipo]:[]));
+  const [extra,setExtra]=useState(()=>[...(equipe.tss_extra||[])]);
+  const [bloq,setBloq]=useState(()=>[...(equipe.tss_bloqueado||[])]);
+  const [osDia,setOsDia]=useState(equipe.os_por_dia||4);
+  const [cant,setCant]=useState(equipe.canteiro_id||"");
+  const [lider,setLider]=useState(equipe.lider||"");
+  const [zap,setZap]=useState(equipe.whatsapp||"");
+  const [ativa,setAtiva]=useState(equipe.ativa!==false);
+  const [busca,setBusca]=useState("");
+  const [copia,setCopia]=useState([]);            // outras equipes que recebem a mesma cobertura
+  const [mostrarCopia,setMostrarCopia]=useState(false);
+  const [erro,setErro]=useState("");
+  const [indo,setIndo]=useState(false);
+
+  const todasTss=useMemo(()=>Object.entries(tssTipo||{}).map(([tss,tipo])=>({tss,tipo}))
+    .sort((a,b)=>a.tipo.localeCompare(b.tipo)||a.tss.localeCompare(b.tss)),[tssTipo]);
+  const cobre=t=>(tipos.includes(t.tipo)&&!bloq.includes(t.tss))||extra.includes(t.tss);
+  const virar=t=>{
+    const daFrente=tipos.includes(t.tipo);
+    if(cobre(t)){
+      if(daFrente) setBloq(b=>[...new Set([...b,t.tss])]);
+      setExtra(e=>e.filter(x=>x!==t.tss));
+    }else{
+      if(daFrente) setBloq(b=>b.filter(x=>x!==t.tss));
+      else setExtra(e=>[...new Set([...e,t.tss])]);
+    }
+  };
+  // Sem busca, mostra o que a equipe atende hoje. Com busca, mostra
+  // tudo — é assim que se acrescenta TSS de outra frente.
+  const visiveis=useMemo(()=>{
+    const q=busca.trim().toUpperCase();
+    const base=q?todasTss.filter(t=>t.tss.toUpperCase().includes(q)||t.tipo.includes(q))
+      :todasTss.filter(t=>tipos.includes(t.tipo)||extra.includes(t.tss));
+    return base.slice(0,400);
+  },[todasTss,busca,tipos,extra]);
+  const nCobertas=todasTss.filter(cobre).length;
+  // Grupo = quem tem HOJE a mesma cobertura desta equipe. É o mesmo
+  // critério que o Sugerir usa para agrupar, então o que aparece
+  // marcado aqui é o grupo de verdade, não um rótulo à parte.
+  const assinatura=eq=>{
+    const tp=(Array.isArray(eq?.tipos)&&eq.tipos.length?eq.tipos:[eq?.tipo]).filter(Boolean);
+    return [...tp].sort().join("|")+"§"+[...(eq?.tss_extra||[])].sort().join("|")
+      +"§"+[...(eq?.tss_bloqueado||[])].sort().join("|");
+  };
+  const outras=useMemo(()=>(equipes||[]).filter(e=>e.nome!==equipe.nome&&e.ativa!==false)
+    .sort((a,b)=>String(a.tipo).localeCompare(String(b.tipo))||a.nome.localeCompare(b.nome)),[equipes,equipe]);
+  const mesmaAssinatura=useMemo(()=>{const alvo=assinatura(equipe);
+    return outras.filter(e=>assinatura(e)===alvo).map(e=>e.nome);},[outras,equipe]);
+
+  const gravar=async()=>{
+    setIndo(true);setErro("");
+    try{
+      // A cobertura é o que se copia. Quanto cabe no dia, canteiro,
+      // líder e whatsapp são de cada equipe e ficam de fora da cópia.
+      const cobertura={tipos,tss_extra:extra,tss_bloqueado:bloq,
+        tipo:tipos[0]||"OUTROS",               // frente principal: só agrupa a lista da tela
+        atualizado_em:new Date().toISOString()};
+      const eq=await salvarEquipe(equipe.nome,{...cobertura,
+        os_por_dia:Math.max(1,+osDia||1),canteiro_id:cant||null,
+        lider:lider.trim()||null,whatsapp:zap.trim()||null,ativa},sess);
+      const salvas=[{...equipe,...(eq||{}),...cobertura}];
+      for(const nome of copia){
+        const o=await salvarEquipe(nome,cobertura,sess);
+        const base=outras.find(x=>x.nome===nome)||{nome};
+        salvas.push({...base,...(o||{}),...cobertura});
+      }
+      onSalvou(salvas);
+    }catch(e){setErro(String(e.message||e)+(copia.length?" — confira quais equipes chegaram a ser salvas":""));}
+    setIndo(false);
+  };
+
+  const campo={padding:"7px 10px",borderRadius:RAIO,border:`1px solid ${C.border}`,background:C.cardAlt,color:C.text,fontSize:13,fontFamily:"inherit",colorScheme:"dark"};
+  return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+    <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:14,border:`1px solid ${C.border}`,
+      width:"100%",maxWidth:620,maxHeight:"90vh",padding:20,display:"flex",flexDirection:"column",gap:14,overflow:"hidden"}}>
+      <div>
+        <div style={{fontSize:15,fontWeight:700,color:C.text}}>{equipe.nome}</div>
+        <div style={{fontSize:12.5,color:C.textDim,marginTop:4,lineHeight:1.5}}>
+          O Sugerir só oferece a esta equipe o que estiver marcado aqui. {nCobertas} serviços atendidos hoje.</div>
+      </div>
+
+      <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",fontSize:12.5,color:C.textMuted}}>
+        <label style={{display:"flex",alignItems:"center",gap:6}}>Cabe no dia
+          <input type="number" min={1} max={30} value={osDia} onChange={e=>setOsDia(e.target.value)} style={{...campo,width:64}}/></label>
+        <label style={{display:"flex",alignItems:"center",gap:6}}>Sai de
+          <select value={cant} onChange={e=>setCant(e.target.value)} style={campo}>
+            <option value="">— sem canteiro —</option>
+            {(canteiros||[]).map(k=><option key={k.id} value={k.id}>{k.nome}</option>)}
+          </select></label>
+        <label style={{display:"flex",alignItems:"center",gap:6}}>
+          <input type="checkbox" checked={ativa} onChange={e=>setAtiva(e.target.checked)}/>ativa</label>
+      </div>
+      <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+        <input value={lider} onChange={e=>setLider(e.target.value)} placeholder="líder" style={{...campo,flex:1,minWidth:140}}/>
+        <input value={zap} onChange={e=>setZap(e.target.value)} placeholder="whatsapp" style={{...campo,flex:1,minWidth:140}}/>
+      </div>
+
+      <div>
+        <div style={{fontSize:11.5,color:C.textDim,marginBottom:7}}>Frentes que esta equipe atende</div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+          {TIPOS_ORD.map(t=>{const on=tipos.includes(t);
+            return <span key={t} onClick={()=>setTipos(l=>on?l.filter(x=>x!==t):[...l,t])}
+              style={{cursor:"pointer",padding:"4px 10px",borderRadius:RAIO,fontSize:12,userSelect:"none",
+                border:`1px solid ${on?C.accent:C.border}`,background:on?C.accentBg:"transparent",color:on?C.accent:C.textDim}}>{t}</span>;})}
+        </div>
+        {!tipos.length&&<div style={{fontSize:11.5,color:C.amber,marginTop:7}}>
+          Sem frente marcada a equipe fica de fora do Sugerir e só recebe serviço na mão.</div>}
+      </div>
+
+      <div style={{display:"flex",flexDirection:"column",minHeight:0,flex:1}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:7}}>
+          <div style={{fontSize:11.5,color:C.textDim,flex:1}}>Serviços — desmarque o que ela não faz, ou busque para acrescentar de outra frente</div>
+          <input value={busca} onChange={e=>setBusca(e.target.value)} placeholder="buscar TSS" style={{...campo,width:180,padding:"5px 8px",fontSize:12}}/>
+        </div>
+        <div style={{overflowY:"auto",border:`1px solid ${C.border}`,borderRadius:RAIO,minHeight:120}}>
+          {visiveis.map(t=>{const on=cobre(t);const fora=!tipos.includes(t.tipo);
+            return <div key={t.tss} onClick={()=>virar(t)}
+              style={{display:"flex",gap:8,alignItems:"center",padding:"6px 10px",cursor:"pointer",
+                borderBottom:`1px solid ${C.border}`,fontSize:12.5,color:on?C.text:C.textDim}}>
+              <input type="checkbox" readOnly checked={on} style={{pointerEvents:"none"}}/>
+              <span style={{flex:1,minWidth:0}}>{t.tss}</span>
+              <span style={{fontSize:10.5,color:fora?C.amber:C.textDim}}>{t.tipo}{fora&&on?" · exceção":""}</span>
+            </div>;})}
+          {!visiveis.length&&<div style={{padding:12,fontSize:12.5,color:C.textDim}}>
+            {busca?"Nenhuma TSS com esse texto.":"Marque uma frente acima para ver os serviços."}</div>}
+        </div>
+        {(bloq.length>0||extra.length>0)&&<div style={{fontSize:11.5,color:C.textDim,marginTop:7}}>
+          {extra.length>0&&<>{extra.length} exceção(ões) de outra frente</>}
+          {extra.length>0&&bloq.length>0&&" · "}
+          {bloq.length>0&&<>{bloq.length} TSS da frente desmarcada(s)</>}
+        </div>}
+      </div>
+
+      {tipos.length>0&&<div>
+        <div onClick={()=>setMostrarCopia(v=>!v)} style={{cursor:"pointer",fontSize:11.5,color:C.accent,userSelect:"none"}}>
+          {mostrarCopia?"▾":"▸"} Aplicar esta cobertura a outras equipes{copia.length?` — ${copia.length} marcada(s)`:""}</div>
+        {mostrarCopia&&<div style={{marginTop:7}}>
+          <div style={{display:"flex",gap:8,marginBottom:6,fontSize:11.5,alignItems:"center"}}>
+            <span onClick={()=>setCopia(mesmaAssinatura)} style={{cursor:"pointer",color:mesmaAssinatura.length?C.accent:C.textDim}}>
+              marcar as {mesmaAssinatura.length} que tinham a mesma cobertura</span>
+            <span style={{color:C.border}}>|</span>
+            <span onClick={()=>setCopia(outras.map(e=>e.nome))} style={{cursor:"pointer",color:C.textDim}}>todas</span>
+            <span style={{color:C.border}}>|</span>
+            <span onClick={()=>setCopia([])} style={{cursor:"pointer",color:C.textDim}}>limpar</span>
+          </div>
+          <div style={{maxHeight:150,overflowY:"auto",border:`1px solid ${C.border}`,borderRadius:RAIO}}>
+            {outras.map(e=>{const on=copia.includes(e.nome);const igual=mesmaAssinatura.includes(e.nome);
+              const cob=Array.isArray(e.tipos)&&e.tipos.length?e.tipos.join(", "):(e.tipo||"sem frente");
+              return <div key={e.nome} onClick={()=>setCopia(l=>on?l.filter(x=>x!==e.nome):[...l,e.nome])}
+                style={{display:"flex",gap:8,alignItems:"center",padding:"5px 10px",cursor:"pointer",
+                  borderBottom:`1px solid ${C.border}`,fontSize:12.5,color:on?C.text:C.textDim}}>
+                <input type="checkbox" readOnly checked={on} style={{pointerEvents:"none"}}/>
+                <span style={{flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.nome}</span>
+                <span style={{fontSize:10.5,color:igual?C.green:C.textDim,whiteSpace:"nowrap"}}>{igual?"mesma cobertura":cob}</span>
+              </div>;})}
+            {!outras.length&&<div style={{padding:10,fontSize:12.5,color:C.textDim}}>Nenhuma outra equipe ativa.</div>}
+          </div>
+          <div style={{fontSize:11,color:C.textDim,marginTop:6,lineHeight:1.5}}>
+            Copia só o que a equipe atende. Quanto cabe no dia, canteiro, líder e whatsapp continuam de cada uma.</div>
+        </div>}
+      </div>}
+      {erro&&<div style={{fontSize:12.5,color:C.red,lineHeight:1.5}}>Erro ao salvar: {erro}</div>}
+      <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
+        <button onClick={onClose} style={{fontSize:12.5,padding:"7px 14px",borderRadius:RAIO,border:`1px solid ${C.border}`,background:"transparent",color:C.textMuted,cursor:"pointer"}}>Fechar</button>
+        <button onClick={gravar} disabled={indo||!sess} title={sess?"":"Precisa estar logado"}
+          style={{fontSize:12.5,fontWeight:700,padding:"7px 16px",borderRadius:RAIO,cursor:indo||!sess?"default":"pointer",
+            border:`1px solid ${C.green}55`,background:C.green+"14",color:C.green,opacity:indo||!sess?0.5:1}}>{indo?"Salvando…":"Salvar"}</button>
+      </div>
+    </div>
+  </div>;
+}
+
+function ItinerarioView({rawRows,notas,sess}){
+  const amanha=()=>{const d=new Date();d.setDate(d.getDate()+1);return diaISO(d);};
+  const [dia,setDia]=useState(amanha);
+  const [equipes,setEquipes]=useState(null);      // null = carregando; [] = tabela vazia
+  const [semTabela,setSemTabela]=useState(false);
+  const [tssTipo,setTssTipo]=useState({});
+  const [plano,setPlano]=useState([]);            // [{equipe,numero_os,tss,ordem,...}]
+  const [sel,setSel]=useState(null);              // equipe selecionada
+  const [aviso,setAviso]=useState("");
+  const [salvando,setSalvando]=useState(false);
+  const [coordVer,setCoordVer]=useState(0);
+  const [canteiros,setCanteiros]=useState([]);
+  const [reserva,setReserva]=useState(0);         // % do dia guardado para urgencia da Sabesp
+  const [editando,setEditando]=useState(null);   // equipe aberta no cadastro
+
+  useEffect(()=>{(async()=>{
+    try{const [e,t,k]=await Promise.all([fetchEquipes(),fetchTssTipo(),fetchCanteiros()]);
+      if(e===null){setSemTabela(true);setEquipes([]);return;}
+      setEquipes(e);setTssTipo(t);setCanteiros(k||[]);setSel(s=>s||e.find(x=>x.ativa)?.nome||null);
+    }catch(err){setAviso("Erro ao carregar equipes: "+err.message);setEquipes([]);}
+  })();},[]);
+  useEffect(()=>{(async()=>{try{setPlano(await fetchItinerario(dia));}catch{}})();},[dia]);
+  // Coordenadas das ruas em jogo, para agrupar por proximidade.
+  useEffect(()=>{if(!rawRows?.length)return;let vivo=true;
+    carregarRuas(rawRows.map(r=>ruaKey(r["Endereço"]))).finally(()=>{if(vivo)setCoordVer(v=>v+1);});
+    return()=>{vivo=false;};},[rawRows]);
+
+  const notaDe=useMemo(()=>{
+    const m=new Map();const dig=v=>String(v??"").replace(/\D/g,"");
+    for(const n of notas||[]) m.set(dig(n.numero_os)+"§"+String(n.tss).trim(),n);
+    return m;},[notas]);
+
+  // Cada linha do pendente vira um candidato com o que a decisão precisa.
+  const candidatos=useMemo(()=>{
+    const dig=v=>String(v??"").replace(/\D/g,"");
+    return (rawRows||[]).filter(r=>VALID_ATCS.includes(Number(r["ATC"]))&&familiaTssVisivel(r["Família"],r["TSS"]))
+      .map(r=>{
+        const os=String(r["Número OS"]||"").trim(),tss=String(r["TSS"]||"").trim();
+        const n=notaDe.get(dig(os)+"§"+tss);
+        const tags=n?.tags||[];
+        const trava=tags.find(t=>TAGS_TRAVA.includes(t))||null;
+        const agendado=tags.includes("AGENDADO")?String(n.agendado_para||"").slice(0,10):null;
+        const c=acharCoord(r["Endereço"],r["Número"],r["SF"]);
+        return {r,os,tss,tags,trava,agendado,nota:n?.nota||null,
+          setor:String(r["SF"]??"").trim(),
+          tipo:tipoDoServico(tss,r["Família"],tssTipo),
+          min:minutosResiduais(r["Tempo Residual"]),
+          coord:c?{lat:c.lat,lon:c.lon,exata:c.tipo==="exato"||c.ligacao}:null};
+      });
+  },[rawRows,notaDe,tssTipo,coordVer]);
+
+  const chave=x=>x.os+"§"+x.tss;
+  const noPlano=useMemo(()=>new Set(plano.map(p=>String(p.numero_os).trim()+"§"+String(p.tss).trim())),[plano]);
+  const disponiveis=useMemo(()=>candidatos.filter(c=>
+    !c.trava && (!c.agendado||c.agendado===dia) && !noPlano.has(chave(c))),[candidatos,noPlano,dia]);
+  const travadas=useMemo(()=>candidatos.filter(c=>c.trava||(c.agendado&&c.agendado!==dia)),[candidatos,dia]);
+  const porChave=useMemo(()=>{const m=new Map();for(const c of candidatos)m.set(chave(c),c);return m;},[candidatos]);
+
+  const ativas=useMemo(()=>(equipes||[]).filter(e=>e.ativa),[equipes]);
+  const equipeSel=ativas.find(e=>e.nome===sel)||null;
+  const daEquipe=nome=>plano.filter(p=>p.equipe===nome).sort((a,b)=>a.ordem-b.ordem);
+
+  // ---- a sugestão ----
+  // A ordem das decisões aqui é a da operação, não a do código:
+  //
+  //  1. FRENTE — equipe só recebe serviço do tipo dela. Equipe
+  //     cadastrada como OUTROS fica de fora da distribuição
+  //     automática: enquanto o tipo dela não for corrigido, é na mão.
+  //     Sem isso o itinerário mistura frente, coisa que na prática
+  //     quase não acontece.
+  //  2. CANTEIRO — equipe do canteiro de Embu-Guaçu só pega OS dos
+  //     municípios daquele canteiro; a de Interlagos, dos dela.
+  //  3. SETOR — as livres são agrupadas por SF e as equipes são
+  //     repartidas proporcionalmente ao volume: 15 serviços num setor
+  //     e 3 em outro dão 2 ou 3 equipes no primeiro e 1 no segundo,
+  //     mesmo que a segunda trabalhe menos. Equipe atravessando o
+  //     polo perde o dia no trânsito.
+  //  4. PRAZO — dentro do setor entra primeiro o que ainda está
+  //     DENTRO do prazo e mais perto de estourar, que é o que ainda
+  //     dá para salvar. O atrasado entra por cota (COTA_ATRASO por
+  //     equipe): sem cota nenhuma a fila de atrasadas só cresce e
+  //     volta como ouvidoria.
+  //  5. SEQUÊNCIA — escolhido o pacote, a ordem de visita é calculada
+  //     saindo do canteiro, não da primeira OS da lista.
+  //
+  // Sem a tabela canteiro no banco, os passos 2 e 5 simplesmente não
+  // acontecem e o resto continua funcionando.
+  const COTA_ATRASO=1;
+  const capacidade=eq=>Math.max(1,Math.round((eq.os_por_dia||4)*(1-(reserva||0)/100)));
+  const semAcento=s=>String(s??"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim().toUpperCase();
+  const canteiroDe=eq=>(canteiros||[]).find(k=>k.id===eq?.canteiro_id)||null;
+  // O que a equipe atende: as frentes marcadas no cadastro, mais as
+  // exceções TSS a TSS. Equipe sem frente nenhuma fica de fora do
+  // Sugerir — é o caso das que ainda estão como OUTROS.
+  const tiposDe=eq=>{
+    const t=Array.isArray(eq?.tipos)&&eq.tipos.length?eq.tipos:[eq?.tipo];
+    return t.filter(x=>x&&x!=="OUTROS");
+  };
+  const atende=(eq,c)=>{
+    if(!eq) return false;
+    if((eq.tss_bloqueado||[]).includes(c.tss)) return false;
+    return tiposDe(eq).includes(c.tipo)||(eq.tss_extra||[]).includes(c.tss);
+  };
+  const atendeCanteiro=(k,c)=>{
+    if(!k||!Array.isArray(k.municipios)||!k.municipios.length) return true;
+    return k.municipios.some(m=>semAcento(m)===semAcento(c.r["Município"]));
+  };
+  // Urgência primeiro, depois prazo. AGENDADO para hoje e OUVIDORIA
+  // furam a fila; atrasada vai para o fim.
+  const ordemPrazo=(a,b)=>
+    (b.agendado===dia?1:0)-(a.agendado===dia?1:0)
+    ||(b.tags.includes("OUVIDORIA")?1:0)-(a.tags.includes("OUVIDORIA")?1:0)
+    ||(a.min<0?1:0)-(b.min<0?1:0)
+    ||a.min-b.min;
+  // Ordem de visita a partir de um ponto de partida (o canteiro).
+  // Sem coordenada de partida, mantém a ordem em que foi escolhido.
+  const sequenciar=(lista,origem)=>{
+    if(!origem) return lista;
+    const resto=[...lista],out=[];let ref=origem;
+    while(resto.length){
+      let i=0,melhor=Infinity;
+      resto.forEach((c,j)=>{if(!c.coord)return;const d=distKm(ref,c.coord);if(d<melhor){melhor=d;i=j;}});
+      if(melhor===Infinity) i=0;
+      const c=resto.splice(i,1)[0];out.push(c);if(c.coord) ref=c.coord;
+    }
+    return out;
+  };
+
+  const sugerir=()=>{
+    const usados=new Set(noPlano);
+    const novas=[...plano];
+    // grupo de trabalho = mesma cobertura de serviço saindo do mesmo canteiro
+    const grupos=new Map();
+    for(const e of ativas){
+      const tp=tiposDe(e);
+      if(!tp.length) continue;                      // sem frente definida: só na mão
+      const g=[...tp].sort().join("|")+"§"+(e.canteiro_id||"");
+      if(!grupos.has(g)) grupos.set(g,[]);
+      grupos.get(g).push(e);
+    }
+    // especialista antes de polivalente: quem só faz uma frente escolhe
+    // primeiro, quem faz várias completa o dia com o que sobrou
+    const ordemGrupos=[...grupos.values()].sort((a,b)=>tiposDe(a[0]).length-tiposDe(b[0]).length);
+    for(const equipesG of ordemGrupos){
+      const livres=equipesG.filter(e=>capacidade(e)-daEquipe(e.nome).length>0);
+      if(!livres.length) continue;
+      const k=canteiroDe(livres[0]);
+      const partida=(k&&k.lat!=null&&k.lon!=null)?{lat:k.lat,lon:k.lon}:null;
+      const pool=disponiveis.filter(c=>!usados.has(chave(c))&&atendeCanteiro(k,c)&&equipesG.some(e=>atende(e,c)));
+      if(!pool.length) continue;
+
+      const porSetor=new Map();
+      for(const c of pool){const s=c.setor||"—";if(!porSetor.has(s))porSetor.set(s,[]);porSetor.get(s).push(c);}
+      const setores=[...porSetor.entries()].map(([s,lista])=>({s,lista:lista.sort(ordemPrazo),eq:[]}));
+      // reparte as equipes pelo volume: a próxima vai para o setor com
+      // mais serviço por equipe já alocada
+      for(const eq of livres){
+        const alvo=setores.reduce((a,b)=>
+          (b.lista.length/(b.eq.length+1))>(a.lista.length/(a.eq.length+1))?b:a);
+        alvo.eq.push(eq);
+      }
+
+      for(const st of setores){
+        for(const eq of st.eq){
+          const jaTem=daEquipe(eq.nome).length;
+          const cabe=Math.max(0,capacidade(eq)-jaTem);
+          if(!cabe) continue;
+          const escolhidas=[];let atrasadas=0;
+          while(escolhidas.length<cabe){
+            const resto=st.lista.filter(c=>!usados.has(chave(c))&&atende(eq,c)&&!(c.min<0&&atrasadas>=COTA_ATRASO));
+            if(!resto.length) break;
+            let prox;
+            if(!escolhidas.length){
+              prox=resto.find(c=>c.coord)||resto[0];        // semente: a mais urgente do setor
+            }else{
+              const ult=[...escolhidas].reverse().find(c=>c.coord);
+              const comCoord=ult?resto.filter(c=>c.coord):[];
+              prox=comCoord.length
+                ? comCoord.reduce((a,b)=>distKm(ult.coord,b.coord)<distKm(ult.coord,a.coord)?b:a)
+                : resto[0];
+            }
+            escolhidas.push(prox);usados.add(chave(prox));if(prox.min<0) atrasadas++;
+          }
+          sequenciar(escolhidas,partida).forEach((c,i)=>novas.push({dia,equipe:eq.nome,numero_os:c.os,tss:c.tss,ordem:jaTem+i,origem:"sugerido",
+            endereco:[String(c.r["Endereço"]||"").trim(),c.r["Número"]].filter(Boolean).join(", "),
+            bairro:c.r["Bairro"]||null,lat:c.coord?.lat??null,lon:c.coord?.lon??null,familia:c.r["Família"]||null,
+            autor_email:sess?.perfil?.email||null}));
+        }
+      }
+    }
+    setPlano(novas);
+    const n=novas.length-plano.length;
+    const nOutros=ativas.filter(e=>!tiposDe(e).length).length;
+    setAviso((n?`${n} serviços distribuídos — confira antes de salvar`:"Nada novo para distribuir")
+      +(nOutros?` · ${nOutros} equipe(s) sem frente definida ficaram de fora — abra o cadastro delas`:""));
+  };
+
+  const acrescentar=c=>{
+    if(!equipeSel) return;
+    const n=daEquipe(equipeSel.nome).length;
+    setPlano(p=>[...p,{dia,equipe:equipeSel.nome,numero_os:c.os,tss:c.tss,ordem:n,origem:"mao",
+      endereco:[String(c.r["Endereço"]||"").trim(),c.r["Número"]].filter(Boolean).join(", "),
+      bairro:c.r["Bairro"]||null,lat:c.coord?.lat??null,lon:c.coord?.lon??null,familia:c.r["Família"]||null,
+      autor_email:sess?.perfil?.email||null}]);
+  };
+  const tirar=p=>setPlano(l=>l.filter(x=>!(x.equipe===p.equipe&&x.numero_os===p.numero_os&&x.tss===p.tss)));
+  const mover=(p,d)=>setPlano(l=>{
+    const lista=l.filter(x=>x.equipe===p.equipe).sort((a,b)=>a.ordem-b.ordem);
+    const i=lista.findIndex(x=>x.numero_os===p.numero_os&&x.tss===p.tss);
+    const j=i+d; if(j<0||j>=lista.length) return l;
+    [lista[i],lista[j]]=[lista[j],lista[i]];
+    lista.forEach((x,k)=>x.ordem=k);
+    return [...l.filter(x=>x.equipe!==p.equipe),...lista];
+  });
+  const salvar=async()=>{
+    setSalvando(true);setAviso("");
+    try{
+      const limpo=plano.map(p=>({dia,equipe:p.equipe,numero_os:p.numero_os,tss:p.tss,ordem:p.ordem,origem:p.origem||"mao",
+        endereco:p.endereco||null,bairro:p.bairro||null,lat:p.lat??null,lon:p.lon??null,familia:p.familia||null,
+        autor_email:sess?.perfil?.email||null}));
+      await salvarItinerario(dia,limpo,sess);
+      setAviso("Itinerário salvo ✓");
+    }catch(e){setAviso("Erro ao salvar: "+(e.message||e));}
+    setSalvando(false);
+  };
+  // Texto para mandar ao líder. Link do mapa por parada: com
+  // coordenada abre no ponto, sem coordenada abre a busca por texto.
+  const copiar=eq=>{
+    const l=daEquipe(eq.nome);
+    const k=canteiroDe(eq);
+    // Rota do dia saindo do canteiro. O Google aceita poucos pontos
+    // intermediários, então só entra quem tem coordenada.
+    const pts=l.filter(p=>p.lat!=null).map(p=>`${p.lat},${p.lon}`);
+    const rota=(pts.length&&k&&k.lat!=null)
+      ? `https://www.google.com/maps/dir/?api=1&origin=${k.lat},${k.lon}&destination=${pts[pts.length-1]}`
+        +(pts.length>1?`&waypoints=${pts.slice(0,-1).join("|")}`:"")+"&travelmode=driving"
+      : null;
+    const txt=[`*${eq.nome}* — ${fmtDiaShort(dia)}`+(k?`\nSaída: ${k.nome}`:""),
+      ...(rota?[`Rota do dia: ${rota}`]:[]),
+      ...l.map((p,i)=>{
+      const link=p.lat?`https://www.google.com/maps/search/?api=1&query=${p.lat},${p.lon}`
+        :`https://www.google.com/maps/search/?api=1&query=`+encodeURIComponent(`${p.endereco}, ${p.bairro||""}, SAO PAULO`);
+      const c=porChave.get(String(p.numero_os)+"§"+String(p.tss));
+      return `${i+1}. OS ${p.numero_os} — ${p.tss}\n${p.endereco}${p.bairro?" — "+p.bairro:""}\n${link}${c?.nota?"\n⚠ "+c.nota:""}`;
+    })].join("\n\n");
+    navigator.clipboard?.writeText(txt).then(()=>setAviso(`Itinerário de ${eq.nome} copiado`),()=>setAviso("Não consegui copiar"));
+  };
+
+  if(semTabela) return <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:24,color:C.textMuted,fontSize:13,lineHeight:1.6}}>
+    As tabelas do itinerário ainda não existem no banco. Rode <code>sql/itinerario.sql</code> no Supabase e depois <code>python3 scripts/semear_itinerario.py</code>, que cadastra as equipes a partir do que elas executaram.
+  </div>;
+  if(!equipes) return <div style={{color:C.textDim,fontSize:13,padding:24}}>Carregando equipes…</div>;
+
+  const bt=(txt,fn,cor,on=true)=><button onClick={fn} disabled={!on}
+    style={{fontSize:12,fontWeight:700,padding:"6px 14px",borderRadius:RAIO,cursor:on?"pointer":"default",
+      border:`1px solid ${cor}55`,background:cor+"14",color:cor,opacity:on?1:.45}}>{txt}</button>;
+  const td={padding:"7px 10px",borderBottom:`1px solid ${C.border}`,fontSize:12.5};
+
+  return <div style={{animation:"fadeIn 0.35s ease"}}>
+    <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",padding:"10px 16px",background:C.card,
+      borderRadius:10,border:`1px solid ${C.border}`,marginBottom:14}}>
+      <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:C.textDim}}>Dia
+        <input type="date" value={dia} onChange={e=>setDia(e.target.value)}
+          style={{fontSize:12,fontFamily:FONTE_UI,color:C.accent,background:C.accentBg,border:"1px solid rgba(59,130,246,0.35)",
+            borderRadius:RAIO,padding:"3px 8px",colorScheme:"dark"}}/></label>
+      <span style={{width:1,height:14,background:C.border}}/>
+      <span style={{fontSize:12,color:C.textDim}}>{plano.length} serviços em {new Set(plano.map(p=>p.equipe)).size} equipes ·
+        {" "}{disponiveis.length} livres · <span style={{color:C.amber}}>{travadas.length} travadas</span></span>
+      <div style={{flex:1}}/>
+      <label title="Parte do dia guardada para as prioridades que a Sabesp manda no meio do dia"
+        style={{display:"flex",alignItems:"center",gap:5,fontSize:12,color:C.textDim}}>Reserva
+        <input type="number" min={0} max={80} step={5} value={reserva}
+          onChange={e=>setReserva(Math.max(0,Math.min(80,+e.target.value||0)))}
+          style={{width:50,fontSize:12,fontFamily:FONTE_UI,color:C.amber,background:"transparent",
+            border:`1px solid ${C.border}`,borderRadius:RAIO,padding:"3px 6px"}}/>%</label>
+      {bt("Sugerir",sugerir,C.accent)}
+      {bt(salvando?"Salvando…":"Salvar",salvar,C.green,!salvando&&!!sess)}
+      {bt("Limpar",()=>setPlano([]),C.red,plano.length>0)}
+    </div>
+    {aviso&&<div style={{fontSize:12.5,marginBottom:12,color:aviso.startsWith("Erro")?C.red:C.green}}>{aviso}</div>}
+
+    <div style={{display:"grid",gridTemplateColumns:"260px 1fr",gap:14,alignItems:"start"}}>
+      {/* equipes */}
+      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,overflow:"hidden"}}>
+        <div style={{padding:"10px 14px",borderBottom:`1px solid ${C.border}`,fontSize:10,letterSpacing:"0.18em",
+          textTransform:"uppercase",color:C.textDim}}>Equipes</div>
+        {ativas.length===0&&<div style={{padding:14,fontSize:12.5,color:C.textDim}}>Nenhuma equipe ativa cadastrada.</div>}
+        {["VAZAMENTO","LIGAÇÃO","ESGOTO","DESOBSTRUÇÃO","REPOSIÇÃO","ASFALTO","OBRAS","MOTO","OUTROS"]
+          .filter(t=>ativas.some(e=>e.tipo===t)).map(t=><div key={t}>
+          <div style={{padding:"6px 14px",fontSize:10.5,letterSpacing:"0.1em",color:C.textDim,background:C.headerBg}}>{t}</div>
+          {ativas.filter(e=>e.tipo===t).map(e=>{const n=daEquipe(e.nome).length;const cap=capacidade(e);const cheio=n>=cap;
+            return <div key={e.nome} onClick={()=>setSel(e.nome)}
+              style={{padding:"8px 14px",cursor:"pointer",display:"flex",gap:8,alignItems:"center",
+                background:sel===e.nome?C.sideActive:"transparent",borderLeft:`2px solid ${sel===e.nome?C.accent:"transparent"}`}}>
+              <span style={{flex:1,minWidth:0,fontSize:12.5,color:sel===e.nome?C.text:C.textMuted,overflow:"hidden",
+                textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={e.nome}>{e.nome.replace(/^.*?-\s*/,"")}</span>
+              <span style={{...numStyle,fontSize:11.5,color:n?(cheio?C.green:C.amber):C.textDim}}>{n}/{cap}</span>
+            </div>;})}
+        </div>)}
+      </div>
+
+      {/* o dia da equipe escolhida */}
+      <div style={{display:"flex",flexDirection:"column",gap:14}}>
+        <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,overflow:"hidden"}}>
+          <div style={{padding:"10px 14px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:10}}>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:13.5,fontWeight:700,color:C.text}}>{equipeSel?equipeSel.nome:"Escolha uma equipe"}</div>
+              {equipeSel&&<div style={{fontSize:11.5,color:C.textDim}}>{equipeSel.tipo} · cabe {capacidade(equipeSel)} no dia{canteiroDe(equipeSel)?" · sai de "+canteiroDe(equipeSel).nome:""}{equipeSel.lider?" · "+equipeSel.lider:""}</div>}
+            </div>
+            {equipeSel&&bt("Cadastro",()=>setEditando(equipeSel),C.accent)}
+            {equipeSel&&daEquipe(equipeSel.nome).length>0&&bt("Copiar para o WhatsApp",()=>copiar(equipeSel),C.green)}
+          </div>
+          {equipeSel&&<table style={{width:"100%",borderCollapse:"collapse"}}>
+            <tbody>{daEquipe(equipeSel.nome).map((p,i)=>{
+              const c=porChave.get(String(p.numero_os)+"§"+String(p.tss));
+              return <tr key={p.numero_os+p.tss}>
+                <td style={{...td,...numStyle,width:28,color:C.textDim}}>{i+1}</td>
+                <td style={{...td,...numStyle,color:C.accent,fontWeight:600,whiteSpace:"nowrap"}}>{p.numero_os}</td>
+                <td style={td}>{p.tss}
+                  <div style={{fontSize:11.5,color:C.textDim}}>
+                    <span onClick={()=>c&&abrirNoMapa(c.r)} style={{cursor:c?"pointer":"default",textDecoration:c?"underline":"none",
+                      textDecorationColor:p.lat?C.green:C.textDim,textUnderlineOffset:3}}>
+                      {p.lat?"📍":"🔍"} {p.endereco}</span>{p.bairro?" — "+p.bairro:""}</div>
+                  {c?.nota&&<div style={{fontSize:11.5,color:COR_NOTA}}>⚠ {c.nota}</div>}</td>
+                <td style={{...td,...numStyle,whiteSpace:"nowrap",color:c&&c.min<0?C.red:C.textMuted}}>{c?c.r["Tempo Residual"]:""}</td>
+                <td style={{...td,whiteSpace:"nowrap",color:C.textDim}}>
+                  <span onClick={()=>mover(p,-1)} style={{cursor:"pointer",padding:"0 4px"}}>↑</span>
+                  <span onClick={()=>mover(p,1)} style={{cursor:"pointer",padding:"0 4px"}}>↓</span>
+                  <span onClick={()=>tirar(p)} title="Tirar do itinerário" style={{cursor:"pointer",padding:"0 4px",color:C.red}}>✕</span>
+                </td></tr>;})}
+              {daEquipe(equipeSel.nome).length===0&&<tr><td style={{...td,color:C.textDim}} colSpan={5}>Nada no dia ainda. Use Sugerir, ou acrescente da lista abaixo.</td></tr>}
+            </tbody></table>}
+        </div>
+
+        {/* candidatas do tipo da equipe */}
+        {equipeSel&&<div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,overflow:"hidden"}}>
+          <div style={{padding:"10px 14px",borderBottom:`1px solid ${C.border}`,fontSize:10,letterSpacing:"0.18em",
+            textTransform:"uppercase",color:C.textDim}}>Livres para esta equipe — as mais urgentes primeiro</div>
+          <div style={{maxHeight:420,overflowY:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse"}}>
+              <tbody>{disponiveis.filter(c=>atende(equipeSel,c)).sort(ordemPrazo).slice(0,60).map(c=>
+                <tr key={chave(c)}>
+                  <td style={{...td,width:28}}><span onClick={()=>acrescentar(c)} title="Pôr nesta equipe"
+                    style={{cursor:"pointer",color:C.accent,border:`1px solid ${C.border}`,borderRadius:RAIO,padding:"0 6px"}}>+</span></td>
+                  <td style={{...td,...numStyle,color:C.accent,fontWeight:600,whiteSpace:"nowrap"}}>{c.os}</td>
+                  <td style={td}>{c.tss}<div style={{fontSize:11.5,color:C.textDim}}>
+                    {c.coord?"📍":"🔍"} {String(c.r["Endereço"]).trim()}, {c.r["Número"]} — {c.r["Bairro"]}</div>
+                    {c.agendado===dia&&<div style={{fontSize:11,color:"#34d399"}}>AGENDADO para hoje</div>}</td>
+                  <td style={{...td,...numStyle,whiteSpace:"nowrap",color:c.min<0?C.red:C.green}}>{c.r["Tempo Residual"]}</td>
+                </tr>)}
+                {disponiveis.filter(c=>atende(equipeSel,c)).length===0&&
+                  <tr><td style={{...td,color:C.textDim}} colSpan={4}>Nenhuma OS livre que esta equipe atenda hoje.</td></tr>}
+              </tbody></table>
+          </div>
+        </div>}
+
+        {travadas.length>0&&<div style={{fontSize:11.5,color:C.textDim,lineHeight:1.6}}>
+          <b style={{color:C.amber}}>Fora do itinerário de propósito:</b> {travadas.filter(c=>c.trava).length} com impedimento na nota
+          (LAJE, GEOINFRA, CONVIAS) e {travadas.filter(c=>!c.trava).length} agendadas para outro dia.
+        </div>}
+      </div>
+    </div>
+    {editando&&<EquipeModal equipe={editando} equipes={ativas} canteiros={canteiros} tssTipo={tssTipo} sess={sess}
+      onClose={()=>setEditando(null)}
+      onSalvou={lista=>{
+        const m=new Map(lista.map(e=>[e.nome,e]));
+        setEquipes(l=>l.map(x=>m.get(x.nome)||x));setEditando(null);setSel(lista[0].nome);
+        setAviso(lista.length>1?`Cadastro salvo e aplicado a ${lista.length-1} outra(s) equipe(s) ✓`
+          :`Cadastro de ${lista[0].nome} salvo ✓`);}}/>}
+  </div>;
+}
+
 function NotaModal({linha,nota,sess,onClose,onSalvou}){
   const os=String(linha["Número OS"]||"").trim();
   const tss=String(linha["TSS"]||"").trim();
@@ -3842,18 +4481,18 @@ export default function App(){
   return <SessaoCtx.Provider value={sess}><div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:FONTE_UI,display:"flex"}}>
     {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed} nNotas={notasDoPendente.length} onNotas={t=>{setFiltroNota(t);setShowNotas(true);}} tagsNotas={tagsNotas} onBuscarOS={buscarOS}/>}
     <div style={{flex:1,padding:"24px 16px",overflowY:"auto",minHeight:"100vh"}}>
-      <div style={{maxWidth:activeTab==="producao"?1180:960,margin:"0 auto"}}>
+      <div style={{maxWidth:activeTab==="producao"||activeTab==="itinerario"?1180:960,margin:"0 auto"}}>
         <div style={{marginBottom:24,textAlign:"center"}}>
           <h1 style={{fontSize:17,fontWeight:500,margin:0,letterSpacing:"0.2em",textTransform:"uppercase",color:C.text,fontFamily:FONTE_NUM}}>
-            {activeTab==="pendente"?"Controle de Prazos — OS Pendentes":activeTab==="carteira"?"Acompanhamento de Carteira":"Produção por Equipes"}
+            {activeTab==="pendente"?"Controle de Prazos — OS Pendentes":activeTab==="carteira"?"Acompanhamento de Carteira":activeTab==="itinerario"?"Itinerário das Equipes":"Produção por Equipes"}
           </h1>
           <p style={{color:C.textDim,margin:"6px 0 0",fontSize:13}}>
-            {activeTab==="pendente"?"Análise por família de serviço":activeTab==="carteira"?"Carteira diária por frente de serviço":"Execuções confirmadas por equipe e tipo de serviço"}
+            {activeTab==="pendente"?"Análise por família de serviço":activeTab==="carteira"?"Carteira diária por frente de serviço":activeTab==="itinerario"?"O dia de cada equipe — sugerido pelo sistema, fechado por você":"Execuções confirmadas por equipe e tipo de serviço"}
           </p>
           {/* Tabs */}
           <div style={{display:"flex",justifyContent:"center",gap:4,marginTop:14}}>
             {[{id:"pendente",label:"Pendente",icon:"📋"},{id:"carteira",label:"Carteira",icon:"📊"},
-              ...(sess?.perfil?.pode_producao?[{id:"producao",label:"Produção",icon:"👷"}]:[])].map(tab=>
+              ...(sess?.perfil?.pode_producao?[{id:"producao",label:"Produção",icon:"👷"},{id:"itinerario",label:"Itinerário",icon:"🚚"}]:[])].map(tab=>
               <button key={tab.id} onClick={()=>setActiveTab(tab.id)}
                 style={{padding:"8px 24px",borderRadius:8,fontSize:13,fontWeight:700,cursor:"pointer",border:activeTab===tab.id?`1px solid rgba(59,130,246,0.4)`:`1px solid ${C.border}`,
                   background:activeTab===tab.id?C.accentBg:"transparent",color:activeTab===tab.id?C.accent:C.textMuted,transition:"all 0.15s",display:"flex",alignItems:"center",gap:6}}
@@ -3872,6 +4511,7 @@ export default function App(){
         {toast&&<div style={{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",zIndex:2000,padding:"10px 24px",borderRadius:10,fontSize:13,fontWeight:600,maxWidth:"90vw",wordBreak:"break-word",background:toast.includes("Erro")?"rgba(239,68,68,0.15)":"rgba(16,185,129,0.15)",color:toast.includes("Erro")?C.red:C.green,border:`1px solid ${toast.includes("Erro")?C.redBorder:C.greenBorder}`,backdropFilter:"blur(8px)",animation:"fadeIn 0.2s ease"}}>{toast}</div>}
         {activeTab==="carteira"&&<CarteiraView rawRows={rawRows} sess={sess}/>}
         {activeTab==="producao"&&sess?.perfil?.pode_producao&&<ProducaoView sess={sess} onLogout={sair}/>}
+        {activeTab==="itinerario"&&sess?.perfil?.pode_producao&&<ItinerarioView rawRows={rawRows} notas={notas} sess={sess}/>}
         {showLogin&&<LoginModal onClose={()=>setShowLogin(false)} onOk={entrar}/>}
         {activeTab==="pendente"&&!rawRows&&(sess?.perfil?.pode_importar
           ?<div onDragOver={e=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)} onDrop={onDrop}
