@@ -1300,6 +1300,24 @@ const TIPOS_FAM=[            // usado quando a TSS ainda não tem tipo medido
 const tipoDoServico=(tss,familia,mapa)=>mapa?.[String(tss||"").trim()]
   ||(TIPOS_FAM.find(([re])=>re.test(String(tss||"")+" "+String(familia||"")))||[])[1]||"OUTROS";
 
+// O que o serviço É, não quem costuma executá-lo. A tabela tss_tipo mede
+// quem executou (o tipo de equipe que mais fechou aquela TSS), e equipe de
+// vazamento fecha ligação, reposição e compactação no meio do caminho —
+// por isso "TRANSFORMAÇÃO LIG ..." aparecia como VAZAMENTO. Aqui o tipo
+// sai das mesmas listas que o resto do sistema já usa (TSS de ligação e
+// famílias de cada frente). Devolve null quando a regra não decide; aí
+// vale o medido. CAVALETE fica de fora de propósito: é MOTO para umas
+// equipes e VAZAMENTO para outras, e a medição resolve melhor.
+function tipoPorNatureza(tss,familia){
+  const t=String(tss||"");
+  if(matchTssLigacao(t)) return "LIGAÇÃO";
+  if(/DESOBSTR/.test(norm(t))) return "DESOBSTRUÇÃO";
+  if(matchFamiliaReposicao(familia)) return "REPOSIÇÃO";
+  if(matchFamiliaEsgoto(familia)) return "ESGOTO";
+  if(matchFamiliaVazamento(familia)) return "VAZAMENTO";
+  return null;
+}
+
 // "-3d,4h,10m" vira minutos (negativo = fora do prazo). Serve para
 // ordenar por urgência de verdade, não pelo texto.
 function minutosResiduais(txt){
@@ -1556,6 +1574,9 @@ function ItinerarioView({rawRows,notas,sess}){
   const [canteiros,setCanteiros]=useState([]);
   const [reserva,setReserva]=useState(0);         // % do dia guardado para urgencia da Sabesp
   const [editando,setEditando]=useState(null);   // equipe aberta no cadastro
+  const [famPorTss,setFamPorTss]=useState({});   // norm(TSS) → família, do histórico do pendente
+  useEffect(()=>{let vivo=true;fetchTssToFamiliaMap().then(m=>{if(vivo)setFamPorTss(m||{});}).catch(()=>{});
+    return()=>{vivo=false;};},[]);
 
   useEffect(()=>{(async()=>{
     try{const [e,t,k]=await Promise.all([fetchEquipes(),fetchTssTipo(),fetchCanteiros()]);
@@ -1569,6 +1590,20 @@ function ItinerarioView({rawRows,notas,sess}){
     carregarRuas(rawRows.map(r=>ruaKey(r["Endereço"]))).finally(()=>{if(vivo)setCoordVer(v=>v+1);});
     return()=>{vivo=false;};},[rawRows]);
 
+  // Tipo de cada TSS: primeiro o que o serviço é (família / lista de ligação),
+  // depois o que foi medido. É este mapa que o Sugerir e o cadastro usam.
+  const tssTipoEf=useMemo(()=>{
+    const fam=new Map(Object.entries(famPorTss||{}));
+    const nomes=new Set(Object.keys(tssTipo||{}));
+    for(const r of rawRows||[]){
+      const t=String(r["TSS"]||"").trim();if(!t) continue;
+      if(r["Família"]) fam.set(norm(t),r["Família"]);
+      if(familiaTssVisivel(r["Família"],t)) nomes.add(t);
+    }
+    const out={};
+    for(const t of nomes){const n=tipoPorNatureza(t,fam.get(norm(t)))||tssTipo?.[t];if(n) out[t]=n;}
+    return out;
+  },[famPorTss,tssTipo,rawRows]);
   const notaDe=useMemo(()=>{
     const m=new Map();const dig=v=>String(v??"").replace(/\D/g,"");
     for(const n of notas||[]) m.set(dig(n.numero_os)+"§"+String(n.tss).trim(),n);
@@ -1587,11 +1622,11 @@ function ItinerarioView({rawRows,notas,sess}){
         const c=acharCoord(r["Endereço"],r["Número"],r["SF"]);
         return {r,os,tss,tags,trava,agendado,nota:n?.nota||null,
           setor:String(r["SF"]??"").trim(),
-          tipo:tipoDoServico(tss,r["Família"],tssTipo),
+          tipo:tipoDoServico(tss,r["Família"],tssTipoEf),
           min:minutosResiduais(r["Tempo Residual"]),
           coord:c?{lat:c.lat,lon:c.lon,exata:c.tipo==="exato"||c.ligacao}:null};
       });
-  },[rawRows,notaDe,tssTipo,coordVer]);
+  },[rawRows,notaDe,tssTipoEf,coordVer]);
 
   const chave=x=>x.os+"§"+x.tss;
   const noPlano=useMemo(()=>new Set(plano.map(p=>String(p.numero_os).trim()+"§"+String(p.tss).trim())),[plano]);
@@ -1904,7 +1939,7 @@ function ItinerarioView({rawRows,notas,sess}){
         </div>}
       </div>
     </div>
-    {editando&&<EquipeModal equipe={editando} equipes={ativas} canteiros={canteiros} tssTipo={tssTipo} sess={sess}
+    {editando&&<EquipeModal equipe={editando} equipes={ativas} canteiros={canteiros} tssTipo={tssTipoEf} sess={sess}
       onClose={()=>setEditando(null)}
       onSalvou={lista=>{
         const m=new Map(lista.map(e=>[e.nome,e]));
