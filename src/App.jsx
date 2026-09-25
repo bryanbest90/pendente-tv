@@ -4482,6 +4482,10 @@ export default function App(){
   const [sess,setSess]=useState(null);          // sessão do Supabase Auth (só a aba Produção usa)
   const [showLogin,setShowLogin]=useState(false);
   const inputRef=useRef();
+  // Ref própria do botão do cabeçalho: quando não há pendente nenhum, a
+  // área de arrastar também está na tela, e duas <input> na mesma ref
+  // fariam o botão abrir a outra — e pular a confirmação.
+  const impRef=useRef();
 
   // Retoma a sessão salva. O access_token dura 1h; se venceu, renova pelo
   // refresh_token — senão o usuário teria que logar de novo a cada hora.
@@ -4768,6 +4772,19 @@ export default function App(){
                 style={{fontSize:12,color:C.amber,cursor:"pointer",fontWeight:700,padding:"4px 14px",borderRadius:6,border:"1px solid rgba(245,158,11,0.4)",background:C.amberBg,display:"flex",alignItems:"center",gap:6,animation:"gasPulse 2s infinite"}}>
                 🔥 Gás ({gas.alerts.length})
               </button>}
+              {/* Importar o pendente à mão. O robô faz isso sozinho; este
+                  botão é para quando o GEOCALL falha e você já tem o xlsx.
+                  Substitui o pendente inteiro, igual ao robô — daí a
+                  confirmação, que diz quantas OS estão no ar agora. */}
+              {sess?.perfil?.pode_importar&&<>
+                <input ref={impRef} type="file" accept=".xlsx,.xls" style={{display:"none"}}
+                  onChange={e=>{const f=e.target.files[0];e.target.value="";
+                    if(f&&window.confirm(`Substituir o pendente atual (${rawRows?.length??0} OS) pelo arquivo ${f.name}?`)) handleFile(f);}}/>
+                <button onClick={()=>impRef.current?.click()} disabled={uploading}
+                  title="Subir um pendente .xlsx do GEOCALL, substituindo o que está no ar"
+                  style={{fontSize:12,color:C.textMuted,cursor:uploading?"default":"pointer",fontWeight:600,padding:"4px 12px",
+                    borderRadius:6,border:`1px solid ${C.border}`,background:"transparent",opacity:uploading?0.5:1}}>
+                  {uploading?"Enviando…":"📥 Importar pendente"}</button></>}
               {sess?.perfil?.pode_importar&&<button onClick={()=>setShowOuvRodar(true)} title="Ler ouvidorias do e-mail e marcar a etiqueta"
                 style={{fontSize:12,color:corDaTag("OUVIDORIA"),cursor:"pointer",fontWeight:600,padding:"4px 12px",borderRadius:6,border:`1px solid ${corDaTag("OUVIDORIA")}55`,background:"transparent"}}>Ouvidoria</button>}
               <button onClick={refresh} style={{fontSize:12,color:C.accent,cursor:"pointer",fontWeight:600,padding:"4px 12px",borderRadius:6,border:"1px solid rgba(59,130,246,0.3)",background:C.accentBg}}>↻ Atualizar</button>
