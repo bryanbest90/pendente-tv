@@ -195,6 +195,13 @@ const VAZAMENTO_FAMILIAS_NORM = VAZAMENTO_FAMILIAS.map(norm);
 const CAVALETE_FAMILIAS_NORM = CAVALETE_FAMILIAS.map(norm);
 const ESGOTO_FAMILIAS_NORM = ESGOTO_FAMILIAS.map(norm);
 const REPOSICAO_FAMILIAS_NORM = REPOSICAO_FAMILIAS.map(norm);
+// As TSS de asfalto já estavam escritas no subgrupo ASFALTO da família
+// REPOSIÇÃO. Reaproveitadas aqui para a frente ASFALTO do itinerário:
+// sem isso, tudo que é REPOSIÇÃO cai na frente REPOSIÇÃO e a equipe de
+// asfalto nunca recebe serviço na sugestão.
+const TSS_ASFALTO_NORM = new Set(
+  ((SUBGRUPOS["REPOSIÇÃO"]||[]).find(g=>g.nome==="ASFALTO")?.tss||[]).map(norm));
+const matchTssAsfalto = tss => TSS_ASFALTO_NORM.has(norm(tss||""));
 const matchFamiliaVazamento = fam => VAZAMENTO_FAMILIAS_NORM.includes(norm(fam||""));
 const matchFamiliaCavalete = fam => CAVALETE_FAMILIAS_NORM.includes(norm(fam||""));
 const matchFamiliaEsgoto = fam => ESGOTO_FAMILIAS_NORM.includes(norm(fam||""));
@@ -1300,22 +1307,69 @@ const TIPOS_FAM=[            // usado quando a TSS ainda não tem tipo medido
 const tipoDoServico=(tss,familia,mapa)=>mapa?.[String(tss||"").trim()]
   ||(TIPOS_FAM.find(([re])=>re.test(String(tss||"")+" "+String(familia||"")))||[])[1]||"OUTROS";
 
-// O que o serviço É, não quem costuma executá-lo. A tabela tss_tipo mede
-// quem executou (o tipo de equipe que mais fechou aquela TSS), e equipe de
-// vazamento fecha ligação, reposição e compactação no meio do caminho —
-// por isso "TRANSFORMAÇÃO LIG ..." aparecia como VAZAMENTO. Aqui o tipo
-// sai das mesmas listas que o resto do sistema já usa (TSS de ligação e
-// famílias de cada frente). Devolve null quando a regra não decide; aí
-// vale o medido. CAVALETE fica de fora de propósito: é MOTO para umas
-// equipes e VAZAMENTO para outras, e a medição resolve melhor.
-function tipoPorNatureza(tss,familia){
-  const t=String(tss||"");
+/* ── De que frente é cada TSS ──────────────────────────────
+   Três informações dizem coisas diferentes e por isso entram em
+   ordem diferente:
+
+   1. O NOME DA TSS não deixa dúvida em alguns casos. "TRANSFORMAÇÃO
+      LIG ..." é ligação, "DESOBSTRUIR ..." é desobstrução, "REPOR
+      CAPA ASFALTICA" é asfalto — não importa quem executou. Essas
+      valem sempre.
+   2. A MEDIÇÃO (tss_tipo: que tipo de equipe mais fechou a TSS) vale
+      quando é firme. FALTA DE ÁGUA LOCAL foi 100% da MOTO em 438
+      execuções; PASSAR RAMAL DE ESGOTO PARA NOVA REDE, 100% de
+      OBRAS. Palpite por família não tem o que corrigir nisso.
+   3. A FAMÍLIA entra quando a medição está dividida, que é justo
+      onde ela errava: LIGAÇÃO DE ÁGUA S/V aparecia como VAZAMENTO
+      com 0,69 de confiança só porque a equipe de vazamento fecha
+      ligação no meio do caminho.
+
+   Acima de tudo isso vem a sua correção à mão (tss_tipo.tipo_manual,
+   editada no botão Frentes): medição e família são palpite, e palpite
+   não discute com quem viu o serviço.
+
+   CAVALETE e HIDRÔMETRO ficam de fora das regras de família de
+   propósito: são MOTO para umas equipes e VAZAMENTO para outras, e
+   a medição resolve melhor (0,85 a 1,00 de confiança).
+   ───────────────────────────────────────────────────────── */
+const MEDICAO_FIRME=0.8;
+// Vale sempre — o nome da TSS já diz o que o serviço é.
+function tipoPorTss(tss){
+  const t=String(tss||""), n=norm(t);
   if(matchTssLigacao(t)) return "LIGAÇÃO";
-  if(/DESOBSTR/.test(norm(t))) return "DESOBSTRUÇÃO";
+  if(/DESOBSTR/.test(n)) return "DESOBSTRUÇÃO";
+  if(matchTssAsfalto(t)) return "ASFALTO";
+  // NIVELAR POÇO / NIVELAR CAIXA DE PARADA: a frente das equipes NPV.
+  // Só o que começa com NIVELAR, que não deixa dúvida — CONSTRUIR e
+  // RECONSTRUIR POÇO são obras (8 de 9 execuções), e DESCOBRIR,
+  // CONSERTAR e TAMPÃO você marca no botão Frentes se quiser.
+  if(/^NIVELAR /.test(n)) return "NIVELAMENTO";
+  return null;
+}
+// Só quando a medição está dividida (ou não existe).
+function tipoPorFamilia(familia){
   if(matchFamiliaReposicao(familia)) return "REPOSIÇÃO";
   if(matchFamiliaEsgoto(familia)) return "ESGOTO";
   if(matchFamiliaVazamento(familia)) return "VAZAMENTO";
   return null;
+}
+// med = {tipo,conf,manual} da tabela tss_tipo, ou nada.
+function frenteDaTss(tss,familia,med){
+  return med?.manual                                   // sua correção manda
+    || tipoPorTss(tss)
+    || (med && med.conf>=MEDICAO_FIRME ? med.tipo : null)
+    || tipoPorFamilia(familia)
+    || med?.tipo
+    || null;
+}
+// De onde veio a frente — para a tela dizer por que a TSS está ali.
+function origemDaFrente(tss,familia,med){
+  if(med?.manual) return "sua correção";
+  if(tipoPorTss(tss)) return "nome do serviço";
+  if(med&&med.conf>=MEDICAO_FIRME) return `medido ${Math.round(med.conf*100)}%`;
+  if(tipoPorFamilia(familia)) return "família";
+  if(med?.tipo) return `medido ${Math.round((med.conf??1)*100)}%`;
+  return "—";
 }
 
 // "-3d,4h,10m" vira minutos (negativo = fora do prazo). Serve para
@@ -1337,10 +1391,35 @@ async function fetchEquipes(){
   return r.json();
 }
 async function fetchTssTipo(){
-  const r=await fetch(SUPABASE_URL+"/rest/v1/tss_tipo?select=tss,tipo,confianca",{headers:HEADERS});
+  // tipo_manual pode não existir ainda (sql/frente_tss.sql): se a coluna
+  // faltar o PostgREST devolve 400, e aí lemos sem ela.
+  let r=await fetch(SUPABASE_URL+"/rest/v1/tss_tipo?select=tss,tipo,confianca,tipo_manual",{headers:HEADERS});
+  if(!r.ok) r=await fetch(SUPABASE_URL+"/rest/v1/tss_tipo?select=tss,tipo,confianca",{headers:HEADERS});
   if(!r.ok) return {};
-  const out={};for(const x of await r.json()) out[String(x.tss).trim()]=x.tipo;
+  // A confiança vem junto: é ela que decide quando a medição manda.
+  const out={};for(const x of await r.json())
+    out[String(x.tss).trim()]={tipo:x.tipo,conf:x.confianca==null?1:+x.confianca,manual:x.tipo_manual||null};
   return out;
+}
+// Grava (ou apaga, com tipo=null) a frente escolhida à mão para uma TSS.
+// Upsert porque a TSS pode nunca ter sido executada e portanto não ter
+// linha em tss_tipo — é justamente o caso das que chegam novas.
+async function salvarFrenteTss(tss,tipo,sess){
+  const cab=authHeaders(await tokenFresco(sess));
+  const nome=String(tss).trim();
+  // PATCH primeiro, e só na coluna manual: a medição fica intacta, para
+  // você poder voltar atrás sem perder o que foi contado no campo.
+  const r=await fetch(SUPABASE_URL+`/rest/v1/tss_tipo?tss=eq.${encodeURIComponent(nome)}`,
+    {method:"PATCH",headers:{...cab,"Prefer":"return=representation"},
+     body:JSON.stringify({tipo_manual:tipo||null})});
+  if(!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  if((await r.json()).length||!tipo) return;
+  // TSS que nunca foi executada não tem linha: nasce agora, sem medição
+  // (confiança 0), só com a sua escolha.
+  const p=await fetch(SUPABASE_URL+"/rest/v1/tss_tipo",{method:"POST",
+    headers:{...cab,"Prefer":"return=minimal"},
+    body:JSON.stringify([{tss:nome,tipo,confianca:0,execucoes:0,tipo_manual:tipo}])});
+  if(!p.ok) throw new Error(`${p.status} ${await p.text()}`);
 }
 async function fetchCanteiros(){
   const r=await fetch(SUPABASE_URL+"/rest/v1/canteiro?select=*&order=nome.asc",{headers:HEADERS});
@@ -1364,7 +1443,7 @@ async function salvarItinerario(dia,linhas,sess){
 
 // Frentes na ordem em que a operação pensa nelas. OUTROS não entra:
 // é o estado de "ainda não definido", não uma frente de verdade.
-const TIPOS_ORD=["VAZAMENTO","LIGAÇÃO","ESGOTO","DESOBSTRUÇÃO","REPOSIÇÃO","ASFALTO","OBRAS","MOTO"];
+const TIPOS_ORD=["VAZAMENTO","LIGAÇÃO","ESGOTO","DESOBSTRUÇÃO","NIVELAMENTO","REPOSIÇÃO","ASFALTO","OBRAS","MOTO"];
 
 async function salvarEquipe(nome,campos,sess){
   const cab=authHeaders(await tokenFresco(sess));
@@ -1560,6 +1639,80 @@ function EquipeModal({equipe,equipes,canteiros,tssTipo,sess,onClose,onSalvou}){
   </div>;
 }
 
+/* ── Frente de cada serviço ────────────────────────────────
+   A família continua sendo a que a Sabesp manda: a aba Pendente não
+   muda uma linha. O que se corrige aqui é só a FRENTE — de que
+   equipe é aquele serviço no itinerário. São duas perguntas
+   diferentes que estavam presas numa só: NIVELAR POÇO DE
+   INSPEÇÃO/VISITA é família de esgoto e frente de nivelamento, e
+   antes disso não havia como dizer as duas coisas.
+
+   A correção vale para o sistema todo, não para uma equipe: se você
+   marcou que a TSS é de NIVELAMENTO, ela é de nivelamento para todas.
+   A exceção de uma equipe só continua sendo no cadastro dela.
+   ───────────────────────────────────────────────────────── */
+function FrenteTssModal({linhas,sess,onClose,onSalvou}){
+  const [busca,setBusca]=useState("");
+  const [so,setSo]=useState(false);               // só as corrigidas à mão
+  const [indo,setIndo]=useState(null);
+  const [erro,setErro]=useState("");
+  const visiveis=useMemo(()=>{
+    const q=busca.trim().toUpperCase();
+    return linhas.filter(l=>(!so||l.manual)
+      &&(!q||l.tss.toUpperCase().includes(q)||String(l.familia||"").toUpperCase().includes(q)||l.frente.includes(q)))
+      .sort((a,b)=>a.frente.localeCompare(b.frente)||a.tss.localeCompare(b.tss)).slice(0,400);
+  },[linhas,busca,so]);
+  const trocar=async(l,valor)=>{
+    setIndo(l.tss);setErro("");
+    try{ await salvarFrenteTss(l.tss,valor||null,sess); onSalvou(l.tss,valor||null); }
+    catch(e){ setErro(`${l.tss}: ${e.message||e}`); }
+    setIndo(null);
+  };
+  const campo={padding:"4px 7px",borderRadius:RAIO,border:`1px solid ${C.border}`,background:C.cardAlt,color:C.text,fontSize:12,fontFamily:"inherit",colorScheme:"dark"};
+  const nMan=linhas.filter(l=>l.manual).length;
+  return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+    <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:14,border:`1px solid ${C.border}`,
+      width:"100%",maxWidth:760,maxHeight:"90vh",padding:20,display:"flex",flexDirection:"column",gap:12,overflow:"hidden"}}>
+      <div>
+        <div style={{fontSize:15,fontWeight:700,color:C.text}}>Frente de cada serviço</div>
+        <div style={{fontSize:12.5,color:C.textDim,marginTop:4,lineHeight:1.5}}>
+          A família fica como a Sabesp manda — a aba Pendente não muda. Aqui você só diz de que
+          equipe é o serviço no itinerário. {linhas.length} serviços{nMan?`, ${nMan} corrigido(s) por você`:""}.</div>
+      </div>
+      <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+        <input value={busca} onChange={e=>setBusca(e.target.value)} placeholder="buscar TSS, família ou frente"
+          style={{...campo,flex:1,minWidth:200,padding:"6px 10px",fontSize:12.5}}/>
+        <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:C.textDim}}>
+          <input type="checkbox" checked={so} onChange={e=>setSo(e.target.checked)}/>só as que eu corrigi</label>
+      </div>
+      <div style={{overflowY:"auto",border:`1px solid ${C.border}`,borderRadius:RAIO,minHeight:140}}>
+        <table style={{width:"100%",borderCollapse:"collapse"}}>
+          <tbody>{visiveis.map(l=><tr key={l.tss} style={{borderBottom:`1px solid ${C.border}`}}>
+            <td style={{padding:"6px 10px",fontSize:12.5,color:C.text}}>{l.tss}</td>
+            <td style={{padding:"6px 10px",fontSize:11,color:C.textDim,whiteSpace:"nowrap"}}>{l.familia||"—"}</td>
+            <td style={{padding:"6px 10px",fontSize:10.5,color:l.manual?C.amber:C.textDim,whiteSpace:"nowrap"}}>{l.origem}</td>
+            <td style={{padding:"6px 10px",width:150}}>
+              <select value={l.manual||""} disabled={indo===l.tss||!sess}
+                onChange={e=>trocar(l,e.target.value)}
+                style={{...campo,width:"100%",color:l.manual?C.amber:C.textMuted}}>
+                <option value="">{l.frente} (automático)</option>
+                {[...TIPOS_ORD,"OUTROS"].map(t=><option key={t} value={t}>{t}</option>)}
+              </select>
+            </td>
+          </tr>)}
+          {!visiveis.length&&<tr><td style={{padding:12,fontSize:12.5,color:C.textDim}}>Nenhum serviço com esse texto.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      {!sess&&<div style={{fontSize:11.5,color:C.amber}}>Entre com sua conta para corrigir.</div>}
+      {erro&&<div style={{fontSize:12.5,color:C.red,lineHeight:1.5}}>Erro ao salvar {erro}</div>}
+      <div style={{display:"flex",justifyContent:"flex-end"}}>
+        <button onClick={onClose} style={{fontSize:12.5,padding:"7px 14px",borderRadius:RAIO,border:`1px solid ${C.border}`,background:"transparent",color:C.textMuted,cursor:"pointer"}}>Fechar</button>
+      </div>
+    </div>
+  </div>;
+}
+
 function ItinerarioView({rawRows,notas,sess}){
   const amanha=()=>{const d=new Date();d.setDate(d.getDate()+1);return diaISO(d);};
   const [dia,setDia]=useState(amanha);
@@ -1574,6 +1727,7 @@ function ItinerarioView({rawRows,notas,sess}){
   const [canteiros,setCanteiros]=useState([]);
   const [reserva,setReserva]=useState(0);         // % do dia guardado para urgencia da Sabesp
   const [editando,setEditando]=useState(null);   // equipe aberta no cadastro
+  const [vendoFrentes,setVendoFrentes]=useState(false);
   const [famPorTss,setFamPorTss]=useState({});   // norm(TSS) → família, do histórico do pendente
   useEffect(()=>{let vivo=true;fetchTssToFamiliaMap().then(m=>{if(vivo)setFamPorTss(m||{});}).catch(()=>{});
     return()=>{vivo=false;};},[]);
@@ -1590,20 +1744,35 @@ function ItinerarioView({rawRows,notas,sess}){
     carregarRuas(rawRows.map(r=>ruaKey(r["Endereço"]))).finally(()=>{if(vivo)setCoordVer(v=>v+1);});
     return()=>{vivo=false;};},[rawRows]);
 
-  // Tipo de cada TSS: primeiro o que o serviço é (família / lista de ligação),
-  // depois o que foi medido. É este mapa que o Sugerir e o cadastro usam.
-  const tssTipoEf=useMemo(()=>{
+  // Frente de cada TSS, pela regra do frenteDaTss: nome da TSS, depois
+  // medição firme, depois família. É este mapa que o Sugerir e o
+  // cadastro da equipe usam.
+  // Família de cada TSS: o histórico do pendente, atualizado pelo pendente
+  // de hoje. É a família da Sabesp — não é tocada em lugar nenhum.
+  const famDeTss=useMemo(()=>{
     const fam=new Map(Object.entries(famPorTss||{}));
+    for(const r of rawRows||[]){
+      const t=String(r["TSS"]||"").trim();
+      if(t&&r["Família"]) fam.set(norm(t),r["Família"]);
+    }
+    return fam;
+  },[famPorTss,rawRows]);
+  const tssTipoEf=useMemo(()=>{
     const nomes=new Set(Object.keys(tssTipo||{}));
     for(const r of rawRows||[]){
       const t=String(r["TSS"]||"").trim();if(!t) continue;
-      if(r["Família"]) fam.set(norm(t),r["Família"]);
       if(familiaTssVisivel(r["Família"],t)) nomes.add(t);
     }
     const out={};
-    for(const t of nomes){const n=tipoPorNatureza(t,fam.get(norm(t)))||tssTipo?.[t];if(n) out[t]=n;}
+    for(const t of nomes){const n=frenteDaTss(t,famDeTss.get(norm(t)),tssTipo?.[t]);if(n) out[t]=n;}
     return out;
-  },[famPorTss,tssTipo,rawRows]);
+  },[famDeTss,tssTipo,rawRows]);
+  // Uma linha por TSS para a tela de frentes: o que ela é hoje e por quê.
+  const linhasFrente=useMemo(()=>Object.keys(tssTipoEf).map(t=>{
+    const familia=famDeTss.get(norm(t))||null, med=tssTipo?.[t];
+    return {tss:t,familia,frente:tssTipoEf[t],manual:med?.manual||null,
+      origem:origemDaFrente(t,familia,med)};
+  }),[tssTipoEf,famDeTss,tssTipo]);
   const notaDe=useMemo(()=>{
     const m=new Map();const dig=v=>String(v??"").replace(/\D/g,"");
     for(const n of notas||[]) m.set(dig(n.numero_os)+"§"+String(n.tss).trim(),n);
@@ -1852,6 +2021,7 @@ function ItinerarioView({rawRows,notas,sess}){
           onChange={e=>setReserva(Math.max(0,Math.min(80,+e.target.value||0)))}
           style={{width:50,fontSize:12,fontFamily:FONTE_UI,color:C.amber,background:"transparent",
             border:`1px solid ${C.border}`,borderRadius:RAIO,padding:"3px 6px"}}/>%</label>
+      {bt("Frentes",()=>setVendoFrentes(true),C.textMuted)}
       {bt("Sugerir",sugerir,C.accent)}
       {bt(salvando?"Salvando…":"Salvar",salvar,C.green,!salvando&&!!sess)}
       {bt("Limpar",()=>setPlano([]),C.red,plano.length>0)}
@@ -1864,7 +2034,7 @@ function ItinerarioView({rawRows,notas,sess}){
         <div style={{padding:"10px 14px",borderBottom:`1px solid ${C.border}`,fontSize:10,letterSpacing:"0.18em",
           textTransform:"uppercase",color:C.textDim}}>Equipes</div>
         {ativas.length===0&&<div style={{padding:14,fontSize:12.5,color:C.textDim}}>Nenhuma equipe ativa cadastrada.</div>}
-        {["VAZAMENTO","LIGAÇÃO","ESGOTO","DESOBSTRUÇÃO","REPOSIÇÃO","ASFALTO","OBRAS","MOTO","OUTROS"]
+        {[...TIPOS_ORD,"OUTROS"]
           .filter(t=>ativas.some(e=>e.tipo===t)).map(t=><div key={t}>
           <div style={{padding:"6px 14px",fontSize:10.5,letterSpacing:"0.1em",color:C.textDim,background:C.headerBg}}>{t}</div>
           {ativas.filter(e=>e.tipo===t).map(e=>{const n=daEquipe(e.nome).length;const cap=capacidade(e);const cheio=n>=cap;
@@ -1939,6 +2109,9 @@ function ItinerarioView({rawRows,notas,sess}){
         </div>}
       </div>
     </div>
+    {vendoFrentes&&<FrenteTssModal linhas={linhasFrente} sess={sess}
+      onClose={()=>setVendoFrentes(false)}
+      onSalvou={(tss,tipo)=>setTssTipo(m=>({...m,[tss]:{...(m[tss]||{tipo:tipo||"OUTROS",conf:0}),manual:tipo}}))}/>}
     {editando&&<EquipeModal equipe={editando} equipes={ativas} canteiros={canteiros} tssTipo={tssTipoEf} sess={sess}
       onClose={()=>setEditando(null)}
       onSalvou={lista=>{

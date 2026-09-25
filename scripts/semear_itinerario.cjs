@@ -21,7 +21,7 @@ const H = { apikey: KEY, Authorization: "Bearer " + KEY, "Content-Type": "applic
 const SECO = process.argv.includes("--seco");
 const DIAS = 60, INATIVA_APOS = 20;
 
-const REGRAS = [["MOTO-ME","MOTO"],["CVV","MOTO"],["CCV","MOTO"],["BCA PAV","ASFALTO"],[" ASF","ASFALTO"],
+const REGRAS = [["NPV","NIVELAMENTO"],["MOTO-ME","MOTO"],["CVV","MOTO"],["CCV","MOTO"],["BCA PAV","ASFALTO"],[" ASF","ASFALTO"],
   [" LNA","LIGAÇÃO"],["REPOSIÇÃO","REPOSIÇÃO"],["REPOSICAO","REPOSIÇÃO"],["VAZAMENTO","VAZAMENTO"],
   ["NORBRASIL","DESOBSTRUÇÃO"],["ESGOTO","ESGOTO"],["OBRAS","OBRAS"]];
 const tipoDoNome = n => (REGRAS.find(([c]) => (" " + String(n).toUpperCase()).includes(c)) || [,"OUTROS"])[1];
