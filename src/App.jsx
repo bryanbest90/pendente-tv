@@ -927,9 +927,11 @@ function abrirNoMapa(r){
 // OS, e uma propriedade dela.
 // As tags do dia a dia. Para criar uma nova, acrescente aqui: e o
 // unico lugar, e o banco de proposito nao limita a lista.
-// "data:true" faz o formulario pedir uma data junto.
+// "data:true" faz o formulario pedir uma data junto; "pessoa:true"
+// faz pedir o nome de quem pediu — sem ele a etiqueta nao e salva.
 const TAGS=[
   {id:"OUVIDORIA",     cor:"#f87171"},
+  {id:"PRIORIDADE",    cor:"#fb923c", pessoa:true},
   {id:"CONVIAS",       cor:"#60a5fa"},
   {id:"GEOINFRA",      cor:"#a78bfa"},
   {id:"LAJE",          cor:"#e9b949"},
@@ -944,16 +946,17 @@ const fmtDia=iso=>{try{const[a,m,d]=String(iso).slice(0,10).split("-");return `$
 // Uma etiqueta. "vencido" so existe no AGENDADO: data que ja passou
 // quer dizer que a equipe nao foi no dia marcado, e isso e
 // justamente o que alguem precisa ver.
-function Etiqueta({id,dia,pequena}){
+function Etiqueta({id,dia,quem,pequena}){
   const cor=corDaTag(id);
   const vencido=id==="AGENDADO"&&dia&&String(dia).slice(0,10)<new Date().toISOString().slice(0,10);
-  return <span title={vencido?"O dia agendado já passou":undefined}
+  return <span title={vencido?"O dia agendado já passou":(quem?`Prioridade passada por ${quem}`:undefined)}
     style={{display:"inline-flex",alignItems:"center",gap:5,padding:pequena?"1px 7px":"2px 9px",
       borderRadius:RAIO,fontSize:pequena?10:10.5,fontWeight:700,letterSpacing:"0.06em",
       whiteSpace:"nowrap",color:vencido?C.red:cor,
       background:vencido?C.redBg:"transparent",
       border:`1px solid ${vencido?C.redBorder:cor+"55"}`}}>
     {id}{dia&&<span style={{...numStyle,fontWeight:600,opacity:.95}}>{fmtDia(dia)}</span>}
+    {quem&&<span style={{fontWeight:600,opacity:.95}}>{quem}</span>}
   </span>;
 }
 
@@ -962,6 +965,20 @@ const FUNDO_NOTA="rgba(233,185,73,0.055)";
 // Equivalentes ambar do sideActive/sideHover, que sao azuis.
 const FUNDO_NOTA_ATIVO="rgba(233,185,73,0.14)";
 const HOVER_NOTA="rgba(233,185,73,0.07)";
+// Colunas que lemos de os_nota. prioridade_por pode nao existir ainda
+// (sql/os_nota_prioridade.sql): no primeiro 400 a coluna sai da lista e
+// nao volta a ser pedida — sem isso a falha derrubaria TODAS as notas,
+// que e o oposto do que a nota existe para fazer.
+let SEL_NOTA="numero_os,tss,nota,autor_nome,autor_email,atualizado_em,endereco,bairro,municipio,familia,tags,agendado_para,prioridade_por";
+const SEL_NOTA_ANTIGO=SEL_NOTA.replace(",prioridade_por","");
+async function buscaNota(qs){
+  let r=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select="+SEL_NOTA+qs,{headers:HEADERS});
+  if(!r.ok&&SEL_NOTA!==SEL_NOTA_ANTIGO){
+    SEL_NOTA=SEL_NOTA_ANTIGO;
+    r=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select="+SEL_NOTA+qs,{headers:HEADERS});
+  }
+  return r;
+}
 const notaCache=new Map();   // numero_os -> [ {tss, nota, autor_nome, atualizado_em} ]
 async function carregarNotas(numeros){
   const faltam=[...new Set(numeros.filter(Boolean))].filter(n=>!notaCache.has(n));
@@ -970,7 +987,7 @@ async function carregarNotas(numeros){
     const lote=faltam.slice(i,i+200);
     const lista=lote.map(n=>`"${String(n).replace(/["\\]/g,m=>"\\"+m)}"`).join(",");
     try{
-      const res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select=numero_os,tss,nota,autor_nome,autor_email,atualizado_em,endereco,bairro,municipio,familia,tags,agendado_para&numero_os=in.("+encodeURIComponent(lista)+")",{headers:HEADERS});
+      const res=await buscaNota("&numero_os=in.("+encodeURIComponent(lista)+")");
       if(!res.ok) throw new Error("HTTP "+res.status);
       for(const d of await res.json()){
         if(!notaCache.get(d.numero_os)) notaCache.set(d.numero_os,[]);
@@ -996,13 +1013,31 @@ function acharNota(numeroOS,tss){
   const exata=lista.find(d=>String(d.tss).trim()===t);
   return exata?{...exata,outraTss:null}:null;
 }
-async function salvarNota(numeroOS,tss,texto,sess,linha,tags,dia){
+// Nomes já usados na etiqueta PRIORIDADE, para o formulário sugerir.
+// Sem isso o mesmo chefe vira ROBERTO, ROBERT e R. SANTOS, e a conta
+// por pessoa deixa de fechar.
+let cacheNomesPrio=null;
+async function nomesPrioridade(){
+  if(cacheNomesPrio) return cacheNomesPrio;
+  try{
+    const r=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select=prioridade_por&prioridade_por=not.is.null",{headers:HEADERS});
+    if(!r.ok) return (cacheNomesPrio=[]);
+    const s=new Set();for(const x of await r.json()) if(x.prioridade_por) s.add(String(x.prioridade_por).trim().toUpperCase());
+    return (cacheNomesPrio=[...s].sort());
+  }catch{ return (cacheNomesPrio=[]); }
+}
+async function salvarNota(numeroOS,tss,texto,sess,linha,tags,dia,quem){
   // A nota guarda o proprio endereco. Sem isso ela vira uma linha
   // sem endereco no dia em que a OS sai do pendente — e sai, e e
   // justamente quando alguem vai querer entender o que houve.
   const end=linha?[String(linha["Endereço"]||"").trim(),linha["Número"]].filter(x=>x!==""&&x!=null).join(", "):null;
   const corpo={numero_os:String(numeroOS).trim(),tss:String(tss).trim(),nota:texto.trim()||null,
     tags:tags||[],agendado_para:(tags||[]).includes("AGENDADO")?(dia||null):null,
+    // Sempre em caixa alta: é o que faz o painel contar uma pessoa só.
+    // Só vai se a coluna existe — senão o POST inteiro seria recusado e
+    // ninguém conseguiria gravar nota nenhuma.
+    ...(SEL_NOTA.includes("prioridade_por")
+      ?{prioridade_por:(tags||[]).includes("PRIORIDADE")?(String(quem||"").trim().toUpperCase()||null):null}:{}),
     autor_nome:sess?.perfil?.nome||null,autor_email:sess?.perfil?.email||null,
     endereco:end||null,bairro:linha?.["Bairro"]||null,
     municipio:linha?.["Município"]||null,familia:linha?.["Família"]||null,
@@ -1097,8 +1132,13 @@ function padronizarNota(txt){
 async function fetchTodasNotas(){
   const todas=[];let de=0;const ps=1000;
   while(true){
-    const res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select=numero_os,tss,nota,autor_nome,autor_email,atualizado_em,endereco,bairro,municipio,familia,tags,agendado_para&order=atualizado_em.desc",
+    let res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select="+SEL_NOTA+"&order=atualizado_em.desc",
       {headers:{...HEADERS,"Range":de+"-"+(de+ps-1)}});
+    if(!res.ok&&res.status!==206&&SEL_NOTA!==SEL_NOTA_ANTIGO){
+      SEL_NOTA=SEL_NOTA_ANTIGO;
+      res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select="+SEL_NOTA+"&order=atualizado_em.desc",
+        {headers:{...HEADERS,"Range":de+"-"+(de+ps-1)}});
+    }
     if(!res.ok&&res.status!==206) throw new Error("Erro notas "+res.status);
     const d=await res.json();
     if(!d?.length) break;
@@ -1208,7 +1248,7 @@ function NotasModal({notas,rows,onClose,onEditar,filtroInicial}){
                 {outraTss&&<span style={{color:C.amber,fontSize:11}}>a OS está hoje como {String(linha["TSS"]||"").trim()}</span>}
               </div>
               <div style={{display:"flex",gap:9,flexWrap:"wrap",alignItems:"center"}}>
-                {(n.tags||[]).map(t=><Etiqueta key={t} id={t} dia={t==="AGENDADO"?n.agendado_para:null}/>)}
+                {(n.tags||[]).map(t=><Etiqueta key={t} id={t} dia={t==="AGENDADO"?n.agendado_para:null} quem={t==="PRIORIDADE"?n.prioridade_por:null}/>)}
                 {n.nota&&<span style={{fontSize:13,color:C.text,lineHeight:1.45,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{n.nota}</span>}
                 <span style={{fontSize:11,color:C.textDim}}>| {n.autor_nome||n.autor_email||"autor não registrado"} · {fmtDate(n.atualizado_em)}</span>
               </div>
@@ -2128,16 +2168,21 @@ function NotaModal({linha,nota,sess,onClose,onSalvou}){
   const [txt,setTxt]=useState(nota?.nota||"");
   const [tags,setTags]=useState(nota?.tags||[]);
   const [dia,setDia]=useState(nota?.agendado_para?String(nota.agendado_para).slice(0,10):"");
+  const [quem,setQuem]=useState(nota?.prioridade_por||"");
+  const [nomes,setNomes]=useState([]);
   const [salvando,setSalvando]=useState(false);
   const [erro,setErro]=useState("");
   const marcar=id=>setTags(t=>t.includes(id)?t.filter(x=>x!==id):[...t,id]);
   const precisaData=tags.includes("AGENDADO")&&!dia;
+  const precisaQuem=tags.includes("PRIORIDADE")&&!quem.trim();
+  // Carrega os nomes já usados só quando a etiqueta é marcada.
+  useEffect(()=>{if(tags.includes("PRIORIDADE")&&!nomes.length) nomesPrioridade().then(setNomes);},[tags,nomes.length]);
   const vazia=!txt.trim()&&tags.length===0;
   const gravar=async(apagar)=>{
     setSalvando(true);setErro("");
     try{
       if(apagar) await apagarNota(os,nota.outraTss||tss,sess);
-      else await salvarNota(os,tss,padronizarNota(txt),sess,linha,tags,dia);
+      else await salvarNota(os,tss,padronizarNota(txt),sess,linha,tags,dia,quem);
       onSalvou();
     }catch(e){setErro(String(e.message||e));setSalvando(false);}
   };
@@ -2169,6 +2214,27 @@ function NotaModal({linha,nota,sess,onClose,onSalvou}){
               background:C.cardAlt,color:C.text,fontSize:13,fontFamily:"inherit",colorScheme:"dark"}}/>
           {precisaData&&<span style={{fontSize:11.5,color:C.red}}>AGENDADO sem data não diz nada — escolha o dia</span>}
         </div>}
+        {/* PRIORIDADE sem dono é pressão sem responsável: daqui a um mês
+            ninguém lembra quem mandou furar a fila. Por isso o nome é
+            obrigatório, e sempre gravado em caixa alta. */}
+        {tags.includes("PRIORIDADE")&&<div style={{marginTop:9}}>
+          <div style={{display:"flex",alignItems:"center",gap:9,flexWrap:"wrap"}}>
+            <span style={{fontSize:12,color:C.textMuted}}>Quem pediu</span>
+            <input value={quem} onChange={e=>setQuem(e.target.value.toUpperCase())}
+              placeholder="NOME DE QUEM PASSOU A PRIORIDADE" maxLength={60}
+              style={{flex:1,minWidth:200,padding:"7px 10px",borderRadius:RAIO,
+                border:`1px solid ${precisaQuem?C.redBorder:C.border}`,background:C.cardAlt,
+                color:C.text,fontSize:13,fontFamily:"inherit",textTransform:"uppercase"}}/>
+          </div>
+          {nomes.length>0&&<div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:7}}>
+            {nomes.filter(n=>!quem.trim()||n.includes(quem.trim())).slice(0,8).map(n=>
+              <span key={n} onClick={()=>setQuem(n)} style={{cursor:"pointer",userSelect:"none",
+                padding:"2px 8px",borderRadius:RAIO,fontSize:11,color:C.textDim,
+                border:`1px solid ${C.border}`}}>{n}</span>)}
+          </div>}
+          {precisaQuem&&<div style={{fontSize:11.5,color:C.red,marginTop:6}}>
+            PRIORIDADE sem nome não se cobra de ninguém — escreva quem pediu</div>}
+        </div>}
       </div>
       <textarea value={txt} onChange={e=>setTxt(e.target.value)} rows={3}
         placeholder="Detalhe que a etiqueta não cobre: com quem falar, o que falta…"
@@ -2182,7 +2248,7 @@ function NotaModal({linha,nota,sess,onClose,onSalvou}){
         {nota&&<button onClick={()=>gravar(true)} disabled={salvando}
           style={{marginRight:"auto",padding:"9px 14px",borderRadius:8,border:`1px solid ${C.redBorder}`,background:"transparent",color:C.red,fontSize:12.5,cursor:"pointer"}}>Apagar</button>}
         <button onClick={onClose} style={{padding:"9px 16px",borderRadius:8,border:`1px solid ${C.border}`,background:"transparent",color:C.textDim,fontSize:13,cursor:"pointer"}}>Cancelar</button>
-        {(()=>{const ok=!vazia&&!precisaData&&!salvando;
+        {(()=>{const ok=!vazia&&!precisaData&&!precisaQuem&&!salvando;
           return <button onClick={()=>gravar(false)} disabled={!ok}
             style={{padding:"9px 18px",borderRadius:RAIO,border:"none",fontSize:13,fontWeight:700,
               background:ok?C.accent:C.border,color:ok?"#0b1220":C.textDim,
@@ -2389,7 +2455,7 @@ function Check({checked,onChange}){
 function OSModal({rows,familia,tssName,tipo,onClose}){
   // "busca" vem do campo de pesquisa da lateral: a OS pode ter linhas
   // no prazo e fora, entao o cabecalho nao afirma nenhum dos dois.
-  const label=tipo==="prazo"?"No Prazo":tipo==="fora"?"Fora do Prazo":"Busca por OS";
+  const label=tipo==="prazo"?"No Prazo":tipo==="fora"?"Fora do Prazo":tipo==="endereco"?"Busca por endereço":"Busca por OS";
   const color=tipo==="prazo"?C.green:tipo==="fora"?C.red:C.accent;
   const [modalSort,setModalSort]=useState({col:null,asc:true});
   const cols=[
@@ -2555,7 +2621,7 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
                     linha, depois de uma barra, para o bloco nao ficar
                     mais alto que a propria OS. */}
                 <div style={{display:"flex",gap:9,flexWrap:"wrap",alignItems:"center",paddingLeft:2}}>
-                  {(nt.tags||[]).map(t=><Etiqueta key={t} id={t} dia={t==="AGENDADO"?nt.agendado_para:null} pequena/>)}
+                  {(nt.tags||[]).map(t=><Etiqueta key={t} id={t} dia={t==="AGENDADO"?nt.agendado_para:null} quem={t==="PRIORIDADE"?nt.prioridade_por:null} pequena/>)}
                   {nt.nota&&<span style={{fontSize:13,color:C.text,lineHeight:1.45,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{nt.nota}</span>}
                   <span style={{fontSize:11,color:C.textDim}}>
                     | {nt.autor_nome||nt.autor_email||"autor não registrado"} · {fmtDate(nt.atualizado_em)}
@@ -3090,15 +3156,19 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx}){
 const btnTiny={padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:600,border:`1px solid ${C.border}`,background:"transparent",color:C.textDim,cursor:"pointer"};
 
 /* ── Sidebar ── */
-function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,nNotas,onNotas,tagsNotas,onBuscarOS}){
+function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,nNotas,onNotas,tagsNotas,onBuscarOS,onBuscarEndereco}){
   const [busca,setBusca]=useState("");
   const [avisoBusca,setAvisoBusca]=useState("");
+  const [rua,setRua]=useState("");
+  const [num,setNum]=useState("");
+  const [avisoEnd,setAvisoEnd]=useState("");
   const buscar=()=>{
     const q=busca.replace(/\D/g,"");
     if(!q){setAvisoBusca("Digite o número da OS");return;}
     const aviso=onBuscarOS(q);          // null = achou e abriu o modal
     setAvisoBusca(aviso||"");
   };
+  const buscarEnd=()=>setAvisoEnd(onBuscarEndereco(rua,num)||"");
   return <div style={{width:collapsed?56:210,minWidth:collapsed?56:210,background:C.sidebar,borderRight:`1px solid ${C.border}`,display:"flex",flexDirection:"column",transition:"width 0.25s ease,min-width 0.25s ease",overflow:"hidden",flexShrink:0}}>
     <div style={{padding:collapsed?"16px 0":"16px 16px",display:"flex",alignItems:"center",justifyContent:collapsed?"center":"space-between",borderBottom:`1px solid ${C.border}`,minHeight:56}}>
       {!collapsed&&<span style={{fontSize:13,fontWeight:800,color:C.accent,letterSpacing:0.5,textTransform:"uppercase",whiteSpace:"nowrap"}}>Unidades</span>}
@@ -3181,6 +3251,28 @@ function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,nNo
                   background:C.accentBg,color:C.accent,cursor:"pointer"}}>↵</button>
             </div>
             {avisoBusca&&<div style={{fontSize:11,color:C.amber,marginTop:6,paddingLeft:4,lineHeight:1.35}}>{avisoBusca}</div>}
+
+            {/* Busca por endereço. Os dois campos são independentes: só a
+                rua lista a rua inteira, só o número varre todas as ruas
+                (útil quando se sabe o número e não o nome da via), e os
+                dois juntos vão direto no ponto. */}
+            <div style={{fontSize:10,color:C.textDim,letterSpacing:"0.15em",textTransform:"uppercase",margin:"12px 0 6px",paddingLeft:4}}>Buscar endereço</div>
+            <input id="busca-rua" value={rua} placeholder="Rua, avenida…"
+              onChange={e=>{setRua(e.target.value);if(avisoEnd)setAvisoEnd("");}}
+              onKeyDown={e=>{if(e.key==="Enter")buscarEnd();}}
+              style={{width:"100%",boxSizing:"border-box",fontSize:12,padding:"6px 8px",borderRadius:RAIO,
+                border:`1px solid ${C.border}`,background:C.card,color:C.text,outline:"none"}}/>
+            <div style={{display:"flex",gap:4,marginTop:4}}>
+              <input value={num} inputMode="numeric" placeholder="Nº"
+                onChange={e=>{setNum(e.target.value);if(avisoEnd)setAvisoEnd("");}}
+                onKeyDown={e=>{if(e.key==="Enter")buscarEnd();}}
+                style={{flex:1,minWidth:0,fontSize:12,padding:"6px 8px",borderRadius:RAIO,
+                  border:`1px solid ${C.border}`,background:C.card,color:C.text,outline:"none",...numStyle}}/>
+              <button onClick={buscarEnd} title="Buscar endereço"
+                style={{fontSize:12,padding:"0 9px",borderRadius:RAIO,border:"1px solid rgba(59,130,246,0.3)",
+                  background:C.accentBg,color:C.accent,cursor:"pointer"}}>↵</button>
+            </div>
+            {avisoEnd&&<div style={{fontSize:11,color:C.amber,marginTop:6,paddingLeft:4,lineHeight:1.35}}>{avisoEnd}</div>}
           </>}
     </div>
     <div style={{flex:1}}/>
@@ -4456,6 +4548,277 @@ function ProducaoView({sess,onLogout}){
   </div>;
 }
 
+/* ── Etiquetas: o que foi fechado em cada uma ──────────────
+   A pergunta que isso responde é "das que eu marquei, quantas
+   morreram?" — e ela não se responde com uma soma só. Uma ouvidoria
+   encerrada por imóvel fechado saiu da carteira mas não resolveu
+   nada para o cliente, e é ela que volta como reclamação. Por isso a
+   tabela separa o que foi EXECUTADO do que apenas SAIU.
+
+   A data que manda é a do desfecho, não a da etiqueta: o período
+   pergunta "o que fechou nesta semana", não "o que foi etiquetado".
+   Serviço ainda sem baixa aparece à parte, porque não tem data — e
+   é justamente a fila que alguém precisa cobrar.
+
+   Fonte: os_nota (etiquetas) cruzada com os_desfecho (sql/desfecho.sql),
+   pelo par (OS, TSS), que é a unidade de trabalho do sistema inteiro.
+   ───────────────────────────────────────────────────────── */
+async function fetchDesfechoTipos(){
+  const r=await fetch(SUPABASE_URL+"/rest/v1/desfecho_tipo?select=codigo,rotulo,conta_producao,sai_carteira,cor,ordem&order=ordem.asc",{headers:HEADERS});
+  if(!r.ok) return null;
+  return r.json();
+}
+async function fetchDesfechos(de,ate){
+  const out=[];let from=0;const ps=1000;
+  for(;;){
+    const r=await fetch(SUPABASE_URL+`/rest/v1/os_desfecho?select=numero_os,tss,dia,desfecho,equipe&dia=gte.${de}&dia=lte.${ate}&order=dia.asc`,
+      {headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
+    if(!r.ok&&r.status!==206) return null;
+    const d=await r.json();
+    if(!d?.length) break;
+    out.push(...d);
+    if(d.length<ps) break;
+    from+=ps;
+  }
+  return out;
+}
+
+function EtiquetasView({notas,rawRows,sess}){
+  const hoje=diaISO(new Date());
+  const trintaDias=()=>{const d=new Date();d.setDate(d.getDate()-29);return diaISO(d);};
+  const [de,setDe]=useState(trintaDias);
+  const [ate,setAte]=useState(hoje);
+  const [tipos,setTipos]=useState(null);
+  const [desf,setDesf]=useState(null);
+  const [exec,setExec]=useState(null);
+  const [erro,setErro]=useState("");
+  const [carregando,setCarregando]=useState(true);
+  const [aberta,setAberta]=useState(null);       // etiqueta cuja lista está aberta
+
+  useEffect(()=>{let vivo=true;
+    (async()=>{
+      setCarregando(true);setErro("");
+      try{
+        // Duas fontes, e as duas fazem falta. O os_desfecho diz POR QUE a
+        // OS saiu (executada, improdutiva, cancelada), mas só existe nos
+        // dias em que alguém importou o EM RUA. O relatório de execução
+        // cobre o mês inteiro, só que sabe dizer uma coisa só: foi
+        // executada. Sem ele, execução de dia não importado some da conta.
+        const [t,d,e]=await Promise.all([fetchDesfechoTipos(),fetchDesfechos(de,ate),
+          fetchExecucao(de,ate).catch(()=>[])]);
+        if(!vivo) return;
+        setExec(e||[]);
+        if(!t||!d){setErro("tabela");setTipos(null);setDesf(null);}
+        else{setTipos(t);setDesf(d);}
+      }catch(e){if(vivo) setErro(String(e.message||e));}
+      if(vivo) setCarregando(false);
+    })();
+    return()=>{vivo=false;};
+  },[de,ate]);
+
+  // A chave é a mesma do resto do sistema: OS só com os dígitos e TSS
+  // normalizada. Comparar o texto cru não casa — o em_rua, de onde sai
+  // o desfecho, escreve a OS e a TSS com outra pontuação que o pendente.
+  const dig=v=>String(v??"").replace(/\D/g,"");
+  const chave=(os,tss)=>dig(os)+"§"+norm(tss||"");
+
+  // (OS, TSS) -> desfecho do período. Se a mesma OS fechou duas vezes
+  // no período (reabriu), vale a última: é o destino atual dela.
+  // O mapa por OS sozinha cobre dois casos reais: o classificador grava
+  // TSS vazia quando o em_rua não a trouxe, e a OS troca de TSS no meio
+  // do caminho (o vazamento é resolvido e ela vira reposição), enquanto
+  // a nota ficou na TSS antiga. Entre duas baixas da mesma OS vence a
+  // que conta produção.
+  const {porChave,porOS}=useMemo(()=>{
+    const m=new Map(),o=new Map();
+    for(const d of desf||[]){
+      m.set(chave(d.numero_os,d.tss),d);
+      const k=dig(d.numero_os),anterior=o.get(k);
+      if(!anterior||(d.desfecho==="EXECUTADA"&&anterior.desfecho!=="EXECUTADA")) o.set(k,d);
+    }
+    return {porChave:m,porOS:o};
+  },[desf]);
+  // Execuções confirmadas, a segunda fonte. Só sabem dizer "executada".
+  const {execChave,execOS}=useMemo(()=>{
+    const m=new Map(),o=new Map();
+    for(const x of exec||[]){
+      m.set(chave(x.numero_os,x.tss),x);
+      if(!o.has(dig(x.numero_os))) o.set(dig(x.numero_os),x);
+    }
+    return {execChave:m,execOS:o};
+  },[exec]);
+  const tipoPor=useMemo(()=>Object.fromEntries((tipos||[]).map(t=>[t.codigo,t])),[tipos]);
+  const colunas=useMemo(()=>(tipos||[]).filter(t=>t.sai_carteira)
+    .sort((a,b)=>(b.conta_producao?1:0)-(a.conta_producao?1:0)||a.ordem-b.ordem),[tipos]);
+
+  // O que ainda está na carteira hoje. Sem isso não dá para separar
+  // "não fechou" de "fechou antes do período": as duas apareceriam
+  // como se estivessem em aberto, que foi o que confundiu a conta.
+  const naCarteira=useMemo(()=>{
+    if(!rawRows?.length) return null;              // null = pendente não carregado
+    return new Set(rawRows.map(r=>chave(r["Número OS"],r["TSS"])));
+  },[rawRows]);
+
+  // Uma linha por etiqueta. Um serviço com duas etiquetas conta nas duas
+  // — é o que se quer: a pergunta é sobre a etiqueta, não sobre a OS.
+  const linhas=useMemo(()=>{
+    return TAGS.map(t=>t.id).map(id=>{
+      const minhas=(notas||[]).filter(n=>(n.tags||[]).includes(id));
+      const porTipo={};let fechadas=0,carteira=0,fora=0;const itens=[];
+      for(const n of minhas){
+        const k=chave(n.numero_os,n.tss),os=dig(n.numero_os);
+        const aberta=naCarteira?naCarteira.has(k):false;
+        // A busca pela OS sozinha só vale para serviço que JÁ saiu da
+        // carteira: se ele ainda está lá, a baixa do período é de outra
+        // TSS da mesma OS e não fechou este.
+        const d=porChave.get(k)||(aberta?null:porOS.get(os));
+        const x=d?null:(execChave.get(k)||(aberta?null:execOS.get(os)));
+        const cod=d?d.desfecho:(x?"EXECUTADA":null);
+        if(cod){porTipo[cod]=(porTipo[cod]||0)+1;fechadas++;}
+        else if(aberta) carteira++;
+        else fora++;
+        itens.push({...n,desfecho:cod,dia:d?.dia||x?.dia||null,equipe:d?.equipe||null,
+          fonte:d?"desfecho":(x?"execucao":null),aberta});
+      }
+      return {id,cor:corDaTag(id),total:minhas.length,fechadas,carteira,fora,porTipo,itens};
+    }).filter(l=>l.total>0);
+  },[notas,porChave,porOS,execChave,execOS,naCarteira]);
+  // Quantas das baixas do período pertencem a serviço etiquetado. Se dá
+  // zero com baixa no período, o cruzamento não casou — e é melhor a
+  // tela dizer isso do que mostrar uma coluna de zeros como se fosse
+  // notícia.
+  const casaram=useMemo(()=>linhas.reduce((a,l)=>a+l.fechadas,0),[linhas]);
+
+  const baixar=()=>{
+    const linhasXls=[];
+    for(const l of linhas) for(const it of l.itens)
+      linhasXls.push({Etiqueta:l.id,OS:it.numero_os,TSS:it.tss,
+        Endereço:it.endereco||"",Bairro:it.bairro||"",Família:it.familia||"",
+        Desfecho:it.desfecho?(tipoPor[it.desfecho]?.rotulo||it.desfecho):(it.aberta?"na carteira":"baixa fora do período"),
+        Fonte:it.fonte==="execucao"?"relatório de execução":it.fonte==="desfecho"?"EM RUA classificado":"",
+        Dia:it.dia||"",Equipe:it.equipe||"",
+        "Prioridade por":it.prioridade_por||"",Observação:it.nota||""});
+    if(!linhasXls.length) return;
+    const wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(linhasXls),"Etiquetas");
+    XLSX.writeFile(wb,`etiquetas_${de}_a_${ate}.xlsx`);
+  };
+
+  const campo={fontSize:12,fontFamily:FONTE_UI,color:C.accent,background:C.accentBg,
+    border:"1px solid rgba(59,130,246,0.35)",borderRadius:RAIO,padding:"3px 8px",colorScheme:"dark"};
+  const th={padding:"8px 10px",fontSize:10,letterSpacing:"0.12em",textTransform:"uppercase",
+    color:C.textDim,textAlign:"right",whiteSpace:"nowrap"};
+  const td={padding:"8px 10px",fontSize:12.5,borderTop:`1px solid ${C.border}`,textAlign:"right"};
+
+  if(erro==="tabela") return <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:24,color:C.textMuted,fontSize:13,lineHeight:1.6}}>
+    A tabela de desfechos ainda não existe no banco. Rode <code>sql/desfecho.sql</code> no Supabase
+    e depois <code>SELECT * FROM classificar_tudo();</code>, que classifica o histórico já importado.
+  </div>;
+
+  return <div style={{animation:"fadeIn 0.35s ease"}}>
+    <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",padding:"10px 16px",
+      background:C.card,borderRadius:10,border:`1px solid ${C.border}`,marginBottom:14}}>
+      <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:C.textDim}}>De
+        <input type="date" value={de} max={ate} onChange={e=>setDe(e.target.value)} style={campo}/></label>
+      <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:C.textDim}}>até
+        <input type="date" value={ate} min={de} max={hoje} onChange={e=>setAte(e.target.value)} style={campo}/></label>
+      <span style={{fontSize:12,color:C.textDim}}>
+        {carregando?"carregando…"
+          :`${desf?.length??0} baixas classificadas · ${exec?.length??0} execuções · ${notas?.length??0} serviços etiquetados · ${casaram} cruzaram`}</span>
+      <div style={{flex:1}}/>
+      <button onClick={baixar} disabled={!linhas.length}
+        style={{fontSize:12,fontWeight:700,padding:"6px 14px",borderRadius:RAIO,cursor:linhas.length?"pointer":"default",
+          border:`1px solid ${C.green}55`,background:C.green+"14",color:C.green,opacity:linhas.length?1:.45}}>Baixar Excel</button>
+    </div>
+
+    <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,overflow:"hidden"}}>
+      <table style={{width:"100%",borderCollapse:"collapse"}}>
+        <thead><tr style={{background:C.headerBg}}>
+          <th style={{...th,textAlign:"left"}}>Etiqueta</th>
+          {colunas.map(c=><th key={c.codigo} style={{...th,color:c.cor||C.textDim}}>{c.rotulo}</th>)}
+          <th style={th}>Fechadas</th>
+          <th style={th} title="Ainda no pendente de hoje — é a fila a cobrar">Na carteira</th>
+          <th style={th} title="Já saiu da carteira, mas a baixa foi fora deste período">Fora do período</th>
+          <th style={th}>Total</th>
+        </tr></thead>
+        <tbody>
+          {linhas.map(l=><React.Fragment key={l.id}>
+            <tr onClick={()=>setAberta(a=>a===l.id?null:l.id)} style={{cursor:"pointer",background:aberta===l.id?C.rowHover:"transparent"}}>
+              <td style={{...td,textAlign:"left"}}><Etiqueta id={l.id}/></td>
+              {colunas.map(c=><td key={c.codigo} style={{...td,...numStyle,color:l.porTipo[c.codigo]?(c.cor||C.text):C.textDim}}>
+                {l.porTipo[c.codigo]||"—"}</td>)}
+              <td style={{...td,...numStyle,fontWeight:700,color:l.fechadas?C.text:C.textDim}}>{l.fechadas}</td>
+              <td style={{...td,...numStyle,color:l.carteira?C.amber:C.textDim}}>{l.carteira}</td>
+              <td style={{...td,...numStyle,color:C.textDim}}>{l.fora}</td>
+              <td style={{...td,...numStyle,color:C.textMuted}}>{l.total}</td>
+            </tr>
+            {aberta===l.id&&<tr><td colSpan={colunas.length+5} style={{padding:0,borderTop:`1px solid ${C.border}`}}>
+              <div style={{maxHeight:320,overflowY:"auto",background:C.cardAlt}}>
+                <table style={{width:"100%",borderCollapse:"collapse"}}>
+                  <tbody>{l.itens.sort((a,b)=>String(b.dia||"").localeCompare(String(a.dia||""))).map(it=>
+                    <tr key={it.numero_os+"§"+it.tss} style={{borderBottom:`1px solid ${C.border}`}}>
+                      <td style={{padding:"5px 10px",fontSize:12,...numStyle,color:C.textMuted,whiteSpace:"nowrap"}}>{it.numero_os}</td>
+                      <td style={{padding:"5px 10px",fontSize:12,color:C.text}}>{it.tss}</td>
+                      <td style={{padding:"5px 10px",fontSize:11.5,color:C.textDim}}>{it.endereco||"—"}</td>
+                      <td style={{padding:"5px 10px",fontSize:11.5,whiteSpace:"nowrap",
+                        color:it.desfecho?(tipoPor[it.desfecho]?.cor||C.textMuted):(it.aberta?C.amber:C.textDim)}}>
+                        {it.desfecho?(tipoPor[it.desfecho]?.rotulo||it.desfecho)
+                          :(it.aberta?"na carteira":"baixa fora do período")}
+                        {it.fonte==="execucao"&&<span title="Veio do relatório de execução; o EM RUA desse dia não foi importado, então não há o motivo da baixa"
+                          style={{color:C.textDim,marginLeft:5}}>(exec.)</span>}</td>
+                      <td style={{padding:"5px 10px",fontSize:11.5,...numStyle,color:C.textDim,whiteSpace:"nowrap"}}>{it.dia?fmtDia(it.dia):""}</td>
+                    </tr>)}
+                  </tbody>
+                </table>
+              </div>
+            </td></tr>}
+          </React.Fragment>)}
+          {!linhas.length&&!carregando&&<tr><td colSpan={colunas.length+5}
+            style={{padding:20,fontSize:12.5,color:C.textDim,textAlign:"center"}}>Nenhum serviço etiquetado ainda.</td></tr>}
+        </tbody>
+      </table>
+    </div>
+    {/* Quando não cruza, o que resolve é ver os dois lados lado a lado.
+        Pedir para alguém rodar SQL para descobrir isso é empurrar para
+        o usuário um trabalho que a tela já tem os dados para fazer. */}
+    {!carregando&&!!desf?.length&&casaram===0&&<div style={{fontSize:12.5,color:C.amber,marginTop:12,
+      background:C.amberBg,border:`1px solid rgba(245,158,11,0.35)`,borderRadius:8,padding:"10px 13px",lineHeight:1.6}}>
+      <div>Há {desf.length} baixas no período e nenhuma bateu com serviço etiquetado. Os dois lados,
+        como estão gravados hoje:</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginTop:9}}>
+        <div>
+          <div style={{fontSize:11,color:C.textDim,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:4}}>os_desfecho (a baixa)</div>
+          {(desf||[]).slice(0,5).map((d,i)=><div key={i} style={{fontSize:11.5,color:C.textMuted,...numStyle}}>
+            «{String(d.numero_os)}» · «{String(d.tss??"")}»</div>)}
+        </div>
+        <div>
+          <div style={{fontSize:11,color:C.textDim,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:4}}>os_nota (a etiqueta)</div>
+          {(notas||[]).filter(n=>(n.tags||[]).length).slice(0,5).map((n,i)=><div key={i} style={{fontSize:11.5,color:C.textMuted,...numStyle}}>
+            «{String(n.numero_os)}» · «{String(n.tss??"")}»</div>)}
+        </div>
+      </div>
+      <div style={{marginTop:8}}>Se os números da OS têm tamanhos ou prefixos diferentes, o
+        <code> os_desfecho</code> está guardando outro identificador — me mande este quadro que eu ajusto
+        o cruzamento. Se forem iguais, então é o <code>em_rua</code> que ainda não cobre esses dias.</div>
+    </div>}
+    {!carregando&&!rawRows?.length&&<div style={{fontSize:12,color:C.textDim,marginTop:10}}>
+      O pendente ainda não carregou, então "na carteira" fica zerado e tudo que não fechou no período
+      cai em "fora do período".</div>}
+    <div style={{fontSize:11.5,color:C.textDim,marginTop:10,lineHeight:1.6}}>
+      Duas fontes: o <b>EM RUA classificado</b> diz por que a OS saiu, mas só existe nos dias em que ele
+      foi importado; o <b>relatório de execução</b> cobre o mês todo e só sabe dizer que foi executada —
+      essas aparecem com <i>(exec.)</i> na lista. Se muita coisa vem marcada assim, falta importar o EM RUA
+      desses dias e rodar <code>classificar_tudo()</code>.
+      <br/>
+      A data do período é a da baixa, não a da etiqueta. <b style={{color:C.text}}>Fechadas</b> são as que
+      tiveram baixa dentro do período; <b style={{color:C.amber}}>na carteira</b> é o que ainda está no
+      pendente de hoje, a fila a cobrar; <b>fora do período</b> já saiu da carteira, só que em outra data —
+      mude as datas acima para alcançá-las.
+      {" "}<b style={{color:C.text}}>Executada</b> é execução de verdade; o resto saiu da carteira sem resolver.
+    </div>
+  </div>;
+}
+
 export default function App(){
   const [rawRows,setRawRows]=useState(null);
   const [excludedTSS,setExcludedTSS]=useState(new Set());
@@ -4680,6 +5043,34 @@ export default function App(){
     return null;
   },[rawRows]);
 
+  // Busca por endereço. Nenhum dos dois campos é obrigatório: quem tem
+  // só a rua vê a rua inteira (é assim que se descobre que há três OS
+  // no mesmo quarteirão), quem tem só o número varre todas as ruas.
+  // O nome da rua é comparado sem acento e sem o tipo de logradouro,
+  // porque o GEOCALL escreve RUA, R., AVENIDA e AV para a mesma via.
+  const buscarEndereco=useCallback((rua,num)=>{
+    if(!rawRows?.length) return "Pendente ainda carregando";
+    const q=norm(rua).replace(/^(RUA|R|AVENIDA|AV|ALAMEDA|AL|TRAVESSA|TV|PRACA|PC|ESTRADA|EST|RODOVIA|VIELA|VL)\.?\s+/,"").trim();
+    const n=String(num??"").replace(/\D/g,"");
+    if(!q&&!n) return "Preencha a rua, o número, ou os dois";
+    if(q&&q.length<3) return "Escreva pelo menos 3 letras da rua";
+    const dig=v=>String(v??"").replace(/\D/g,"");
+    let achou=(rawRows||[]).filter(r=>VALID_ATCS.includes(Number(r["ATC"]))
+      &&(!q||norm(r["Endereço"]).includes(q))
+      &&(!n||dig(r["Número"])===n));
+    // Número que não bate exato ainda pode ser 120-A, 120 FUNDOS etc.
+    if(!achou.length&&n) achou=(rawRows||[]).filter(r=>VALID_ATCS.includes(Number(r["ATC"]))
+      &&(!q||norm(r["Endereço"]).includes(q))&&dig(r["Número"]).startsWith(n));
+    if(!achou.length) return q&&n?"Nada nesse número dessa rua"
+      :q?"Nenhuma OS nessa rua — confira o nome":"Nenhuma OS com esse número";
+    const visiveis=achou.filter(r=>familiaTssVisivel(r["Família"],r["TSS"]));
+    if(!visiveis.length) return "Tem OS aí, mas em família que o painel não mostra";
+    if(visiveis.length>60) return `${visiveis.length} serviços — acrescente o número ou detalhe a rua`;
+    const fams=[...new Set(visiveis.map(r=>String(r["Família"]||"").trim()))];
+    setBuscaModal({rows:visiveis,tipo:"endereco",familia:fams.length===1?fams[0]:fams.join(" · ")});
+    return null;
+  },[rawRows]);
+
   const onDrop=useCallback(e=>{e.preventDefault();setDragOver(false);handleFile(e.dataTransfer.files[0]);},[handleFile]);
 
   // Gas alerts (usa rawRows sem filtro de unidade)
@@ -4691,19 +5082,19 @@ export default function App(){
   </div>;
 
   return <SessaoCtx.Provider value={sess}><div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:FONTE_UI,display:"flex"}}>
-    {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed} nNotas={notasDoPendente.length} onNotas={t=>{setFiltroNota(t);setShowNotas(true);}} tagsNotas={tagsNotas} onBuscarOS={buscarOS}/>}
+    {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed} nNotas={notasDoPendente.length} onNotas={t=>{setFiltroNota(t);setShowNotas(true);}} tagsNotas={tagsNotas} onBuscarOS={buscarOS} onBuscarEndereco={buscarEndereco}/>}
     <div style={{flex:1,padding:"24px 16px",overflowY:"auto",minHeight:"100vh"}}>
-      <div style={{maxWidth:activeTab==="producao"||activeTab==="itinerario"?1180:960,margin:"0 auto"}}>
+      <div style={{maxWidth:activeTab==="producao"||activeTab==="itinerario"||activeTab==="etiquetas"?1180:960,margin:"0 auto"}}>
         <div style={{marginBottom:24,textAlign:"center"}}>
           <h1 style={{fontSize:17,fontWeight:500,margin:0,letterSpacing:"0.2em",textTransform:"uppercase",color:C.text,fontFamily:FONTE_NUM}}>
-            {activeTab==="pendente"?"Controle de Prazos — OS Pendentes":activeTab==="carteira"?"Acompanhamento de Carteira":activeTab==="itinerario"?"Itinerário das Equipes":"Produção por Equipes"}
+            {activeTab==="pendente"?"Controle de Prazos — OS Pendentes":activeTab==="carteira"?"Acompanhamento de Carteira":activeTab==="etiquetas"?"Etiquetas — o que fechou":activeTab==="itinerario"?"Itinerário das Equipes":"Produção por Equipes"}
           </h1>
           <p style={{color:C.textDim,margin:"6px 0 0",fontSize:13}}>
-            {activeTab==="pendente"?"Análise por família de serviço":activeTab==="carteira"?"Carteira diária por frente de serviço":activeTab==="itinerario"?"O dia de cada equipe — sugerido pelo sistema, fechado por você":"Execuções confirmadas por equipe e tipo de serviço"}
+            {activeTab==="pendente"?"Análise por família de serviço":activeTab==="carteira"?"Carteira diária por frente de serviço":activeTab==="etiquetas"?"Executadas e encerradas sem execução, por etiqueta, no período":activeTab==="itinerario"?"O dia de cada equipe — sugerido pelo sistema, fechado por você":"Execuções confirmadas por equipe e tipo de serviço"}
           </p>
           {/* Tabs */}
           <div style={{display:"flex",justifyContent:"center",gap:4,marginTop:14}}>
-            {[{id:"pendente",label:"Pendente",icon:"📋"},{id:"carteira",label:"Carteira",icon:"📊"},
+            {[{id:"pendente",label:"Pendente",icon:"📋"},{id:"carteira",label:"Carteira",icon:"📊"},{id:"etiquetas",label:"Etiquetas",icon:"🏷"},
               ...(sess?.perfil?.pode_producao?[{id:"producao",label:"Produção",icon:"👷"},{id:"itinerario",label:"Itinerário",icon:"🚚"}]:[])].map(tab=>
               <button key={tab.id} onClick={()=>setActiveTab(tab.id)}
                 style={{padding:"8px 24px",borderRadius:8,fontSize:13,fontWeight:700,cursor:"pointer",border:activeTab===tab.id?`1px solid rgba(59,130,246,0.4)`:`1px solid ${C.border}`,
@@ -4722,6 +5113,7 @@ export default function App(){
         </div>
         {toast&&<div style={{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",zIndex:2000,padding:"10px 24px",borderRadius:10,fontSize:13,fontWeight:600,maxWidth:"90vw",wordBreak:"break-word",background:toast.includes("Erro")?"rgba(239,68,68,0.15)":"rgba(16,185,129,0.15)",color:toast.includes("Erro")?C.red:C.green,border:`1px solid ${toast.includes("Erro")?C.redBorder:C.greenBorder}`,backdropFilter:"blur(8px)",animation:"fadeIn 0.2s ease"}}>{toast}</div>}
         {activeTab==="carteira"&&<CarteiraView rawRows={rawRows} sess={sess}/>}
+        {activeTab==="etiquetas"&&<EtiquetasView notas={notas} rawRows={rawRows} sess={sess}/>}
         {activeTab==="producao"&&sess?.perfil?.pode_producao&&<ProducaoView sess={sess} onLogout={sair}/>}
         {activeTab==="itinerario"&&sess?.perfil?.pode_producao&&<ItinerarioView rawRows={rawRows} notas={notas} sess={sess}/>}
         {showLogin&&<LoginModal onClose={()=>setShowLogin(false)} onOk={entrar}/>}
@@ -4793,7 +5185,7 @@ export default function App(){
           <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label} historico={historico} activeUnit={activeUnit}/>
         </div>}
         {activeTab==="pendente"&&showGasModal&&gas.alerts.length>0&&<GasAlertModal alerts={gas.alerts} onIgnore={gas.doIgnore} onClose={()=>setShowGasModal(false)}/>}
-        {buscaModal&&<OSModal rows={buscaModal.rows} familia={buscaModal.familia} tipo="busca" onClose={()=>setBuscaModal(null)}/>}
+        {buscaModal&&<OSModal rows={buscaModal.rows} familia={buscaModal.familia} tipo={buscaModal.tipo||"busca"} onClose={()=>setBuscaModal(null)}/>}
         {showNotas&&<NotasModal notas={notasDoPendente} rows={rawRows} filtroInicial={filtroNota} onClose={()=>setShowNotas(false)}
           onEditar={x=>setNotaAberta(x)}/>}
         {showOuvRodar&&sess?.perfil?.pode_importar&&<OuvidoriaRodarModal sess={sess} onClose={()=>setShowOuvRodar(false)}/>}
@@ -4808,4 +5200,4 @@ export default function App(){
     </div>
     <style>{`@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@keyframes modalIn{from{opacity:0;transform:scale(0.95)}to{opacity:1;transform:scale(1)}}@keyframes gasPulse{0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,0.3)}50%{box-shadow:0 0 12px 4px rgba(245,158,11,0.15)}}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}`}</style>
   </div></SessaoCtx.Provider>;
-}
+}
