@@ -720,7 +720,14 @@ function parseFile(file){
   });
 }
 function tempo(val){const s=String(val).trim();return !s?null:s.startsWith("-")?"fora":"prazo";}
-function tempoDays(val){const m=String(val).match(/(-?\d+)d/);return m?parseInt(m[1]):0;}
+// tempoDays foi REMOVIDA. Ela lia só o componente de dias do Tempo
+// Residual (/(-?\d+)d/), então "-22h,20m" — que não tem "d" nenhum —
+// virava 0, igual a "-5h,59m" e a todas as outras do mesmo dia. Como
+// o sort do JS é estável, as empatadas ficavam na ordem do arquivo e
+// a lista parecia ordenada até acabar os dias e recomeçar do zero.
+// Na carteira de 02/10, 20 das 112 OS fora do prazo de VAZAMENTO DE
+// ÁGUA caíam nisso. Quem ordena agora é minutosResiduais, que soma
+// dias, horas e minutos.
 function fmtDate(iso){if(!iso)return"—";try{const d=new Date(iso);return d.toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"});}catch{return iso;}}
 function fmtDiaShort(dia){try{const[y,m,d]=dia.split("-");return`${d}/${m}`;}catch{return dia;}}
 function fmtDiaFull(dia){try{const[y,m,d]=dia.split("-");return`${d}/${m}/${y}`;}catch{return dia;}}
@@ -927,9 +934,11 @@ function abrirNoMapa(r){
 // OS, e uma propriedade dela.
 // As tags do dia a dia. Para criar uma nova, acrescente aqui: e o
 // unico lugar, e o banco de proposito nao limita a lista.
-// "data:true" faz o formulario pedir uma data junto.
+// "data:true" faz o formulario pedir uma data junto; "pessoa:true"
+// faz pedir o nome de quem pediu — sem ele a etiqueta nao e salva.
 const TAGS=[
   {id:"OUVIDORIA",     cor:"#f87171"},
+  {id:"PRIORIDADE",    cor:"#fb923c", pessoa:true},
   {id:"CONVIAS",       cor:"#60a5fa"},
   {id:"GEOINFRA",      cor:"#a78bfa"},
   {id:"LAJE",          cor:"#e9b949"},
@@ -944,16 +953,17 @@ const fmtDia=iso=>{try{const[a,m,d]=String(iso).slice(0,10).split("-");return `$
 // Uma etiqueta. "vencido" so existe no AGENDADO: data que ja passou
 // quer dizer que a equipe nao foi no dia marcado, e isso e
 // justamente o que alguem precisa ver.
-function Etiqueta({id,dia,pequena}){
+function Etiqueta({id,dia,quem,pequena}){
   const cor=corDaTag(id);
   const vencido=id==="AGENDADO"&&dia&&String(dia).slice(0,10)<new Date().toISOString().slice(0,10);
-  return <span title={vencido?"O dia agendado já passou":undefined}
+  return <span title={vencido?"O dia agendado já passou":(quem?`Prioridade passada por ${quem}`:undefined)}
     style={{display:"inline-flex",alignItems:"center",gap:5,padding:pequena?"1px 7px":"2px 9px",
       borderRadius:RAIO,fontSize:pequena?10:10.5,fontWeight:700,letterSpacing:"0.06em",
       whiteSpace:"nowrap",color:vencido?C.red:cor,
       background:vencido?C.redBg:"transparent",
       border:`1px solid ${vencido?C.redBorder:cor+"55"}`}}>
     {id}{dia&&<span style={{...numStyle,fontWeight:600,opacity:.95}}>{fmtDia(dia)}</span>}
+    {quem&&<span style={{fontWeight:600,opacity:.95}}>{quem}</span>}
   </span>;
 }
 
@@ -962,6 +972,20 @@ const FUNDO_NOTA="rgba(233,185,73,0.055)";
 // Equivalentes ambar do sideActive/sideHover, que sao azuis.
 const FUNDO_NOTA_ATIVO="rgba(233,185,73,0.14)";
 const HOVER_NOTA="rgba(233,185,73,0.07)";
+// Colunas que lemos de os_nota. prioridade_por pode nao existir ainda
+// (sql/os_nota_prioridade.sql): no primeiro 400 a coluna sai da lista e
+// nao volta a ser pedida — sem isso a falha derrubaria TODAS as notas,
+// que e o oposto do que a nota existe para fazer.
+let SEL_NOTA="numero_os,tss,nota,autor_nome,autor_email,atualizado_em,endereco,bairro,municipio,familia,tags,agendado_para,prioridade_por";
+const SEL_NOTA_ANTIGO=SEL_NOTA.replace(",prioridade_por","");
+async function buscaNota(qs){
+  let r=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select="+SEL_NOTA+qs,{headers:HEADERS});
+  if(!r.ok&&SEL_NOTA!==SEL_NOTA_ANTIGO){
+    SEL_NOTA=SEL_NOTA_ANTIGO;
+    r=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select="+SEL_NOTA+qs,{headers:HEADERS});
+  }
+  return r;
+}
 const notaCache=new Map();   // numero_os -> [ {tss, nota, autor_nome, atualizado_em} ]
 async function carregarNotas(numeros){
   const faltam=[...new Set(numeros.filter(Boolean))].filter(n=>!notaCache.has(n));
@@ -970,7 +994,7 @@ async function carregarNotas(numeros){
     const lote=faltam.slice(i,i+200);
     const lista=lote.map(n=>`"${String(n).replace(/["\\]/g,m=>"\\"+m)}"`).join(",");
     try{
-      const res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select=numero_os,tss,nota,autor_nome,autor_email,atualizado_em,endereco,bairro,municipio,familia,tags,agendado_para&numero_os=in.("+encodeURIComponent(lista)+")",{headers:HEADERS});
+      const res=await buscaNota("&numero_os=in.("+encodeURIComponent(lista)+")");
       if(!res.ok) throw new Error("HTTP "+res.status);
       for(const d of await res.json()){
         if(!notaCache.get(d.numero_os)) notaCache.set(d.numero_os,[]);
@@ -996,13 +1020,31 @@ function acharNota(numeroOS,tss){
   const exata=lista.find(d=>String(d.tss).trim()===t);
   return exata?{...exata,outraTss:null}:null;
 }
-async function salvarNota(numeroOS,tss,texto,sess,linha,tags,dia){
+// Nomes já usados na etiqueta PRIORIDADE, para o formulário sugerir.
+// Sem isso o mesmo chefe vira ROBERTO, ROBERT e R. SANTOS, e a conta
+// por pessoa deixa de fechar.
+let cacheNomesPrio=null;
+async function nomesPrioridade(){
+  if(cacheNomesPrio) return cacheNomesPrio;
+  try{
+    const r=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select=prioridade_por&prioridade_por=not.is.null",{headers:HEADERS});
+    if(!r.ok) return (cacheNomesPrio=[]);
+    const s=new Set();for(const x of await r.json()) if(x.prioridade_por) s.add(String(x.prioridade_por).trim().toUpperCase());
+    return (cacheNomesPrio=[...s].sort());
+  }catch{ return (cacheNomesPrio=[]); }
+}
+async function salvarNota(numeroOS,tss,texto,sess,linha,tags,dia,quem){
   // A nota guarda o proprio endereco. Sem isso ela vira uma linha
   // sem endereco no dia em que a OS sai do pendente — e sai, e e
   // justamente quando alguem vai querer entender o que houve.
   const end=linha?[String(linha["Endereço"]||"").trim(),linha["Número"]].filter(x=>x!==""&&x!=null).join(", "):null;
   const corpo={numero_os:String(numeroOS).trim(),tss:String(tss).trim(),nota:texto.trim()||null,
     tags:tags||[],agendado_para:(tags||[]).includes("AGENDADO")?(dia||null):null,
+    // Sempre em caixa alta: é o que faz o painel contar uma pessoa só.
+    // Só vai se a coluna existe — senão o POST inteiro seria recusado e
+    // ninguém conseguiria gravar nota nenhuma.
+    ...(SEL_NOTA.includes("prioridade_por")
+      ?{prioridade_por:(tags||[]).includes("PRIORIDADE")?(String(quem||"").trim().toUpperCase()||null):null}:{}),
     autor_nome:sess?.perfil?.nome||null,autor_email:sess?.perfil?.email||null,
     endereco:end||null,bairro:linha?.["Bairro"]||null,
     municipio:linha?.["Município"]||null,familia:linha?.["Família"]||null,
@@ -1097,8 +1139,13 @@ function padronizarNota(txt){
 async function fetchTodasNotas(){
   const todas=[];let de=0;const ps=1000;
   while(true){
-    const res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select=numero_os,tss,nota,autor_nome,autor_email,atualizado_em,endereco,bairro,municipio,familia,tags,agendado_para&order=atualizado_em.desc",
+    let res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select="+SEL_NOTA+"&order=atualizado_em.desc",
       {headers:{...HEADERS,"Range":de+"-"+(de+ps-1)}});
+    if(!res.ok&&res.status!==206&&SEL_NOTA!==SEL_NOTA_ANTIGO){
+      SEL_NOTA=SEL_NOTA_ANTIGO;
+      res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select="+SEL_NOTA+"&order=atualizado_em.desc",
+        {headers:{...HEADERS,"Range":de+"-"+(de+ps-1)}});
+    }
     if(!res.ok&&res.status!==206) throw new Error("Erro notas "+res.status);
     const d=await res.json();
     if(!d?.length) break;
@@ -1208,7 +1255,7 @@ function NotasModal({notas,rows,onClose,onEditar,filtroInicial}){
                 {outraTss&&<span style={{color:C.amber,fontSize:11}}>a OS está hoje como {String(linha["TSS"]||"").trim()}</span>}
               </div>
               <div style={{display:"flex",gap:9,flexWrap:"wrap",alignItems:"center"}}>
-                {(n.tags||[]).map(t=><Etiqueta key={t} id={t} dia={t==="AGENDADO"?n.agendado_para:null}/>)}
+                {(n.tags||[]).map(t=><Etiqueta key={t} id={t} dia={t==="AGENDADO"?n.agendado_para:null} quem={t==="PRIORIDADE"?n.prioridade_por:null}/>)}
                 {n.nota&&<span style={{fontSize:13,color:C.text,lineHeight:1.45,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{n.nota}</span>}
                 <span style={{fontSize:11,color:C.textDim}}>| {n.autor_nome||n.autor_email||"autor não registrado"} · {fmtDate(n.atualizado_em)}</span>
               </div>
@@ -1426,6 +1473,14 @@ async function fetchCanteiros(){
   if(!r.ok) return [];                            // tabela ainda nao criada: segue sem canteiro
   return r.json();
 }
+async function salvarCanteiro(id,campos,sess){
+  const cab=authHeaders(await tokenFresco(sess));
+  const r=await fetch(SUPABASE_URL+`/rest/v1/canteiro?id=eq.${encodeURIComponent(id)}`,
+    {method:"PATCH",headers:{...cab,"Prefer":"return=representation"},
+     body:JSON.stringify({...campos,atualizado_em:new Date().toISOString()})});
+  if(!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  return (await r.json())[0]||null;
+}
 async function fetchItinerario(dia){
   const r=await fetch(SUPABASE_URL+`/rest/v1/itinerario?dia=eq.${dia}&select=*&order=equipe.asc,ordem.asc`,{headers:HEADERS});
   if(!r.ok) return [];
@@ -1444,6 +1499,59 @@ async function salvarItinerario(dia,linhas,sess){
 // Frentes na ordem em que a operação pensa nelas. OUTROS não entra:
 // é o estado de "ainda não definido", não uma frente de verdade.
 const TIPOS_ORD=["VAZAMENTO","LIGAÇÃO","ESGOTO","DESOBSTRUÇÃO","NIVELAMENTO","REPOSIÇÃO","ASFALTO","OBRAS","MOTO"];
+
+/* ── ORDEM DAS ETAPAS DENTRO DA MESMA OS ──────────────────
+   A OS entra na carteira com UMA TSS; executar essa TSS gera outra
+   com o mesmo número de OS. Enquanto as duas estão abertas, a de
+   baixo não pode ir antes da de cima — não se repõe o asfalto de um
+   buraco que ainda está aberto.
+
+   Os três níveis saíram da tabela execucao (ago/set, 1.083 OS que
+   tiveram mais de uma frente executada), não de palpite. Contando
+   em quantas OS a primeira frente veio antes da segunda:
+     VAZAMENTO   -> ASFALTO      508   (ao contrário: 0)
+     ESGOTO      -> ASFALTO      165   (ao contrário: 1)
+     NIVELAMENTO -> ASFALTO      121   (ao contrário: 0)
+     VAZAMENTO   -> REPOSIÇÃO    322   (ao contrário: 10)
+     REPOSIÇÃO   -> ASFALTO       98   (ao contrário: 30)
+   Entre os serviços do nível 1 NÃO há ordem: ESGOTO e VAZAMENTO se
+   invertem 175 x 58, MOTO e VAZAMENTO 35 x 23. Ali quem entra
+   primeiro é quem tem o prazo pior, e disso o passo do PRAZO já
+   cuida. Só o que é acabamento de buraco tem ordem obrigatória.
+
+   REPOSIÇÃO -> ASFALTO tem 30 inversões em 128 — acontece de verdade,
+   mas a maioria manda. Quem discordar tira a OS da espera na mão, que
+   o botão + da lista continua aceitando.
+
+   Medido na carteira de 25/09: segura 2 pares OS+TSS em 764, os dois
+   capa asfáltica atrás da base (REPOR CONCRETO num, REPOR SARJETA e
+   REPOR GUIA no outro). É pouco porque é raro a OS ter duas etapas
+   abertas ao mesmo tempo — 10 OS em 752. O valor da trava não é o
+   volume: é não mandar a equipe de asfalto para um buraco aberto.
+   ───────────────────────────────────────────────────────── */
+// As frentes que abrem o buraco. OUTROS fica FORA de propósito: frente
+// não resolvida não é etapa anterior conhecida, e 117 das 764 linhas da
+// carteira caem em OUTROS hoje — deixá-las segurando a reposição
+// travaria serviço à toa. Etapa 0 = não segura ninguém e não é segurada.
+const ABRE=new Set(["VAZAMENTO","LIGAÇÃO","ESGOTO","DESOBSTRUÇÃO","NIVELAMENTO","OBRAS","MOTO"]);
+// A etapa sai do NOME da TSS, não da frente — e isso é de propósito.
+// A frente responde "de que turma é o serviço" e está medida em quem
+// executou; a etapa responde "que lugar ele ocupa na obra". As duas
+// discordam num caso real: REPOR PASSEIO ADJACENTE CIMENTADO, REPOR
+// PISO INTERNO CIMENTADO e REPOR ASFALTO A FRIO estão medidos como
+// VAZAMENTO, porque é a turma do vazamento que os executa — o que é
+// verdade sobre a turma e errado sobre a etapa. Se a etapa saísse da
+// frente, esses três iriam segurar a reposição da própria OS.
+// Os dois subgrupos de REPOSIÇÃO já são a lista curada: ASFALTO é
+// acabamento, PISO é base.
+const etapaDaTss=(tss,familia,tipo)=>{
+  if(matchTssAsfalto(tss)) return 3;                       // acabamento
+  if(/^REPOR /.test(norm(tss))) return 2;                  // base
+  if(matchFamiliaReposicao(familia)) return 2;             // família da Sabesp
+  if(tipo==="ASFALTO") return 3;                           // só se o nome não disse nada
+  if(tipo==="REPOSIÇÃO") return 2;
+  return ABRE.has(tipo)?1:0;
+};
 
 async function salvarEquipe(nome,campos,sess){
   const cab=authHeaders(await tokenFresco(sess));
@@ -1713,6 +1821,113 @@ function FrenteTssModal({linhas,sess,onClose,onSalvou}){
   </div>;
 }
 
+/* ── Canteiros ────────────────────────────────────────────
+   Duas coisas dependem da coordenada do canteiro e nenhuma das duas
+   avisa quando ela falta: a ordem de visita, que sem ponto de partida
+   fica na ordem em que a OS foi escolhida, e o link de rota do
+   WhatsApp, que simplesmente não aparece.
+
+   Estava só no SQL (UPDATE canteiro SET lat=…), e por isso ficou
+   parado. Aqui dá para resolver de duas formas: procurar o endereço
+   na biblioteca do próprio sistema — que é o certo, porque ela sabe
+   das ruas homônimas e das vielas que o Google não acha — ou colar a
+   coordenada à mão quando o canteiro não tem ligação cadastrada, que
+   é o caso provável de um pátio.
+   ───────────────────────────────────────────────────────── */
+function CanteiroModal({canteiros,sess,onClose,onSalvou}){
+  const [erro,setErro]=useState("");
+  const [indo,setIndo]=useState(null);
+  const [form,setForm]=useState(()=>Object.fromEntries((canteiros||[]).map(k=>
+    [k.id,{endereco:k.endereco||"",numero:"",lat:k.lat??"",lon:k.lon??"",colar:"",aviso:""}])));
+  const mexer=(id,campos)=>setForm(f=>({...f,[id]:{...f[id],...campos}}));
+
+  // A biblioteca é a fonte certa: mesma conta que o painel usa para
+  // pôr a OS no mapa, com o mesmo acerto nas ruas de nome repetido.
+  const buscar=id=>{
+    const v=form[id];
+    const c=acharCoord(v.endereco,v.numero);
+    if(!c) return mexer(id,{aviso:"Esse endereço não está na biblioteca. Cole a coordenada do pátio à mão, embaixo."});
+    mexer(id,{lat:c.lat,lon:c.lon,aviso:`Achei na biblioteca (${c.tipo}) — confira no mapa antes de salvar.`});
+  };
+  const colar=id=>{
+    const c=lerCoord(form[id].colar);
+    const e=conferirCoord(c);
+    if(e==="trocado") return mexer(id,{lat:c.lon,lon:c.lat,aviso:"Latitude e longitude estavam trocadas — arrumei."});
+    if(e) return mexer(id,{aviso:e});
+    mexer(id,{lat:c.lat,lon:c.lon,aviso:"Coordenada lida."});
+  };
+  const gravar=async id=>{
+    const v=form[id];
+    setIndo(id);setErro("");
+    try{
+      const lat=v.lat===""?null:+v.lat, lon=v.lon===""?null:+v.lon;
+      if(lat!=null&&lon!=null){
+        const e=conferirCoord({lat,lon});
+        if(e){ setErro(e==="trocado"?"Latitude e longitude parecem trocadas.":e); setIndo(null); return; }
+      }
+      const salvo=await salvarCanteiro(id,{endereco:v.endereco.trim()||null,lat,lon},sess);
+      if(salvo) onSalvou(salvo);
+      mexer(id,{aviso:"Salvo ✓"});
+    }catch(e){ setErro(e.message||String(e)); }
+    setIndo(null);
+  };
+  const campo={padding:"5px 8px",borderRadius:RAIO,border:`1px solid ${C.border}`,background:C.cardAlt,
+    color:C.text,fontSize:12,fontFamily:"inherit",colorScheme:"dark"};
+  return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+    <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:14,border:`1px solid ${C.border}`,
+      width:"100%",maxWidth:700,maxHeight:"90vh",padding:20,display:"flex",flexDirection:"column",gap:14,overflowY:"auto"}}>
+      <div>
+        <div style={{fontSize:15,fontWeight:700,color:C.text}}>Canteiros</div>
+        <div style={{fontSize:12.5,color:C.textDim,marginTop:4,lineHeight:1.5}}>
+          De onde cada equipe sai de manhã. Sem a coordenada, a ordem de visita não sai do canteiro
+          e o link de rota do WhatsApp não aparece — o resto do itinerário continua funcionando.</div>
+      </div>
+      {(canteiros||[]).map(k=>{const v=form[k.id]||{};const pronto=v.lat!==""&&v.lon!=="";
+        return <div key={k.id} style={{border:`1px solid ${C.border}`,borderRadius:RAIO,padding:14,display:"flex",flexDirection:"column",gap:9}}>
+        <div style={{display:"flex",alignItems:"baseline",gap:8}}>
+          <div style={{fontSize:13.5,fontWeight:700,color:C.text}}>{k.nome}</div>
+          <div style={{fontSize:11,color:pronto?C.green:C.amber}}>{pronto?"com coordenada":"sem coordenada"}</div>
+          <div style={{flex:1}}/>
+          <div style={{fontSize:11,color:C.textDim}}>atende {(k.municipios||[]).join(", ")||"todos"}</div>
+        </div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          <input value={v.endereco||""} onChange={e=>mexer(k.id,{endereco:e.target.value})} placeholder="rua do canteiro"
+            style={{...campo,flex:1,minWidth:200}}/>
+          <input value={v.numero||""} onChange={e=>mexer(k.id,{numero:e.target.value})} placeholder="nº"
+            style={{...campo,width:70}}/>
+          <button onClick={()=>buscar(k.id)} style={{...campo,cursor:"pointer",color:C.accent,borderColor:C.accent+"55",background:C.accentBg,fontWeight:700}}>Buscar na biblioteca</button>
+        </div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+          <input value={v.colar||""} onChange={e=>mexer(k.id,{colar:e.target.value})}
+            placeholder="ou cole a coordenada / o link do Google Maps"
+            style={{...campo,flex:1,minWidth:220}}/>
+          <button onClick={()=>colar(k.id)} style={{...campo,cursor:"pointer",color:C.textMuted}}>Ler</button>
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+          <input value={v.lat??""} onChange={e=>mexer(k.id,{lat:e.target.value})} placeholder="lat"
+            style={{...campo,...numStyle,width:120}}/>
+          <input value={v.lon??""} onChange={e=>mexer(k.id,{lon:e.target.value})} placeholder="lon"
+            style={{...campo,...numStyle,width:120}}/>
+          {pronto&&<a href={`https://www.google.com/maps/search/?api=1&query=${v.lat},${v.lon}`} target="_blank" rel="noreferrer"
+            style={{fontSize:11.5,color:C.accent}}>ver no mapa</a>}
+          <div style={{flex:1}}/>
+          <button onClick={()=>gravar(k.id)} disabled={indo===k.id||!sess}
+            style={{...campo,cursor:sess?"pointer":"default",color:C.green,borderColor:C.green+"55",background:C.green+"14",
+              fontWeight:700,opacity:sess?1:.45}}>{indo===k.id?"Salvando…":"Salvar"}</button>
+        </div>
+        {v.aviso&&<div style={{fontSize:11.5,color:v.aviso.includes("não está")?C.amber:C.green}}>{v.aviso}</div>}
+      </div>;})}
+      {!canteiros?.length&&<div style={{fontSize:12.5,color:C.textDim}}>
+        A tabela <code>canteiro</code> ainda não existe no banco. Rode <code>sql/canteiro.sql</code> no Supabase.</div>}
+      {!sess&&<div style={{fontSize:11.5,color:C.amber}}>Entre com sua conta para salvar.</div>}
+      {erro&&<div style={{fontSize:12.5,color:C.red,lineHeight:1.5}}>Erro ao salvar: {erro}</div>}
+      <div style={{display:"flex",justifyContent:"flex-end"}}>
+        <button onClick={onClose} style={{fontSize:12.5,padding:"7px 14px",borderRadius:RAIO,border:`1px solid ${C.border}`,background:"transparent",color:C.textMuted,cursor:"pointer"}}>Fechar</button>
+      </div>
+    </div>
+  </div>;
+}
+
 function ItinerarioView({rawRows,notas,sess}){
   const amanha=()=>{const d=new Date();d.setDate(d.getDate()+1);return diaISO(d);};
   const [dia,setDia]=useState(amanha);
@@ -1728,6 +1943,7 @@ function ItinerarioView({rawRows,notas,sess}){
   const [reserva,setReserva]=useState(0);         // % do dia guardado para urgencia da Sabesp
   const [editando,setEditando]=useState(null);   // equipe aberta no cadastro
   const [vendoFrentes,setVendoFrentes]=useState(false);
+  const [vendoCanteiros,setVendoCanteiros]=useState(false);
   const [famPorTss,setFamPorTss]=useState({});   // norm(TSS) → família, do histórico do pendente
   useEffect(()=>{let vivo=true;fetchTssToFamiliaMap().then(m=>{if(vivo)setFamPorTss(m||{});}).catch(()=>{});
     return()=>{vivo=false;};},[]);
@@ -1792,6 +2008,7 @@ function ItinerarioView({rawRows,notas,sess}){
         return {r,os,tss,tags,trava,agendado,nota:n?.nota||null,
           setor:String(r["SF"]??"").trim(),
           tipo:tipoDoServico(tss,r["Família"],tssTipoEf),
+          etapa:etapaDaTss(tss,r["Família"],tipoDoServico(tss,r["Família"],tssTipoEf)),
           min:minutosResiduais(r["Tempo Residual"]),
           coord:c?{lat:c.lat,lon:c.lon,exata:c.tipo==="exato"||c.ligacao}:null};
       });
@@ -1802,6 +2019,52 @@ function ItinerarioView({rawRows,notas,sess}){
   const disponiveis=useMemo(()=>candidatos.filter(c=>
     !c.trava && (!c.agendado||c.agendado===dia) && !noPlano.has(chave(c))),[candidatos,noPlano,dia]);
   const travadas=useMemo(()=>candidatos.filter(c=>c.trava||(c.agendado&&c.agendado!==dia)),[candidatos,dia]);
+
+  // ---- etapa anterior da mesma OS ainda aberta ----
+  // Vale por número de OS, não por endereço: é o mesmo buraco. Guarda
+  // qual TSS está segurando, para a tela poder dizer o motivo em vez
+  // de só esconder a linha.
+  const esperando=useMemo(()=>{
+    const porOS=new Map();
+    for(const c of candidatos){
+      if(!porOS.has(c.os)) porOS.set(c.os,[]);
+      porOS.get(c.os).push(c);
+    }
+    const m=new Map();
+    for(const lista of porOS.values()){
+      if(lista.length<2) continue;
+      for(const c of lista){
+        if(c.etapa<2) continue;              // só reposição e asfalto esperam alguém
+        const antes=lista.filter(o=>o.etapa>=1&&o.etapa<c.etapa);
+        if(antes.length) m.set(chave(c),antes.map(o=>o.tss).join(", "));
+      }
+    }
+    return m;
+  },[candidatos]);
+  const segurada=c=>esperando.get(chave(c))||null;
+  // O que o Sugerir pode distribuir: livre e com a etapa anterior já
+  // fechada. As em espera continuam na lista de baixo, marcadas.
+  const prontas=useMemo(()=>disponiveis.filter(c=>!esperando.has(chave(c))),[disponiveis,esperando]);
+  const emEspera=useMemo(()=>disponiveis.filter(c=>esperando.has(chave(c))),[disponiveis,esperando]);
+  // Etapa fora de ordem dentro do dia de uma equipe: só acontece se
+  // ele puser as duas na mão. Não corrige sozinho — avisa na linha.
+  const foraDeOrdem=useMemo(()=>{
+    const etapaDe=new Map(candidatos.map(c=>[chave(c),c.etapa]));
+    const etapaP=p=>etapaDe.get(String(p.numero_os).trim()+"§"+String(p.tss).trim())||0;
+    const fora=new Set(),porEquipe=new Map();
+    for(const p of plano){
+      if(!porEquipe.has(p.equipe)) porEquipe.set(p.equipe,[]);
+      porEquipe.get(p.equipe).push(p);
+    }
+    for(const lista of porEquipe.values()){
+      const ord=[...lista].sort((a,b)=>a.ordem-b.ordem);
+      for(let i=0;i<ord.length;i++) for(let j=i+1;j<ord.length;j++){
+        if(String(ord[i].numero_os).trim()!==String(ord[j].numero_os).trim()) continue;
+        if(etapaP(ord[i])>etapaP(ord[j])) fora.add(String(ord[i].numero_os).trim()+"§"+String(ord[i].tss).trim());
+      }
+    }
+    return fora;
+  },[plano,candidatos]);
   const porChave=useMemo(()=>{const m=new Map();for(const c of candidatos)m.set(chave(c),c);return m;},[candidatos]);
 
   const ativas=useMemo(()=>(equipes||[]).filter(e=>e.ativa),[equipes]);
@@ -1894,7 +2157,7 @@ function ItinerarioView({rawRows,notas,sess}){
       if(!livres.length) continue;
       const k=canteiroDe(livres[0]);
       const partida=(k&&k.lat!=null&&k.lon!=null)?{lat:k.lat,lon:k.lon}:null;
-      const pool=disponiveis.filter(c=>!usados.has(chave(c))&&atendeCanteiro(k,c)&&equipesG.some(e=>atende(e,c)));
+      const pool=prontas.filter(c=>!usados.has(chave(c))&&atendeCanteiro(k,c)&&equipesG.some(e=>atende(e,c)));
       if(!pool.length) continue;
 
       const porSetor=new Map();
@@ -1940,6 +2203,7 @@ function ItinerarioView({rawRows,notas,sess}){
     const n=novas.length-plano.length;
     const nOutros=ativas.filter(e=>!tiposDe(e).length).length;
     setAviso((n?`${n} serviços distribuídos — confira antes de salvar`:"Nada novo para distribuir")
+      +(emEspera.length?` · ${emEspera.length} esperando a etapa anterior da mesma OS`:"")
       +(nOutros?` · ${nOutros} equipe(s) sem frente definida ficaram de fora — abra o cadastro delas`:""));
   };
 
@@ -2013,7 +2277,9 @@ function ItinerarioView({rawRows,notas,sess}){
             borderRadius:RAIO,padding:"3px 8px",colorScheme:"dark"}}/></label>
       <span style={{width:1,height:14,background:C.border}}/>
       <span style={{fontSize:12,color:C.textDim}}>{plano.length} serviços em {new Set(plano.map(p=>p.equipe)).size} equipes ·
-        {" "}{disponiveis.length} livres · <span style={{color:C.amber}}>{travadas.length} travadas</span></span>
+        {" "}{prontas.length} livres ·{" "}
+        {emEspera.length>0&&<><span style={{color:COR_NOTA}} title="Etapa posterior de uma OS que ainda tem etapa aberta">{emEspera.length} em espera</span> · </>}
+        <span style={{color:C.amber}}>{travadas.length} travadas</span></span>
       <div style={{flex:1}}/>
       <label title="Parte do dia guardada para as prioridades que a Sabesp manda no meio do dia"
         style={{display:"flex",alignItems:"center",gap:5,fontSize:12,color:C.textDim}}>Reserva
@@ -2022,6 +2288,8 @@ function ItinerarioView({rawRows,notas,sess}){
           style={{width:50,fontSize:12,fontFamily:FONTE_UI,color:C.amber,background:"transparent",
             border:`1px solid ${C.border}`,borderRadius:RAIO,padding:"3px 6px"}}/>%</label>
       {bt("Frentes",()=>setVendoFrentes(true),C.textMuted)}
+      {bt(canteiros.some(k=>k.lat==null)?"Canteiros ⚠":"Canteiros",()=>setVendoCanteiros(true),
+        canteiros.some(k=>k.lat==null)?C.amber:C.textMuted)}
       {bt("Sugerir",sugerir,C.accent)}
       {bt(salvando?"Salvando…":"Salvar",salvar,C.green,!salvando&&!!sess)}
       {bt("Limpar",()=>setPlano([]),C.red,plano.length>0)}
@@ -2070,7 +2338,9 @@ function ItinerarioView({rawRows,notas,sess}){
                     <span onClick={()=>c&&abrirNoMapa(c.r)} style={{cursor:c?"pointer":"default",textDecoration:c?"underline":"none",
                       textDecorationColor:p.lat?C.green:C.textDim,textUnderlineOffset:3}}>
                       {p.lat?"📍":"🔍"} {p.endereco}</span>{p.bairro?" — "+p.bairro:""}</div>
-                  {c?.nota&&<div style={{fontSize:11.5,color:COR_NOTA}}>⚠ {c.nota}</div>}</td>
+                  {c?.nota&&<div style={{fontSize:11.5,color:COR_NOTA}}>⚠ {c.nota}</div>}
+                  {foraDeOrdem.has(String(p.numero_os).trim()+"§"+String(p.tss).trim())&&
+                    <div style={{fontSize:11,color:C.amber}}>⚠ etapa posterior de uma OS que aparece mais abaixo neste mesmo dia — use ↓ para pôr depois dela</div>}</td>
                 <td style={{...td,...numStyle,whiteSpace:"nowrap",color:c&&c.min<0?C.red:C.textMuted}}>{c?c.r["Tempo Residual"]:""}</td>
                 <td style={{...td,whiteSpace:"nowrap",color:C.textDim}}>
                   <span onClick={()=>mover(p,-1)} style={{cursor:"pointer",padding:"0 4px"}}>↑</span>
@@ -2087,14 +2357,17 @@ function ItinerarioView({rawRows,notas,sess}){
             textTransform:"uppercase",color:C.textDim}}>Livres para esta equipe — as mais urgentes primeiro</div>
           <div style={{maxHeight:420,overflowY:"auto"}}>
             <table style={{width:"100%",borderCollapse:"collapse"}}>
-              <tbody>{disponiveis.filter(c=>atende(equipeSel,c)).sort(ordemPrazo).slice(0,60).map(c=>
-                <tr key={chave(c)}>
-                  <td style={{...td,width:28}}><span onClick={()=>acrescentar(c)} title="Pôr nesta equipe"
-                    style={{cursor:"pointer",color:C.accent,border:`1px solid ${C.border}`,borderRadius:RAIO,padding:"0 6px"}}>+</span></td>
+              <tbody>{disponiveis.filter(c=>atende(equipeSel,c))
+                .sort((a,b)=>(segurada(a)?1:0)-(segurada(b)?1:0)||ordemPrazo(a,b)).slice(0,60).map(c=>
+                <tr key={chave(c)} style={{opacity:segurada(c)?.55:1}}>
+                  <td style={{...td,width:28}}><span onClick={()=>acrescentar(c)}
+                    title={segurada(c)?"Espera a etapa anterior — põe na mão se souber que já foi feita":"Pôr nesta equipe"}
+                    style={{cursor:"pointer",color:segurada(c)?COR_NOTA:C.accent,border:`1px solid ${C.border}`,borderRadius:RAIO,padding:"0 6px"}}>+</span></td>
                   <td style={{...td,...numStyle,color:C.accent,fontWeight:600,whiteSpace:"nowrap"}}>{c.os}</td>
                   <td style={td}>{c.tss}<div style={{fontSize:11.5,color:C.textDim}}>
                     {c.coord?"📍":"🔍"} {String(c.r["Endereço"]).trim()}, {c.r["Número"]} — {c.r["Bairro"]}</div>
-                    {c.agendado===dia&&<div style={{fontSize:11,color:"#34d399"}}>AGENDADO para hoje</div>}</td>
+                    {c.agendado===dia&&<div style={{fontSize:11,color:"#34d399"}}>AGENDADO para hoje</div>}
+                    {segurada(c)&&<div style={{fontSize:11,color:COR_NOTA}}>⏳ espera terminar: {segurada(c)}</div>}</td>
                   <td style={{...td,...numStyle,whiteSpace:"nowrap",color:c.min<0?C.red:C.green}}>{c.r["Tempo Residual"]}</td>
                 </tr>)}
                 {disponiveis.filter(c=>atende(equipeSel,c)).length===0&&
@@ -2103,12 +2376,18 @@ function ItinerarioView({rawRows,notas,sess}){
           </div>
         </div>}
 
-        {travadas.length>0&&<div style={{fontSize:11.5,color:C.textDim,lineHeight:1.6}}>
-          <b style={{color:C.amber}}>Fora do itinerário de propósito:</b> {travadas.filter(c=>c.trava).length} com impedimento na nota
-          (LAJE, GEOINFRA, CONVIAS) e {travadas.filter(c=>!c.trava).length} agendadas para outro dia.
+        {(travadas.length>0||emEspera.length>0)&&<div style={{fontSize:11.5,color:C.textDim,lineHeight:1.6}}>
+          <b style={{color:C.amber}}>Fora do Sugerir de propósito:</b> {travadas.filter(c=>c.trava).length} com impedimento na nota
+          (LAJE, GEOINFRA, CONVIAS), {travadas.filter(c=>!c.trava).length} agendadas para outro dia
+          {emEspera.length>0&&<> e <span style={{color:COR_NOTA}}>{emEspera.length} esperando a etapa anterior da mesma OS</span> —
+            reposição e asfalto não entram enquanto o serviço que abriu o buraco continua na carteira. Aparecem no fim da lista acima,
+            para você pôr na mão quando souber que a etapa de trás já foi feita</>}.
         </div>}
       </div>
     </div>
+    {vendoCanteiros&&<CanteiroModal canteiros={canteiros} sess={sess}
+      onClose={()=>setVendoCanteiros(false)}
+      onSalvou={k=>setCanteiros(l=>l.map(x=>x.id===k.id?k:x))}/>}
     {vendoFrentes&&<FrenteTssModal linhas={linhasFrente} sess={sess}
       onClose={()=>setVendoFrentes(false)}
       onSalvou={(tss,tipo)=>setTssTipo(m=>({...m,[tss]:{...(m[tss]||{tipo:tipo||"OUTROS",conf:0}),manual:tipo}}))}/>}
@@ -2128,16 +2407,21 @@ function NotaModal({linha,nota,sess,onClose,onSalvou}){
   const [txt,setTxt]=useState(nota?.nota||"");
   const [tags,setTags]=useState(nota?.tags||[]);
   const [dia,setDia]=useState(nota?.agendado_para?String(nota.agendado_para).slice(0,10):"");
+  const [quem,setQuem]=useState(nota?.prioridade_por||"");
+  const [nomes,setNomes]=useState([]);
   const [salvando,setSalvando]=useState(false);
   const [erro,setErro]=useState("");
   const marcar=id=>setTags(t=>t.includes(id)?t.filter(x=>x!==id):[...t,id]);
   const precisaData=tags.includes("AGENDADO")&&!dia;
+  const precisaQuem=tags.includes("PRIORIDADE")&&!quem.trim();
+  // Carrega os nomes já usados só quando a etiqueta é marcada.
+  useEffect(()=>{if(tags.includes("PRIORIDADE")&&!nomes.length) nomesPrioridade().then(setNomes);},[tags,nomes.length]);
   const vazia=!txt.trim()&&tags.length===0;
   const gravar=async(apagar)=>{
     setSalvando(true);setErro("");
     try{
       if(apagar) await apagarNota(os,nota.outraTss||tss,sess);
-      else await salvarNota(os,tss,padronizarNota(txt),sess,linha,tags,dia);
+      else await salvarNota(os,tss,padronizarNota(txt),sess,linha,tags,dia,quem);
       onSalvou();
     }catch(e){setErro(String(e.message||e));setSalvando(false);}
   };
@@ -2169,6 +2453,27 @@ function NotaModal({linha,nota,sess,onClose,onSalvou}){
               background:C.cardAlt,color:C.text,fontSize:13,fontFamily:"inherit",colorScheme:"dark"}}/>
           {precisaData&&<span style={{fontSize:11.5,color:C.red}}>AGENDADO sem data não diz nada — escolha o dia</span>}
         </div>}
+        {/* PRIORIDADE sem dono é pressão sem responsável: daqui a um mês
+            ninguém lembra quem mandou furar a fila. Por isso o nome é
+            obrigatório, e sempre gravado em caixa alta. */}
+        {tags.includes("PRIORIDADE")&&<div style={{marginTop:9}}>
+          <div style={{display:"flex",alignItems:"center",gap:9,flexWrap:"wrap"}}>
+            <span style={{fontSize:12,color:C.textMuted}}>Quem pediu</span>
+            <input value={quem} onChange={e=>setQuem(e.target.value.toUpperCase())}
+              placeholder="NOME DE QUEM PASSOU A PRIORIDADE" maxLength={60}
+              style={{flex:1,minWidth:200,padding:"7px 10px",borderRadius:RAIO,
+                border:`1px solid ${precisaQuem?C.redBorder:C.border}`,background:C.cardAlt,
+                color:C.text,fontSize:13,fontFamily:"inherit",textTransform:"uppercase"}}/>
+          </div>
+          {nomes.length>0&&<div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:7}}>
+            {nomes.filter(n=>!quem.trim()||n.includes(quem.trim())).slice(0,8).map(n=>
+              <span key={n} onClick={()=>setQuem(n)} style={{cursor:"pointer",userSelect:"none",
+                padding:"2px 8px",borderRadius:RAIO,fontSize:11,color:C.textDim,
+                border:`1px solid ${C.border}`}}>{n}</span>)}
+          </div>}
+          {precisaQuem&&<div style={{fontSize:11.5,color:C.red,marginTop:6}}>
+            PRIORIDADE sem nome não se cobra de ninguém — escreva quem pediu</div>}
+        </div>}
       </div>
       <textarea value={txt} onChange={e=>setTxt(e.target.value)} rows={3}
         placeholder="Detalhe que a etiqueta não cobre: com quem falar, o que falta…"
@@ -2182,7 +2487,7 @@ function NotaModal({linha,nota,sess,onClose,onSalvou}){
         {nota&&<button onClick={()=>gravar(true)} disabled={salvando}
           style={{marginRight:"auto",padding:"9px 14px",borderRadius:8,border:`1px solid ${C.redBorder}`,background:"transparent",color:C.red,fontSize:12.5,cursor:"pointer"}}>Apagar</button>}
         <button onClick={onClose} style={{padding:"9px 16px",borderRadius:8,border:`1px solid ${C.border}`,background:"transparent",color:C.textDim,fontSize:13,cursor:"pointer"}}>Cancelar</button>
-        {(()=>{const ok=!vazia&&!precisaData&&!salvando;
+        {(()=>{const ok=!vazia&&!precisaData&&!precisaQuem&&!salvando;
           return <button onClick={()=>gravar(false)} disabled={!ok}
             style={{padding:"9px 18px",borderRadius:RAIO,border:"none",fontSize:13,fontWeight:700,
               background:ok?C.accent:C.border,color:ok?"#0b1220":C.textDim,
@@ -2389,14 +2694,14 @@ function Check({checked,onChange}){
 function OSModal({rows,familia,tssName,tipo,onClose}){
   // "busca" vem do campo de pesquisa da lateral: a OS pode ter linhas
   // no prazo e fora, entao o cabecalho nao afirma nenhum dos dois.
-  const label=tipo==="prazo"?"No Prazo":tipo==="fora"?"Fora do Prazo":"Busca por OS";
+  const label=tipo==="prazo"?"No Prazo":tipo==="fora"?"Fora do Prazo":tipo==="endereco"?"Busca por endereço":"Busca por OS";
   const color=tipo==="prazo"?C.green:tipo==="fora"?C.red:C.accent;
   const [modalSort,setModalSort]=useState({col:null,asc:true});
   const cols=[
     {key:"os",label:"Nº OS",get:r=>r["Número OS"]},{key:"tss",label:"TSS",get:r=>r["TSS"]},{key:"sf",label:"SF",get:r=>r["SF"]},
     {key:"end",label:"Endereço",get:r=>String(r["Endereço"]).trim()+", "+r["Número"]+(r["Complemento"]?" - "+String(r["Complemento"]).trim():"")},
     {key:"bairro",label:"Bairro",get:r=>r["Bairro"]},{key:"mun",label:"Município",get:r=>r["Município"]},
-    {key:"tempo",label:"Tempo Residual",get:r=>r["Tempo Residual"],sort:r=>tempoDays(r["Tempo Residual"])},{key:"status",label:"Status",get:r=>r["Status da OS"]},
+    {key:"tempo",label:"Tempo Residual",get:r=>r["Tempo Residual"],sort:r=>minutosResiduais(r["Tempo Residual"])},{key:"status",label:"Status",get:r=>r["Status da OS"]},
   ];
   const sorted=useMemo(()=>{if(!modalSort.col)return rows;const def=cols.find(c=>c.key===modalSort.col);if(!def)return rows;const fn=def.sort||def.get;
     return[...rows].sort((a,b)=>{let va=fn(a),vb=fn(b);if(typeof va==="string")va=va.toLowerCase();if(typeof vb==="string")vb=vb.toLowerCase();const cmp=va<vb?-1:va>vb?1:0;return modalSort.asc?cmp:-cmp;});},[rows,modalSort]);
@@ -2555,7 +2860,7 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
                     linha, depois de uma barra, para o bloco nao ficar
                     mais alto que a propria OS. */}
                 <div style={{display:"flex",gap:9,flexWrap:"wrap",alignItems:"center",paddingLeft:2}}>
-                  {(nt.tags||[]).map(t=><Etiqueta key={t} id={t} dia={t==="AGENDADO"?nt.agendado_para:null} pequena/>)}
+                  {(nt.tags||[]).map(t=><Etiqueta key={t} id={t} dia={t==="AGENDADO"?nt.agendado_para:null} quem={t==="PRIORIDADE"?nt.prioridade_por:null} pequena/>)}
                   {nt.nota&&<span style={{fontSize:13,color:C.text,lineHeight:1.45,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{nt.nota}</span>}
                   <span style={{fontSize:11,color:C.textDim}}>
                     | {nt.autor_nome||nt.autor_email||"autor não registrado"} · {fmtDate(nt.atualizado_em)}
@@ -2991,7 +3296,8 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx}){
   const allOff=allNames.every(n=>excludedTSS.has(n));const someOff=allNames.some(n=>excludedTSS.has(n));const filterActive=someOff&&!allOff;
   const openModal=(tipo,tssName,membros)=>{let f=activeRows;
     if(membros)f=f.filter(r=>membros.includes(String(r["TSS"]).trim()));
-    f=f.filter(r=>tempo(r["Tempo Residual"])===tipo).sort((a,b)=>tempoDays(a["Tempo Residual"])-tempoDays(b["Tempo Residual"]));
+    f=f.filter(r=>tempo(r["Tempo Residual"])===tipo)
+       .sort((a,b)=>minutosResiduais(a["Tempo Residual"])-minutosResiduais(b["Tempo Residual"]));
     if(f.length>0)setModal({rows:f,tipo,tssName});};
   // Familia com subgrupos abre nos subitens, nao nas 45 TSS.
   // "Outros" recolhe o que nao esta em lista nenhuma — nunca some.
@@ -3090,15 +3396,19 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx}){
 const btnTiny={padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:600,border:`1px solid ${C.border}`,background:"transparent",color:C.textDim,cursor:"pointer"};
 
 /* ── Sidebar ── */
-function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,nNotas,onNotas,tagsNotas,onBuscarOS}){
+function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,nNotas,onNotas,tagsNotas,onBuscarOS,onBuscarEndereco}){
   const [busca,setBusca]=useState("");
   const [avisoBusca,setAvisoBusca]=useState("");
+  const [rua,setRua]=useState("");
+  const [num,setNum]=useState("");
+  const [avisoEnd,setAvisoEnd]=useState("");
   const buscar=()=>{
     const q=busca.replace(/\D/g,"");
     if(!q){setAvisoBusca("Digite o número da OS");return;}
     const aviso=onBuscarOS(q);          // null = achou e abriu o modal
     setAvisoBusca(aviso||"");
   };
+  const buscarEnd=()=>setAvisoEnd(onBuscarEndereco(rua,num)||"");
   return <div style={{width:collapsed?56:210,minWidth:collapsed?56:210,background:C.sidebar,borderRight:`1px solid ${C.border}`,display:"flex",flexDirection:"column",transition:"width 0.25s ease,min-width 0.25s ease",overflow:"hidden",flexShrink:0}}>
     <div style={{padding:collapsed?"16px 0":"16px 16px",display:"flex",alignItems:"center",justifyContent:collapsed?"center":"space-between",borderBottom:`1px solid ${C.border}`,minHeight:56}}>
       {!collapsed&&<span style={{fontSize:13,fontWeight:800,color:C.accent,letterSpacing:0.5,textTransform:"uppercase",whiteSpace:"nowrap"}}>Unidades</span>}
@@ -3181,6 +3491,28 @@ function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,nNo
                   background:C.accentBg,color:C.accent,cursor:"pointer"}}>↵</button>
             </div>
             {avisoBusca&&<div style={{fontSize:11,color:C.amber,marginTop:6,paddingLeft:4,lineHeight:1.35}}>{avisoBusca}</div>}
+
+            {/* Busca por endereço. Os dois campos são independentes: só a
+                rua lista a rua inteira, só o número varre todas as ruas
+                (útil quando se sabe o número e não o nome da via), e os
+                dois juntos vão direto no ponto. */}
+            <div style={{fontSize:10,color:C.textDim,letterSpacing:"0.15em",textTransform:"uppercase",margin:"12px 0 6px",paddingLeft:4}}>Buscar endereço</div>
+            <input id="busca-rua" value={rua} placeholder="Rua, avenida…"
+              onChange={e=>{setRua(e.target.value);if(avisoEnd)setAvisoEnd("");}}
+              onKeyDown={e=>{if(e.key==="Enter")buscarEnd();}}
+              style={{width:"100%",boxSizing:"border-box",fontSize:12,padding:"6px 8px",borderRadius:RAIO,
+                border:`1px solid ${C.border}`,background:C.card,color:C.text,outline:"none"}}/>
+            <div style={{display:"flex",gap:4,marginTop:4}}>
+              <input value={num} inputMode="numeric" placeholder="Nº"
+                onChange={e=>{setNum(e.target.value);if(avisoEnd)setAvisoEnd("");}}
+                onKeyDown={e=>{if(e.key==="Enter")buscarEnd();}}
+                style={{flex:1,minWidth:0,fontSize:12,padding:"6px 8px",borderRadius:RAIO,
+                  border:`1px solid ${C.border}`,background:C.card,color:C.text,outline:"none",...numStyle}}/>
+              <button onClick={buscarEnd} title="Buscar endereço"
+                style={{fontSize:12,padding:"0 9px",borderRadius:RAIO,border:"1px solid rgba(59,130,246,0.3)",
+                  background:C.accentBg,color:C.accent,cursor:"pointer"}}>↵</button>
+            </div>
+            {avisoEnd&&<div style={{fontSize:11,color:C.amber,marginTop:6,paddingLeft:4,lineHeight:1.35}}>{avisoEnd}</div>}
           </>}
     </div>
     <div style={{flex:1}}/>
@@ -4456,6 +4788,508 @@ function ProducaoView({sess,onLogout}){
   </div>;
 }
 
+/* ── Etiquetas: o que foi fechado em cada uma ──────────────
+   A pergunta que isso responde é "das que eu marquei, quantas
+   morreram?" — e ela não se responde com uma soma só. Uma ouvidoria
+   encerrada por imóvel fechado saiu da carteira mas não resolveu
+   nada para o cliente, e é ela que volta como reclamação. Por isso a
+   tabela separa o que foi EXECUTADO do que apenas SAIU.
+
+   A data que manda é a do desfecho, não a da etiqueta: o período
+   pergunta "o que fechou nesta semana", não "o que foi etiquetado".
+   Serviço ainda sem baixa aparece à parte, porque não tem data — e
+   é justamente a fila que alguém precisa cobrar.
+
+   Fonte: os_nota (etiquetas) cruzada com os_desfecho (sql/desfecho.sql),
+   pelo par (OS, TSS), que é a unidade de trabalho do sistema inteiro.
+   ───────────────────────────────────────────────────────── */
+/* ── O que aconteceu com UMA OS ───────────────────────────
+   As três buscas abaixo são por NÚMERO DE OS, não por janela de
+   datas, e isso é a correção de fundo da aba Etiquetas.
+
+   Antes, desfecho e execução eram buscados dentro do período
+   escolhido na tela. Quem olhava 30 dias só enxergava baixa
+   daqueles 30 dias — e a OS que saiu da carteira em outra data
+   caía num balde chamado "baixa fora do período", que na prática
+   queria dizer três coisas diferentes ao mesmo tempo: fechou antes,
+   fechou depois, ou ninguém sabe. São coisas distintas e ele
+   precisa distinguir.
+
+   Agora a pergunta é outra: dado este punhado de OS etiquetadas
+   (dezenas, não milhares), o que se sabe sobre cada uma em TODO o
+   histórico? Aí a janela volta a ser só um filtro de exibição, por
+   data de saída da carteira, e não um limite do que se pode saber.
+
+   Como são poucas OS, filtrar por in.(...) é barato — bem mais
+   barato que baixar os 13 mil registros de execução do mês. */
+const emLotes=async(numeros,fn,tam=120)=>{
+  const out=[];
+  for(let i=0;i<numeros.length;i+=tam){
+    const parte=await fn(numeros.slice(i,i+tam));
+    if(parte) out.push(...parte);
+  }
+  return out;
+};
+const listaIn=ns=>"("+ns.map(n=>`"${String(n).replace(/"/g,"")}"`).join(",")+")";
+
+async function fetchDesfechosDeOS(numeros){
+  if(!numeros.length) return [];
+  return emLotes(numeros,async ns=>{
+    const r=await fetch(SUPABASE_URL+`/rest/v1/os_desfecho?select=*&numero_os=in.${listaIn(ns)}`,{headers:HEADERS});
+    if(!r.ok) return null;
+    return r.json();
+  });
+}
+async function fetchExecucaoDeOS(numeros){
+  if(!numeros.length) return [];
+  return emLotes(numeros,async ns=>{
+    const r=await fetch(SUPABASE_URL+`/rest/v1/execucao?select=numero_os,tss,dia,equipe&numero_os=in.${listaIn(ns)}`,{headers:HEADERS});
+    if(!r.ok) return [];
+    return r.json();
+  });
+}
+// O DIA EM QUE A OS SAIU DA CARTEIRA.
+// O pendente_diario_os é uma foto por dia de tudo que estava no
+// pendente. O último dia em que a OS aparece é o último dia em que
+// ela ainda estava lá: no dia seguinte, saiu. Isso é FATO, vem do
+// próprio pendente e não depende do EM RUA ter sido importado.
+// Testado nas 22 etiquetadas que o painel não sabia explicar: as 22
+// têm data de saída. Ou seja, "não sei o que houve" nunca precisa
+// significar "não sei nem quando".
+async function fetchSaidaDeOS(numeros){
+  if(!numeros.length) return [];
+  return emLotes(numeros,async ns=>{
+    const r=await fetch(SUPABASE_URL+`/rest/v1/pendente_diario_os?select=numero_os,tss,dia&numero_os=in.${listaIn(ns)}`,{headers:HEADERS});
+    if(!r.ok) return [];
+    return r.json();
+  });
+}
+// Classificação à mão, para o que saiu da carteira sem deixar
+// registro. Grava com origem='manual', e o classificar_dia tem um
+// "WHERE os_desfecho.origem='auto'" no ON CONFLICT justamente para
+// nunca pisar nela: o robô pode rodar à vontade depois.
+async function salvarDesfechoManual(reg,sess){
+  const cab=authHeaders(await tokenFresco(sess));
+  // classificado_por é UUID e não tem default nesta tabela (o os_nota
+  // tem, por isso lá o autor_id aparece sozinho). Quem classificou vai
+  // na observação, que é texto e já existe — melhor do que pedir uma
+  // migração só para guardar um nome.
+  const quem=sess?.perfil?.nome||sess?.perfil?.email||"";
+  const corpo={numero_os:String(reg.numero_os).trim(),tss:String(reg.tss||"").trim(),
+    dia:reg.dia,desfecho:reg.desfecho,
+    status_os:"(classificado a mão)",resultado:null,causa_resultado:reg.causa||null,
+    equipe:reg.equipe||null,lider:null,
+    observacao:[reg.observacao||"",quem?`— ${quem}`:""].filter(Boolean).join(" ").trim()||null,
+    origem:"manual",classificado_em:new Date().toISOString()};
+  const r=await fetch(SUPABASE_URL+"/rest/v1/os_desfecho?on_conflict=numero_os,tss,dia",{
+    method:"POST",
+    headers:{...cab,"Prefer":"return=representation,resolution=merge-duplicates"},
+    body:JSON.stringify([corpo])});
+  if(!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  return (await r.json())[0]||null;
+}
+
+async function fetchDesfechoTipos(){
+  const r=await fetch(SUPABASE_URL+"/rest/v1/desfecho_tipo?select=codigo,rotulo,conta_producao,sai_carteira,cor,ordem&order=ordem.asc",{headers:HEADERS});
+  if(!r.ok) return null;
+  return r.json();
+}
+async function fetchDesfechos(de,ate){
+  const out=[];let from=0;const ps=1000;
+  for(;;){
+    const r=await fetch(SUPABASE_URL+`/rest/v1/os_desfecho?select=numero_os,tss,dia,desfecho,equipe&dia=gte.${de}&dia=lte.${ate}&order=dia.asc`,
+      {headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
+    if(!r.ok&&r.status!==206) return null;
+    const d=await r.json();
+    if(!d?.length) break;
+    out.push(...d);
+    if(d.length<ps) break;
+    from+=ps;
+  }
+  return out;
+}
+
+/* ── Dizer à mão o que houve com a OS ─────────────────────
+   Existe um caso que robô nenhum resolve: a OS que sai da carteira
+   sem nunca ter sido despachada para uma equipe. CONVIAS e GEOINFRA
+   são assim — ficam paradas esperando terceiro e um dia a Sabesp
+   encerra. Nunca entram no EM RUA, porque o EM RUA é o plano das
+   equipes; e nunca entram na execução, porque não foram executadas.
+   Das 22 etiquetadas sem explicação em 02/10, 8 saíram todas no
+   mesmo 30/09 e eram justamente FRESAR E RECAPEAR com CONVIAS e
+   GEOINFRA. Para essas, só quem sabe é ele.
+
+   A tabela já estava pronta para isso desde o começo: os_desfecho
+   tem origem ('auto' | 'manual') e o classificar_dia só sobrescreve
+   onde origem='auto'. Faltava a tela. */
+function DesfechoManualModal({item,tipos,sess,onClose,onSalvou}){
+  const padrao=item.saiuEm||item.dia||diaISO(new Date());
+  const [cod,setCod]=useState("");
+  const [dia,setDia]=useState(String(padrao).slice(0,10));
+  const [causa,setCausa]=useState("");
+  const [obs,setObs]=useState("");
+  const [indo,setIndo]=useState(false);
+  const [erro,setErro]=useState("");
+  const opcoes=(tipos||[]).filter(t=>t.sai_carteira)
+    .sort((a,b)=>(b.conta_producao?1:0)-(a.conta_producao?1:0)||a.ordem-b.ordem);
+  const gravar=async()=>{
+    if(!cod) return setErro("Escolha o que aconteceu.");
+    setIndo(true);setErro("");
+    try{
+      const salvo=await salvarDesfechoManual({numero_os:item.numero_os,tss:item.tss,dia,
+        desfecho:cod,causa:causa.trim()||null,observacao:obs.trim()||null},sess);
+      onSalvou(salvo);
+    }catch(e){setErro(e.message||String(e));setIndo(false);}
+  };
+  const campo={padding:"6px 9px",borderRadius:RAIO,border:`1px solid ${C.border}`,background:C.cardAlt,
+    color:C.text,fontSize:12.5,fontFamily:"inherit",colorScheme:"dark",width:"100%"};
+  return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+    <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:14,border:`1px solid ${C.border}`,
+      width:"100%",maxWidth:520,padding:20,display:"flex",flexDirection:"column",gap:13}}>
+      <div>
+        <div style={{fontSize:15,fontWeight:700,color:C.text}}>O que aconteceu com esta OS?</div>
+        <div style={{fontSize:12.5,color:C.textDim,marginTop:4,lineHeight:1.5}}>
+          <span style={numStyle}>{item.numero_os}</span> · {item.tss}
+          {item.endereco?<><br/>{item.endereco}{item.bairro?" — "+item.bairro:""}</>:null}
+        </div>
+        <div style={{fontSize:12,color:COR_NOTA,marginTop:6,lineHeight:1.5}}>
+          Saiu da carteira em <b>{item.saiuEm?fmtDia(item.saiuEm):"data desconhecida"}</b> e o GEOCALL não
+          deixou registro do motivo — nem no EM RUA, nem no relatório de execução.</div>
+      </div>
+      <label style={{fontSize:12,color:C.textDim}}>O que houve
+        <select value={cod} onChange={e=>{setCod(e.target.value);setErro("");}} style={{...campo,marginTop:4,color:cod?C.text:C.textDim}}>
+          <option value="">— escolha —</option>
+          {opcoes.map(t=><option key={t.codigo} value={t.codigo}>{t.rotulo}{t.conta_producao?" (conta produção)":""}</option>)}
+        </select></label>
+      <label style={{fontSize:12,color:C.textDim}}>Dia da baixa
+        <input type="date" value={dia} onChange={e=>setDia(e.target.value)} style={{...campo,marginTop:4}}/>
+        <span style={{fontSize:11,color:C.textDim}}>Vem do último dia em que a OS apareceu no pendente. Corrija se souber a data certa.</span></label>
+      <label style={{fontSize:12,color:C.textDim}}>Motivo, em uma linha (opcional)
+        <input value={causa} onChange={e=>setCausa(e.target.value)} placeholder="ex: encerrada pela Sabesp, obra assumida pela CONVIAS"
+          style={{...campo,marginTop:4}}/></label>
+      <label style={{fontSize:12,color:C.textDim}}>Observação (opcional)
+        <textarea value={obs} onChange={e=>setObs(e.target.value)} rows={2} style={{...campo,marginTop:4,resize:"vertical"}}/></label>
+      <div style={{fontSize:11,color:C.textDim,lineHeight:1.5}}>
+        Fica gravado como classificação manual. O robô que classifica o EM RUA nunca sobrescreve
+        o que você marcou aqui.</div>
+      {erro&&<div style={{fontSize:12.5,color:C.red,lineHeight:1.5}}>{erro}</div>}
+      <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
+        <button onClick={onClose} style={{fontSize:12.5,padding:"7px 14px",borderRadius:RAIO,border:`1px solid ${C.border}`,background:"transparent",color:C.textMuted,cursor:"pointer"}}>Cancelar</button>
+        <button onClick={gravar} disabled={indo}
+          style={{fontSize:12.5,fontWeight:700,padding:"7px 16px",borderRadius:RAIO,border:`1px solid ${C.green}55`,
+            background:C.green+"14",color:C.green,cursor:indo?"default":"pointer",opacity:indo?.5:1}}>{indo?"Salvando…":"Salvar"}</button>
+      </div>
+    </div>
+  </div>;
+}
+
+function EtiquetasView({notas,rawRows,sess}){
+  const hoje=diaISO(new Date());
+  const trintaDias=()=>{const d=new Date();d.setDate(d.getDate()-29);return diaISO(d);};
+  const [de,setDe]=useState(trintaDias);
+  const [ate,setAte]=useState(hoje);
+  const [tipos,setTipos]=useState(null);
+  const [desf,setDesf]=useState(null);
+  const [exec,setExec]=useState(null);
+  const [saida,setSaida]=useState(null);         // OS§TSS -> último dia na carteira
+  const [erro,setErro]=useState("");
+  const [carregando,setCarregando]=useState(true);
+  const [aberta,setAberta]=useState(null);       // etiqueta cuja lista está aberta
+  const [classificando,setClassificando]=useState(null);  // item aberto no modal manual
+  const [ver,setVer]=useState(0);                // recarrega depois de classificar à mão
+
+  // Os números de OS etiquetados. É a lista que manda nas três buscas:
+  // em vez de "o que caiu neste período", a pergunta passa a ser "o que
+  // se sabe sobre estas OS". São dezenas — cabe num in.(...).
+  const numerosOS=useMemo(()=>[...new Set((notas||[]).filter(n=>(n.tags||[]).length)
+    .map(n=>String(n.numero_os||"").trim()).filter(Boolean))],[notas]);
+
+  useEffect(()=>{let vivo=true;
+    (async()=>{
+      setCarregando(true);setErro("");
+      try{
+        // Três fontes, e cada uma responde uma coisa:
+        //   os_desfecho      POR QUE a OS saiu — só existe onde o EM RUA
+        //                    foi importado COM resultado preenchido
+        //   execucao         que foi executada — cobre o mês todo, mas
+        //                    não sabe dizer mais nada
+        //   pendente_diario  QUANDO ela saiu da carteira — sempre existe,
+        //                    porque é o próprio pendente se olhando
+        // A terceira é a novidade, e é ela que acaba com o balde de
+        // "fora do período": agora o pior caso é "saiu em tal dia, motivo
+        // não registrado", que já é uma frase acionável.
+        const [t,d,e,s]=await Promise.all([
+          fetchDesfechoTipos(),
+          fetchDesfechosDeOS(numerosOS),
+          fetchExecucaoDeOS(numerosOS).catch(()=>[]),
+          fetchSaidaDeOS(numerosOS).catch(()=>[])]);
+        if(!vivo) return;
+        setExec(e||[]);
+        const ult=new Map();
+        for(const r of s||[]){
+          const k=String(r.numero_os||"").replace(/\D/g,"")+"§"+norm(r.tss||"");
+          const dia=String(r.dia||"").slice(0,10);
+          if(!ult.has(k)||dia>ult.get(k)) ult.set(k,dia);
+        }
+        setSaida(ult);
+        if(!t||!d){setErro("tabela");setTipos(null);setDesf(null);}
+        else{setTipos(t);setDesf(d);}
+      }catch(e){if(vivo) setErro(String(e.message||e));}
+      if(vivo) setCarregando(false);
+    })();
+    return()=>{vivo=false;};
+  },[numerosOS,ver]);
+
+  // A chave é a mesma do resto do sistema: OS só com os dígitos e TSS
+  // normalizada. Comparar o texto cru não casa — o em_rua, de onde sai
+  // o desfecho, escreve a OS e a TSS com outra pontuação que o pendente.
+  const dig=v=>String(v??"").replace(/\D/g,"");
+  const chave=(os,tss)=>dig(os)+"§"+norm(tss||"");
+
+  // (OS, TSS) -> desfecho do período. Se a mesma OS fechou duas vezes
+  // no período (reabriu), vale a última: é o destino atual dela.
+  // O mapa por OS sozinha cobre dois casos reais: o classificador grava
+  // TSS vazia quando o em_rua não a trouxe, e a OS troca de TSS no meio
+  // do caminho (o vazamento é resolvido e ela vira reposição), enquanto
+  // a nota ficou na TSS antiga. Entre duas baixas da mesma OS vence a
+  // que conta produção.
+  const {porChave,porOS}=useMemo(()=>{
+    const m=new Map(),o=new Map();
+    for(const d of desf||[]){
+      m.set(chave(d.numero_os,d.tss),d);
+      const k=dig(d.numero_os),anterior=o.get(k);
+      if(!anterior||(d.desfecho==="EXECUTADA"&&anterior.desfecho!=="EXECUTADA")) o.set(k,d);
+    }
+    return {porChave:m,porOS:o};
+  },[desf]);
+  // Execuções confirmadas, a segunda fonte. Só sabem dizer "executada".
+  const {execChave,execOS}=useMemo(()=>{
+    const m=new Map(),o=new Map();
+    for(const x of exec||[]){
+      m.set(chave(x.numero_os,x.tss),x);
+      if(!o.has(dig(x.numero_os))) o.set(dig(x.numero_os),x);
+    }
+    return {execChave:m,execOS:o};
+  },[exec]);
+  const tipoPor=useMemo(()=>Object.fromEntries((tipos||[]).map(t=>[t.codigo,t])),[tipos]);
+  const colunas=useMemo(()=>(tipos||[]).filter(t=>t.sai_carteira)
+    .sort((a,b)=>(b.conta_producao?1:0)-(a.conta_producao?1:0)||a.ordem-b.ordem),[tipos]);
+
+  // O que ainda está na carteira hoje. Sem isso não dá para separar
+  // "não fechou" de "fechou antes do período": as duas apareceriam
+  // como se estivessem em aberto, que foi o que confundiu a conta.
+  const naCarteira=useMemo(()=>{
+    if(!rawRows?.length) return null;              // null = pendente não carregado
+    return new Set(rawRows.map(r=>chave(r["Número OS"],r["TSS"])));
+  },[rawRows]);
+
+  /* Uma linha por etiqueta. Um serviço com duas etiquetas conta nas duas
+     — é o que se quer: a pergunta é sobre a etiqueta, não sobre a OS.
+
+     QUATRO destinos, e eles são excludentes de propósito. O antigo
+     "fora do período" juntava os três últimos num só, e por isso não
+     respondia nada:
+
+       na carteira    ainda no pendente de hoje — é a fila a cobrar
+       com motivo     saiu E se sabe por quê, dentro do período
+       sem motivo     saiu, sabemos o DIA, mas ninguém registrou o porquê
+       fora do período  saiu (com ou sem motivo) em data fora da janela
+
+     Agora "fora do período" quer dizer exatamente isso e nada mais: a
+     data existe e está fora. E "sem motivo" é a única caixa de coisa
+     desconhecida que sobrou — é onde ele clica para classificar à mão. */
+  const linhas=useMemo(()=>{
+    const dentro=d=>!!d&&d>=de&&d<=ate;
+    return TAGS.map(t=>t.id).map(id=>{
+      const minhas=(notas||[]).filter(n=>(n.tags||[]).includes(id));
+      const porTipo={};let fechadas=0,carteira=0,fora=0,semMotivo=0;const itens=[];
+      for(const n of minhas){
+        const k=chave(n.numero_os,n.tss),os=dig(n.numero_os);
+        const aberta=naCarteira?naCarteira.has(k):false;
+        // A busca pela OS sozinha só vale para serviço que JÁ saiu da
+        // carteira: se ele ainda está lá, a baixa é de outra TSS da
+        // mesma OS e não fechou este.
+        const d=porChave.get(k)||(aberta?null:porOS.get(os));
+        const x=d?null:(execChave.get(k)||(aberta?null:execOS.get(os)));
+        const cod=d?d.desfecho:(x?"EXECUTADA":null);
+        // O dia que vale é o da baixa quando ela existe; senão, o
+        // último dia em que a OS apareceu no pendente.
+        const saiuEm=aberta?null:(saida?.get(k)||null);
+        const dia=d?.dia||x?.dia||saiuEm||null;
+        if(aberta) carteira++;
+        else if(!dentro(dia)) fora++;
+        else if(cod){porTipo[cod]=(porTipo[cod]||0)+1;fechadas++;}
+        else semMotivo++;
+        itens.push({...n,desfecho:cod,dia,saiuEm,equipe:d?.equipe||null,
+          fonte:d?"desfecho":(x?"execucao":null),manual:d?.origem==="manual",
+          aberta,noPeriodo:dentro(dia)});
+      }
+      return {id,cor:corDaTag(id),total:minhas.length,fechadas,carteira,fora,semMotivo,porTipo,itens};
+    }).filter(l=>l.total>0);
+  },[notas,porChave,porOS,execChave,execOS,naCarteira,saida,de,ate]);
+  // Quantas das baixas do período pertencem a serviço etiquetado. Se dá
+  // zero com baixa no período, o cruzamento não casou — e é melhor a
+  // tela dizer isso do que mostrar uma coluna de zeros como se fosse
+  // notícia.
+  const casaram=useMemo(()=>linhas.reduce((a,l)=>a+l.fechadas,0),[linhas]);
+
+  const baixar=()=>{
+    const linhasXls=[];
+    for(const l of linhas) for(const it of l.itens)
+      linhasXls.push({Etiqueta:l.id,OS:it.numero_os,TSS:it.tss,
+        Endereço:it.endereco||"",Bairro:it.bairro||"",Família:it.familia||"",
+        Desfecho:it.aberta?"na carteira"
+          :it.desfecho?(tipoPor[it.desfecho]?.rotulo||it.desfecho)
+          :"saiu sem motivo registrado",
+        "No período":it.aberta?"":(it.noPeriodo?"sim":"não"),
+        Fonte:it.manual?"classificado à mão"
+          :it.fonte==="execucao"?"relatório de execução"
+          :it.fonte==="desfecho"?"EM RUA classificado"
+          :it.saiuEm?"saída do pendente":"",
+        Dia:it.dia||"",Equipe:it.equipe||"",
+        "Prioridade por":it.prioridade_por||"",Observação:it.nota||""});
+    if(!linhasXls.length) return;
+    const wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(linhasXls),"Etiquetas");
+    XLSX.writeFile(wb,`etiquetas_${de}_a_${ate}.xlsx`);
+  };
+
+  const campo={fontSize:12,fontFamily:FONTE_UI,color:C.accent,background:C.accentBg,
+    border:"1px solid rgba(59,130,246,0.35)",borderRadius:RAIO,padding:"3px 8px",colorScheme:"dark"};
+  const th={padding:"8px 10px",fontSize:10,letterSpacing:"0.12em",textTransform:"uppercase",
+    color:C.textDim,textAlign:"right",whiteSpace:"nowrap"};
+  const td={padding:"8px 10px",fontSize:12.5,borderTop:`1px solid ${C.border}`,textAlign:"right"};
+
+  if(erro==="tabela") return <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:24,color:C.textMuted,fontSize:13,lineHeight:1.6}}>
+    A tabela de desfechos ainda não existe no banco. Rode <code>sql/desfecho.sql</code> no Supabase
+    e depois <code>SELECT * FROM classificar_tudo();</code>, que classifica o histórico já importado.
+  </div>;
+
+  return <div style={{animation:"fadeIn 0.35s ease"}}>
+    <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",padding:"10px 16px",
+      background:C.card,borderRadius:10,border:`1px solid ${C.border}`,marginBottom:14}}>
+      <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:C.textDim}}>De
+        <input type="date" value={de} max={ate} onChange={e=>setDe(e.target.value)} style={campo}/></label>
+      <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:C.textDim}}>até
+        <input type="date" value={ate} min={de} max={hoje} onChange={e=>setAte(e.target.value)} style={campo}/></label>
+      <span style={{fontSize:12,color:C.textDim}}>
+        {carregando?"carregando…"
+          :`${numerosOS.length} OS etiquetadas · ${desf?.length??0} baixas e ${exec?.length??0} execuções encontradas no histórico delas · ${casaram} fechadas no período`}</span>
+      <div style={{flex:1}}/>
+      <button onClick={baixar} disabled={!linhas.length}
+        style={{fontSize:12,fontWeight:700,padding:"6px 14px",borderRadius:RAIO,cursor:linhas.length?"pointer":"default",
+          border:`1px solid ${C.green}55`,background:C.green+"14",color:C.green,opacity:linhas.length?1:.45}}>Baixar Excel</button>
+    </div>
+
+    <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,overflow:"hidden"}}>
+      <table style={{width:"100%",borderCollapse:"collapse"}}>
+        <thead><tr style={{background:C.headerBg}}>
+          <th style={{...th,textAlign:"left"}}>Etiqueta</th>
+          {colunas.map(c=><th key={c.codigo} style={{...th,color:c.cor||C.textDim}}>{c.rotulo}</th>)}
+          <th style={th}>Fechadas</th>
+          <th style={th} title="Ainda no pendente de hoje — é a fila a cobrar">Na carteira</th>
+          <th style={{...th,color:COR_NOTA}} title="Saiu da carteira dentro do período e ninguém registrou o motivo. Abra a etiqueta e classifique à mão.">Sem motivo</th>
+          <th style={th} title="Saiu da carteira em data fora desta janela — mude as datas acima para alcançá-la">Fora do período</th>
+          <th style={th}>Total</th>
+        </tr></thead>
+        <tbody>
+          {linhas.map(l=><React.Fragment key={l.id}>
+            <tr onClick={()=>setAberta(a=>a===l.id?null:l.id)} style={{cursor:"pointer",background:aberta===l.id?C.rowHover:"transparent"}}>
+              <td style={{...td,textAlign:"left"}}><Etiqueta id={l.id}/></td>
+              {colunas.map(c=><td key={c.codigo} style={{...td,...numStyle,color:l.porTipo[c.codigo]?(c.cor||C.text):C.textDim}}>
+                {l.porTipo[c.codigo]||"—"}</td>)}
+              <td style={{...td,...numStyle,fontWeight:700,color:l.fechadas?C.text:C.textDim}}>{l.fechadas}</td>
+              <td style={{...td,...numStyle,color:l.carteira?C.amber:C.textDim}}>{l.carteira}</td>
+              <td style={{...td,...numStyle,color:l.semMotivo?COR_NOTA:C.textDim}}>{l.semMotivo}</td>
+              <td style={{...td,...numStyle,color:C.textDim}}>{l.fora}</td>
+              <td style={{...td,...numStyle,color:C.textMuted}}>{l.total}</td>
+            </tr>
+            {aberta===l.id&&<tr><td colSpan={colunas.length+6} style={{padding:0,borderTop:`1px solid ${C.border}`}}>
+              <div style={{maxHeight:320,overflowY:"auto",background:C.cardAlt}}>
+                <table style={{width:"100%",borderCollapse:"collapse"}}>
+                  <tbody>{l.itens.sort((a,b)=>String(b.dia||"").localeCompare(String(a.dia||""))).map(it=>
+                    <tr key={it.numero_os+"§"+it.tss} style={{borderBottom:`1px solid ${C.border}`}}>
+                      <td style={{padding:"5px 10px",fontSize:12,...numStyle,color:C.textMuted,whiteSpace:"nowrap"}}>{it.numero_os}</td>
+                      <td style={{padding:"5px 10px",fontSize:12,color:C.text}}>{it.tss}</td>
+                      <td style={{padding:"5px 10px",fontSize:11.5,color:C.textDim}}>{it.endereco||"—"}</td>
+                      <td style={{padding:"5px 10px",fontSize:11.5,whiteSpace:"nowrap",
+                        color:it.desfecho?(tipoPor[it.desfecho]?.cor||C.textMuted)
+                          :(it.aberta?C.amber:(it.noPeriodo?COR_NOTA:C.textDim))}}>
+                        {it.aberta?"na carteira"
+                          :it.desfecho?(tipoPor[it.desfecho]?.rotulo||it.desfecho)
+                          :"saiu sem motivo registrado"}
+                        {it.fonte==="execucao"&&<span title="Veio do relatório de execução; o EM RUA desse dia não foi importado, então não há o motivo da baixa"
+                          style={{color:C.textDim,marginLeft:5}}>(exec.)</span>}
+                        {it.manual&&<span title="Classificado à mão por você" style={{color:C.textDim,marginLeft:5}}>(à mão)</span>}
+                        {!it.aberta&&!it.noPeriodo&&<span style={{color:C.textDim,marginLeft:5}}>· fora do período</span>}</td>
+                      <td style={{padding:"5px 10px",fontSize:11.5,...numStyle,color:C.textDim,whiteSpace:"nowrap"}}
+                        title={it.saiuEm&&!it.desfecho?"Último dia em que a OS apareceu no pendente — saiu no dia seguinte":""}>
+                        {it.dia?fmtDia(it.dia):""}{it.saiuEm&&!it.desfecho&&!it.aberta?" (saída)":""}</td>
+                      <td style={{padding:"5px 10px",whiteSpace:"nowrap"}}>
+                        {!it.aberta&&!it.desfecho&&sess&&<span onClick={()=>setClassificando(it)}
+                          title="Dizer o que aconteceu com esta OS"
+                          style={{cursor:"pointer",fontSize:11,fontWeight:700,color:COR_NOTA,
+                            border:`1px solid ${COR_NOTA}55`,borderRadius:RAIO,padding:"1px 7px"}}>classificar</span>}</td>
+                    </tr>)}
+                  </tbody>
+                </table>
+              </div>
+            </td></tr>}
+          </React.Fragment>)}
+          {!linhas.length&&!carregando&&<tr><td colSpan={colunas.length+6}
+            style={{padding:20,fontSize:12.5,color:C.textDim,textAlign:"center"}}>Nenhum serviço etiquetado ainda.</td></tr>}
+        </tbody>
+      </table>
+    </div>
+    {/* Quando não cruza, o que resolve é ver os dois lados lado a lado.
+        Pedir para alguém rodar SQL para descobrir isso é empurrar para
+        o usuário um trabalho que a tela já tem os dados para fazer. */}
+    {!carregando&&!!desf?.length&&casaram===0&&<div style={{fontSize:12.5,color:C.amber,marginTop:12,
+      background:C.amberBg,border:`1px solid rgba(245,158,11,0.35)`,borderRadius:8,padding:"10px 13px",lineHeight:1.6}}>
+      <div>Foram encontradas {desf.length} baixas no histórico destas OS e nenhuma bateu com serviço
+        etiquetado. Como as duas tabelas estão gravadas hoje:</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginTop:9}}>
+        <div>
+          <div style={{fontSize:11,color:C.textDim,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:4}}>os_desfecho (a baixa)</div>
+          {(desf||[]).slice(0,5).map((d,i)=><div key={i} style={{fontSize:11.5,color:C.textMuted,...numStyle}}>
+            «{String(d.numero_os)}» · «{String(d.tss??"")}»</div>)}
+        </div>
+        <div>
+          <div style={{fontSize:11,color:C.textDim,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:4}}>os_nota (a etiqueta)</div>
+          {(notas||[]).filter(n=>(n.tags||[]).length).slice(0,5).map((n,i)=><div key={i} style={{fontSize:11.5,color:C.textMuted,...numStyle}}>
+            «{String(n.numero_os)}» · «{String(n.tss??"")}»</div>)}
+        </div>
+      </div>
+      <div style={{marginTop:8}}>Se os números da OS têm tamanhos ou prefixos diferentes, o
+        <code> os_desfecho</code> está guardando outro identificador — me mande este quadro que eu ajusto
+        o cruzamento. Se forem iguais, então é o <code>em_rua</code> que ainda não cobre esses dias.</div>
+    </div>}
+    {!carregando&&!rawRows?.length&&<div style={{fontSize:12,color:C.textDim,marginTop:10}}>
+      O pendente ainda não carregou, então "na carteira" fica zerado e tudo que não fechou no período
+      cai em "fora do período".</div>}
+    {classificando&&<DesfechoManualModal item={classificando} tipos={tipos} sess={sess}
+      onClose={()=>setClassificando(null)}
+      onSalvou={()=>{setClassificando(null);setVer(v=>v+1);}}/>}
+    <div style={{fontSize:11.5,color:C.textDim,marginTop:10,lineHeight:1.6}}>
+      Duas fontes: o <b>EM RUA classificado</b> diz por que a OS saiu, mas só existe nos dias em que ele
+      foi importado; o <b>relatório de execução</b> cobre o mês todo e só sabe dizer que foi executada —
+      essas aparecem com <i>(exec.)</i> na lista. Se muita coisa vem marcada assim, falta importar o EM RUA
+      desses dias e rodar <code>classificar_tudo()</code>.
+      <br/>
+      A data do período é a da baixa — ou, quando não há baixa registrada, a da saída da carteira.
+      <b style={{color:C.text}}> Fechadas</b> são as que saíram no período e se sabe por quê;
+      <b style={{color:C.amber}}> na carteira</b> é o que ainda está no pendente de hoje, a fila a cobrar;
+      <b style={{color:COR_NOTA}}> sem motivo</b> saiu no período mas o GEOCALL não registrou o porquê —
+      clique em <i>classificar</i> na lista para dizer o que houve;
+      <b> fora do período</b> saiu em outra data, mude as datas acima para alcançá-la.
+      <br/>
+      O dia da saída vem do <code>pendente_diario_os</code>: o último dia em que a OS apareceu no pendente.
+      Por isso "não sei o que houve" nunca precisa mais significar "não sei nem quando".
+      {" "}<b style={{color:C.text}}>Executada</b> é execução de verdade; o resto saiu da carteira sem resolver.
+    </div>
+  </div>;
+}
+
 export default function App(){
   const [rawRows,setRawRows]=useState(null);
   const [excludedTSS,setExcludedTSS]=useState(new Set());
@@ -4680,6 +5514,34 @@ export default function App(){
     return null;
   },[rawRows]);
 
+  // Busca por endereço. Nenhum dos dois campos é obrigatório: quem tem
+  // só a rua vê a rua inteira (é assim que se descobre que há três OS
+  // no mesmo quarteirão), quem tem só o número varre todas as ruas.
+  // O nome da rua é comparado sem acento e sem o tipo de logradouro,
+  // porque o GEOCALL escreve RUA, R., AVENIDA e AV para a mesma via.
+  const buscarEndereco=useCallback((rua,num)=>{
+    if(!rawRows?.length) return "Pendente ainda carregando";
+    const q=norm(rua).replace(/^(RUA|R|AVENIDA|AV|ALAMEDA|AL|TRAVESSA|TV|PRACA|PC|ESTRADA|EST|RODOVIA|VIELA|VL)\.?\s+/,"").trim();
+    const n=String(num??"").replace(/\D/g,"");
+    if(!q&&!n) return "Preencha a rua, o número, ou os dois";
+    if(q&&q.length<3) return "Escreva pelo menos 3 letras da rua";
+    const dig=v=>String(v??"").replace(/\D/g,"");
+    let achou=(rawRows||[]).filter(r=>VALID_ATCS.includes(Number(r["ATC"]))
+      &&(!q||norm(r["Endereço"]).includes(q))
+      &&(!n||dig(r["Número"])===n));
+    // Número que não bate exato ainda pode ser 120-A, 120 FUNDOS etc.
+    if(!achou.length&&n) achou=(rawRows||[]).filter(r=>VALID_ATCS.includes(Number(r["ATC"]))
+      &&(!q||norm(r["Endereço"]).includes(q))&&dig(r["Número"]).startsWith(n));
+    if(!achou.length) return q&&n?"Nada nesse número dessa rua"
+      :q?"Nenhuma OS nessa rua — confira o nome":"Nenhuma OS com esse número";
+    const visiveis=achou.filter(r=>familiaTssVisivel(r["Família"],r["TSS"]));
+    if(!visiveis.length) return "Tem OS aí, mas em família que o painel não mostra";
+    if(visiveis.length>60) return `${visiveis.length} serviços — acrescente o número ou detalhe a rua`;
+    const fams=[...new Set(visiveis.map(r=>String(r["Família"]||"").trim()))];
+    setBuscaModal({rows:visiveis,tipo:"endereco",familia:fams.length===1?fams[0]:fams.join(" · ")});
+    return null;
+  },[rawRows]);
+
   const onDrop=useCallback(e=>{e.preventDefault();setDragOver(false);handleFile(e.dataTransfer.files[0]);},[handleFile]);
 
   // Gas alerts (usa rawRows sem filtro de unidade)
@@ -4691,19 +5553,19 @@ export default function App(){
   </div>;
 
   return <SessaoCtx.Provider value={sess}><div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:FONTE_UI,display:"flex"}}>
-    {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed} nNotas={notasDoPendente.length} onNotas={t=>{setFiltroNota(t);setShowNotas(true);}} tagsNotas={tagsNotas} onBuscarOS={buscarOS}/>}
+    {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed} nNotas={notasDoPendente.length} onNotas={t=>{setFiltroNota(t);setShowNotas(true);}} tagsNotas={tagsNotas} onBuscarOS={buscarOS} onBuscarEndereco={buscarEndereco}/>}
     <div style={{flex:1,padding:"24px 16px",overflowY:"auto",minHeight:"100vh"}}>
-      <div style={{maxWidth:activeTab==="producao"||activeTab==="itinerario"?1180:960,margin:"0 auto"}}>
+      <div style={{maxWidth:activeTab==="producao"||activeTab==="itinerario"||activeTab==="etiquetas"?1180:960,margin:"0 auto"}}>
         <div style={{marginBottom:24,textAlign:"center"}}>
           <h1 style={{fontSize:17,fontWeight:500,margin:0,letterSpacing:"0.2em",textTransform:"uppercase",color:C.text,fontFamily:FONTE_NUM}}>
-            {activeTab==="pendente"?"Controle de Prazos — OS Pendentes":activeTab==="carteira"?"Acompanhamento de Carteira":activeTab==="itinerario"?"Itinerário das Equipes":"Produção por Equipes"}
+            {activeTab==="pendente"?"Controle de Prazos — OS Pendentes":activeTab==="carteira"?"Acompanhamento de Carteira":activeTab==="etiquetas"?"Etiquetas — o que fechou":activeTab==="itinerario"?"Itinerário das Equipes":"Produção por Equipes"}
           </h1>
           <p style={{color:C.textDim,margin:"6px 0 0",fontSize:13}}>
-            {activeTab==="pendente"?"Análise por família de serviço":activeTab==="carteira"?"Carteira diária por frente de serviço":activeTab==="itinerario"?"O dia de cada equipe — sugerido pelo sistema, fechado por você":"Execuções confirmadas por equipe e tipo de serviço"}
+            {activeTab==="pendente"?"Análise por família de serviço":activeTab==="carteira"?"Carteira diária por frente de serviço":activeTab==="etiquetas"?"Executadas e encerradas sem execução, por etiqueta, no período":activeTab==="itinerario"?"O dia de cada equipe — sugerido pelo sistema, fechado por você":"Execuções confirmadas por equipe e tipo de serviço"}
           </p>
           {/* Tabs */}
           <div style={{display:"flex",justifyContent:"center",gap:4,marginTop:14}}>
-            {[{id:"pendente",label:"Pendente",icon:"📋"},{id:"carteira",label:"Carteira",icon:"📊"},
+            {[{id:"pendente",label:"Pendente",icon:"📋"},{id:"carteira",label:"Carteira",icon:"📊"},{id:"etiquetas",label:"Etiquetas",icon:"🏷"},
               ...(sess?.perfil?.pode_producao?[{id:"producao",label:"Produção",icon:"👷"},{id:"itinerario",label:"Itinerário",icon:"🚚"}]:[])].map(tab=>
               <button key={tab.id} onClick={()=>setActiveTab(tab.id)}
                 style={{padding:"8px 24px",borderRadius:8,fontSize:13,fontWeight:700,cursor:"pointer",border:activeTab===tab.id?`1px solid rgba(59,130,246,0.4)`:`1px solid ${C.border}`,
@@ -4722,6 +5584,7 @@ export default function App(){
         </div>
         {toast&&<div style={{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",zIndex:2000,padding:"10px 24px",borderRadius:10,fontSize:13,fontWeight:600,maxWidth:"90vw",wordBreak:"break-word",background:toast.includes("Erro")?"rgba(239,68,68,0.15)":"rgba(16,185,129,0.15)",color:toast.includes("Erro")?C.red:C.green,border:`1px solid ${toast.includes("Erro")?C.redBorder:C.greenBorder}`,backdropFilter:"blur(8px)",animation:"fadeIn 0.2s ease"}}>{toast}</div>}
         {activeTab==="carteira"&&<CarteiraView rawRows={rawRows} sess={sess}/>}
+        {activeTab==="etiquetas"&&<EtiquetasView notas={notas} rawRows={rawRows} sess={sess}/>}
         {activeTab==="producao"&&sess?.perfil?.pode_producao&&<ProducaoView sess={sess} onLogout={sair}/>}
         {activeTab==="itinerario"&&sess?.perfil?.pode_producao&&<ItinerarioView rawRows={rawRows} notas={notas} sess={sess}/>}
         {showLogin&&<LoginModal onClose={()=>setShowLogin(false)} onOk={entrar}/>}
@@ -4793,7 +5656,7 @@ export default function App(){
           <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label} historico={historico} activeUnit={activeUnit}/>
         </div>}
         {activeTab==="pendente"&&showGasModal&&gas.alerts.length>0&&<GasAlertModal alerts={gas.alerts} onIgnore={gas.doIgnore} onClose={()=>setShowGasModal(false)}/>}
-        {buscaModal&&<OSModal rows={buscaModal.rows} familia={buscaModal.familia} tipo="busca" onClose={()=>setBuscaModal(null)}/>}
+        {buscaModal&&<OSModal rows={buscaModal.rows} familia={buscaModal.familia} tipo={buscaModal.tipo||"busca"} onClose={()=>setBuscaModal(null)}/>}
         {showNotas&&<NotasModal notas={notasDoPendente} rows={rawRows} filtroInicial={filtroNota} onClose={()=>setShowNotas(false)}
           onEditar={x=>setNotaAberta(x)}/>}
         {showOuvRodar&&sess?.perfil?.pode_importar&&<OuvidoriaRodarModal sess={sess} onClose={()=>setShowOuvRodar(false)}/>}
@@ -4808,4 +5671,4 @@ export default function App(){
     </div>
     <style>{`@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@keyframes modalIn{from{opacity:0;transform:scale(0.95)}to{opacity:1;transform:scale(1)}}@keyframes gasPulse{0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,0.3)}50%{box-shadow:0 0 12px 4px rgba(245,158,11,0.15)}}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}`}</style>
   </div></SessaoCtx.Provider>;
-}
+}
