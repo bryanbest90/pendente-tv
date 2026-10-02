@@ -729,6 +729,47 @@ function tempo(val){const s=String(val).trim();return !s?null:s.startsWith("-")?
 // ÁGUA caíam nisso. Quem ordena agora é minutosResiduais, que soma
 // dias, horas e minutos.
 function fmtDate(iso){if(!iso)return"—";try{const d=new Date(iso);return d.toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"});}catch{return iso;}}
+
+/* As entradas de um dia, da tabela os_entrada (sql/os_entrada.sql).
+
+   A primeira versão contava a Data Inserção direto no pendente. A data
+   era exata, mas o pendente só tem o que está ABERTO: executada a OS,
+   ela some e leva a entrada daquele dia junto — de 266 que entraram em
+   24/09 restavam 23. Para contar o que é SOLICITADO, não servia.
+
+   A os_entrada só cresce. Um gatilho no pendente_os registra o par
+   (OS, TSS) na primeira vez que ele aparece, e a linha fica mesmo
+   depois de a OS sair da carteira.
+
+   Devolve null se a tabela ainda não existe — aí a coluna não aparece
+   e o resto da tela segue funcionando. */
+async function fetchEntradasDoDia(dia){
+  const out=[];let from=0;const ps=1000;
+  for(;;){
+    const r=await fetch(SUPABASE_URL+`/rest/v1/os_entrada?data_insercao=eq.${dia}&select=numero_os,tss,familia,atc,endereco,bairro,origem`,
+      {headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
+    if(!r.ok&&r.status!==206) return null;
+    const d=await r.json();
+    if(!d?.length) break;
+    out.push(...d);
+    if(d.length<ps) break;
+    from+=ps;
+  }
+  return out;
+}
+// A entrada mais antiga registrada — é o piso do calendário, e sai do
+// próprio dado em vez de uma data escrita à mão.
+async function fetchEntradaMaisAntiga(){
+  const r=await fetch(SUPABASE_URL+"/rest/v1/os_entrada?select=data_insercao&order=data_insercao.asc&limit=1",{headers:HEADERS});
+  if(!r.ok) return null;
+  return (await r.json())?.[0]?.data_insercao?.slice(0,10)||null;
+}
+
+/* Com a os_entrada, o número do dia não encolhe mais: executar a OS não
+   tira a entrada dela. Por isso saiu daqui a trava de data e o rótulo
+   "Ainda abertas" que existiam na versão anterior — eles só faziam
+   sentido enquanto a coluna lia o pendente, que esvaziava 92% do dia
+   em uma semana. Agora qualquer data vale e quer dizer a mesma coisa. */
 function fmtDiaShort(dia){try{const[y,m,d]=dia.split("-");return`${d}/${m}`;}catch{return dia;}}
 function fmtDiaFull(dia){try{const[y,m,d]=dia.split("-");return`${d}/${m}/${y}`;}catch{return dia;}}
 
@@ -2694,7 +2735,8 @@ function Check({checked,onChange}){
 function OSModal({rows,familia,tssName,tipo,onClose}){
   // "busca" vem do campo de pesquisa da lateral: a OS pode ter linhas
   // no prazo e fora, entao o cabecalho nao afirma nenhum dos dois.
-  const label=tipo==="prazo"?"No Prazo":tipo==="fora"?"Fora do Prazo":tipo==="endereco"?"Busca por endereço":"Busca por OS";
+  const label=tipo==="prazo"?"No Prazo":tipo==="fora"?"Fora do Prazo"
+    :tipo==="endereco"?"Busca por endereço":"Busca por OS";
   const color=tipo==="prazo"?C.green:tipo==="fora"?C.red:C.accent;
   const [modalSort,setModalSort]=useState({col:null,asc:true});
   const cols=[
@@ -3269,8 +3311,48 @@ function HistoricoChart({historico,activeUnit}){
   </div>;
 }
 /* ── Family Row ── */
-function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx}){
+/* A lista do que foi solicitado no dia.
+   Não dá para reaproveitar o OSModal: ele trabalha com as linhas do
+   pendente, e boa parte destas já saiu da carteira. Os campos vêm da
+   os_entrada, que guarda endereço por isso mesmo. */
+function EntradaModal({titulo,dia,linhas,onClose}){
+  const aprox=linhas.filter(l=>l.origem==="foto").length;
+  const td={padding:"6px 10px",fontSize:12.5,borderBottom:`1px solid ${C.border}`};
+  return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(4px)"}}>
+    <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:14,border:`1px solid ${C.border}`,
+      width:"100%",maxWidth:860,maxHeight:"86vh",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      <div style={{padding:"14px 18px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:12}}>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:15,fontWeight:700,color:C.text}}>{titulo}</div>
+          <div style={{fontSize:12,color:C.textDim,marginTop:3}}>
+            Solicitados em {fmtDiaFull(dia)} — {linhas.length} serviço{linhas.length>1?"s":""}
+            {aprox>0&&<span style={{color:C.amber}}> · {aprox} com data aproximada</span>}
+          </div>
+        </div>
+        <span onClick={onClose} style={{cursor:"pointer",fontSize:20,color:C.textDim,lineHeight:1,padding:"0 4px"}}>✕</span>
+      </div>
+      <div style={{overflowY:"auto"}}>
+        <table style={{width:"100%",borderCollapse:"collapse"}}>
+          <tbody>{linhas.map((l,i)=>
+            <tr key={l.numero_os+"§"+l.tss+"§"+i}>
+              <td style={{...td,...numStyle,color:C.accent,fontWeight:600,whiteSpace:"nowrap"}}>{l.numero_os}</td>
+              <td style={{...td,color:C.text}}>{l.tss}</td>
+              <td style={{...td,color:C.textDim,fontSize:11.5}}>
+                {[l.endereco,l.bairro].filter(Boolean).join(" — ")||"—"}</td>
+              <td style={{...td,whiteSpace:"nowrap",textAlign:"right"}}>
+                {l.origem==="foto"&&<span title="A data veio do primeiro dia em que a OS apareceu na foto diária, não da Data Inserção do GEOCALL — é o máximo que se sabe de quem já saiu da carteira antes de começarmos a registrar."
+                  style={{fontSize:10.5,fontWeight:700,color:C.amber,background:C.amberBg,border:"1px solid rgba(245,158,11,0.3)",borderRadius:8,padding:"1px 8px",cursor:"help"}}>aproximada</span>}</td>
+            </tr>)}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>;
+}
+
+function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx,diaEntrada,entradaInfo}){
   const [expanded,setExpanded]=useState(false);const [modal,setModal]=useState(null);
+  const [entradaModal,setEntradaModal]=useState(null);   // {titulo, linhas}
   const [subAberto,setSubAberto]=useState(()=>new Set());
   const activeRows=rows.filter(r=>!excludedTSS.has(String(r["TSS"]||"").trim()));
   // Os grupos guardam os MEMBROS, nao so o nome: o filtro de TSS e
@@ -3299,6 +3381,16 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx}){
     f=f.filter(r=>tempo(r["Tempo Residual"])===tipo)
        .sort((a,b)=>minutosResiduais(a["Tempo Residual"])-minutosResiduais(b["Tempo Residual"]));
     if(f.length>0)setModal({rows:f,tipo,tssName});};
+  const entradas=entradaInfo?.porFam.get(fam)||0;
+  // A lista de entradas NÃO sai do pendente: boa parte já foi executada
+  // e não está mais lá. Sai da própria os_entrada, que guardou endereço
+  // justamente para esta tela continuar legível depois da baixa.
+  const abrirEntradas=(titulo,filtroTss)=>{
+    if(!entradaInfo) return;
+    const l=entradaInfo.lista.filter(e=>String(e.familia||"").trim()===fam
+      &&(!filtroTss||filtroTss.includes(String(e.tss||"").trim())));
+    if(l.length) setEntradaModal({titulo,linhas:l});
+  };
   // Familia com subgrupos abre nos subitens, nao nas 45 TSS.
   // "Outros" recolhe o que nao esta em lista nenhuma — nunca some.
   const sub=SUB_POR_FAMILIA[String(fam||"").trim().toUpperCase()];
@@ -3328,19 +3420,22 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx}){
   if(semDado&&!expanded)return null;
   return <>
     <tr style={{background:idx%2===0?"transparent":C.cardAlt,cursor:"pointer",opacity:allOff&&!expanded?0.5:1}} onClick={()=>setExpanded(!expanded)} onMouseEnter={e=>(e.currentTarget.style.background=C.rowHover)} onMouseLeave={e=>(e.currentTarget.style.background=idx%2===0?"transparent":C.cardAlt)}>
-      <td style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}><div style={{display:"flex",alignItems:"center",gap:8}}>
+      <td style={{padding:"11px 10px",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}><div style={{display:"flex",alignItems:"center",gap:8}}>
         <span style={{fontSize:10,color:C.textDim,transition:"transform 0.15s",display:"inline-block",transform:expanded?"rotate(90deg)":"rotate(0deg)"}}>▶</span>
-        <span style={{fontSize:14,fontWeight:700}}>{fam}</span>
+        <span style={{fontSize:13,fontWeight:700}}>{fam}</span>
         {allOff&&<span title="Todas as TSS desta família estão desmarcadas. Abra e clique em Todos para voltar."
           style={{fontSize:10,padding:"1px 7px",borderRadius:8,background:"rgba(148,163,184,0.1)",color:C.textDim,border:`1px solid ${C.border}`,fontWeight:700}}>tudo desmarcado</span>}
         {filterActive&&<span style={{fontSize:10,padding:"1px 7px",borderRadius:8,background:C.amberBg,color:C.amber,border:"1px solid rgba(245,158,11,0.25)",fontWeight:700}}>filtrado</span>}
       </div></td>
-      <td style={{padding:"12px 16px",textAlign:"center",borderBottom:`1px solid ${C.border}`}}><Pill value={prazo} color={C.green} bg={C.greenBg} border={C.greenBorder} clickable={prazo>0} onClick={e=>{e.stopPropagation();if(prazo>0)openModal("prazo");}}/></td>
-      <td style={{padding:"12px 16px",textAlign:"center",borderBottom:`1px solid ${C.border}`}}><Pill value={fora} color={C.red} bg={C.redBg} border={C.redBorder} clickable={fora>0} onClick={e=>{e.stopPropagation();if(fora>0)openModal("fora");}}/></td>
-      <td style={{padding:"12px 16px",textAlign:"center",fontSize:14,fontWeight:600,color:C.textMuted,borderBottom:`1px solid ${C.border}`}}>{total}</td>
-      <td style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,minWidth:150}}><Bar prazo={prazo} fora={fora} total={total}/></td>
+      {entradaInfo&&<td style={{padding:"11px 10px",textAlign:"center",borderBottom:`1px solid ${C.border}`}}>
+        <Pill value={entradas} color={C.accent} bg={C.accentBg} border="rgba(59,130,246,0.3)"
+          clickable={entradas>0} onClick={e=>{e.stopPropagation();abrirEntradas(fam);}}/></td>}
+      <td style={{padding:"11px 10px",textAlign:"center",borderBottom:`1px solid ${C.border}`}}><Pill value={prazo} color={C.green} bg={C.greenBg} border={C.greenBorder} clickable={prazo>0} onClick={e=>{e.stopPropagation();if(prazo>0)openModal("prazo");}}/></td>
+      <td style={{padding:"11px 10px",textAlign:"center",borderBottom:`1px solid ${C.border}`}}><Pill value={fora} color={C.red} bg={C.redBg} border={C.redBorder} clickable={fora>0} onClick={e=>{e.stopPropagation();if(fora>0)openModal("fora");}}/></td>
+      <td style={{padding:"11px 10px",textAlign:"center",fontSize:14,fontWeight:600,color:C.textMuted,borderBottom:`1px solid ${C.border}`}}>{total}</td>
+      <td style={{padding:"11px 10px",borderBottom:`1px solid ${C.border}`,minWidth:104}}><Bar prazo={prazo} fora={fora} total={total}/></td>
     </tr>
-    {expanded&&<tr><td colSpan={5} style={{padding:0,background:"rgba(15,23,42,0.5)",borderBottom:`1px solid ${C.border}`}}>
+    {expanded&&<tr><td colSpan={entradaInfo?6:5} style={{padding:0,background:"rgba(15,23,42,0.5)",borderBottom:`1px solid ${C.border}`}}>
       <div style={{padding:"10px 16px 14px 40px"}}>
         <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
           <span style={{fontSize:12,color:C.textDim,fontWeight:600,textTransform:"uppercase",letterSpacing:0.5}}>Filtro de TSS</span>
@@ -3351,6 +3446,7 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx}){
           const linhaTss=t=>{
             const on=!t.membros.every(m=>excludedTSS.has(m));
             const tP=on?t.prazo.length:0,tF=on?t.fora.length:0;
+            const tE=on?t.membros.reduce((a,m)=>a+(entradaInfo?.porTss.get(m)||0),0):0;
             return <div key={t.name} style={{display:"flex",alignItems:"center",gap:10,padding:"5px 6px",borderRadius:RAIO,opacity:on?1:0.45,transition:"opacity 0.15s"}}
               onMouseEnter={e=>(e.currentTarget.style.background="rgba(255,255,255,0.02)")} onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
               <Check checked={on} onChange={()=>onToggleAll(t.membros,!on)}/>
@@ -3359,6 +3455,7 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx}){
                 {t.name}{t.membros.length>1&&<span style={{color:C.textDim,fontSize:11,marginLeft:7}}>EXIST + NOVA</span>}
               </span>
               <span style={{fontSize:12,color:C.textDim,marginRight:4,...numStyle}}>{t.all.length}</span>
+              {entradaInfo&&<Pill value={tE} color={C.accent} bg={C.accentBg} border="rgba(59,130,246,0.3)" clickable={on&&tE>0} onClick={e=>{e.stopPropagation();if(on&&tE>0)abrirEntradas(fam+" · "+t.name,t.membros);}}/>}
               <Pill value={tP} color={C.green} bg={C.greenBg} border={C.greenBorder} clickable={on&&tP>0} onClick={e=>{e.stopPropagation();if(on&&tP>0)openModal("prazo",t.name,t.membros);}}/>
               <Pill value={tF} color={C.red} bg={C.redBg} border={C.redBorder} clickable={on&&tF>0} onClick={e=>{e.stopPropagation();if(on&&tF>0)openModal("fora",t.name,t.membros);}}/>
             </div>;
@@ -3391,6 +3488,7 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx}){
       </div>
     </td></tr>}
     {modal&&<OSModal rows={modal.rows} familia={fam} tssName={modal.tssName} tipo={modal.tipo} onClose={()=>setModal(null)}/>}
+    {entradaModal&&<EntradaModal titulo={entradaModal.titulo} dia={diaEntrada} linhas={entradaModal.linhas} onClose={()=>setEntradaModal(null)}/>}
   </>;
 }
 const btnTiny={padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:600,border:`1px solid ${C.border}`,background:"transparent",color:C.textDim,cursor:"pointer"};
@@ -3520,7 +3618,9 @@ function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,nNo
 }
 
 /* ── Dashboard ── */
-function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitLabel,historico,activeUnit}){
+function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitLabel,historico,activeUnit,
+                    diaEntrada,setDiaEntrada,entradaInfo,entradaMin}){
+  const totalEntradas=entradaInfo?.total??0;
   const {familyMap,totalPrazo,totalFora,total}=useMemo(()=>{
     const fm={};let tp=0,tf=0;
     rows.forEach(r=>{const fam=String(r["Família"]||"").trim();if(!fam)return;if(!fm[fam])fm[fam]=[];fm[fam].push(r);
@@ -3529,9 +3629,10 @@ function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitL
   },[rows,excludedTSS]);
   const sortedFams=useMemo(()=>{
     return Object.entries(familyMap).map(([name,rs])=>{const active=rs.filter(r=>!excludedTSS.has(String(r["TSS"]||"").trim()));const p=active.filter(r=>tempo(r["Tempo Residual"])==="prazo").length,f=active.filter(r=>tempo(r["Tempo Residual"])==="fora").length;
-      return{name,rows:rs,prazo:p,fora:f,total:p+f,pctFora:(p+f)>0?f/(p+f):0};
-    }).sort((a,b)=>{if(sortBy==="fora")return b.fora-a.fora;if(sortBy==="prazo")return b.prazo-a.prazo;if(sortBy==="name")return a.name.localeCompare(b.name);if(sortBy==="pct")return b.pctFora-a.pctFora;return b.total-a.total;});
-  },[familyMap,excludedTSS,sortBy]);
+      const ent=entradaInfo?.porFam.get(name)||0;
+      return{name,rows:rs,prazo:p,fora:f,entradas:ent,total:p+f,pctFora:(p+f)>0?f/(p+f):0};
+    }).sort((a,b)=>{if(sortBy==="fora")return b.fora-a.fora;if(sortBy==="prazo")return b.prazo-a.prazo;if(sortBy==="entradas")return b.entradas-a.entradas;if(sortBy==="name")return a.name.localeCompare(b.name);if(sortBy==="pct")return b.pctFora-a.pctFora;return b.total-a.total;});
+  },[familyMap,excludedTSS,sortBy,entradaInfo]);
   return <>
     <div style={{display:"flex",gap:12,marginBottom:16,flexWrap:"wrap"}}>
       <SummaryCard label="Total" value={total} color={C.accent} icon="📋"/>
@@ -3554,11 +3655,51 @@ function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitL
       <div style={{overflowX:"auto"}}>
         <table style={{width:"100%",borderCollapse:"collapse",minWidth:600}}>
           <thead><tr style={{background:C.headerBg}}>
-            {[{key:"name",label:"Família"},{key:"prazo",label:"No Prazo"},{key:"fora",label:"Fora do Prazo"},{key:"total",label:"Total"},{key:"pct",label:"Proporção"}].map(col=>
-              <th key={col.key} onClick={()=>onSort(col.key)} style={{padding:"12px 16px",textAlign:col.key==="name"?"left":"center",fontSize:9.5,fontWeight:500,color:sortBy===col.key?C.accent:C.textDim,textTransform:"uppercase",letterSpacing:"0.2em",cursor:"pointer",userSelect:"none",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{col.label}{sortBy===col.key?" ↓":""}</th>
+            {/* Sem a tabela os_entrada no banco a coluna não aparece.
+                Mostrá-la zerada seria pior do que não ter: zero é uma
+                afirmação, e aqui seria uma afirmação falsa. */}
+            {[{key:"name",label:"Família"},
+              ...(entradaInfo?[{key:"entradas",label:"Entradas"}]:[]),
+              {key:"prazo",label:"No Prazo"},{key:"fora",label:"Fora do Prazo"},{key:"total",label:"Total"},{key:"pct",label:"Proporção"}].map(col=>
+              <th key={col.key} onClick={()=>onSort(col.key)} style={{padding:"11px 10px",textAlign:col.key==="name"?"left":"center",fontSize:9.5,fontWeight:500,color:sortBy===col.key?C.accent:C.textDim,textTransform:"uppercase",letterSpacing:"0.12em",cursor:"pointer",userSelect:"none",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap",
+                ...(col.key==="entradas"?{position:"relative"}:{})}}>
+                {/* O rótulo fica SOZINHO no fluxo, para o text-align
+                    center o deixar no mesmo eixo da pílula da coluna.
+
+                    O campo de data e o total saem do fluxo e vão para a
+                    ESQUERDA da coluna (right:100%), caindo na sobra da
+                    coluna Família — ela é a mais larga da tabela e tem o
+                    texto alinhado à esquerda, então aquele espaço está
+                    vazio. As duas tentativas anteriores falharam por
+                    disputar espaço DENTRO da coluna: no fluxo o grupo
+                    empurrava o rótulo para fora do eixo, e com o total
+                    jogado em right:10 ele passava por cima do "NO
+                    PRAZO" da coluna seguinte.
+
+                    O stopPropagation é necessário porque o <th> inteiro
+                    ordena ao ser clicado. */}
+                {col.key==="entradas"&&<span onClick={e=>e.stopPropagation()}
+                  style={{position:"absolute",right:"100%",marginRight:6,top:"50%",transform:"translateY(-50%)",
+                    display:"inline-flex",alignItems:"center",gap:5}}>
+                  <input type="date" value={diaEntrada} min={entradaMin||undefined} max={diaISO(new Date())}
+                    /* o min do <input> só marca como inválido; dá para digitar
+                       uma data fora da faixa. Quem garante é este clamp. */
+                    onChange={e=>{const v=e.target.value,h=diaISO(new Date());
+                      setDiaEntrada(!v?h:(v>h?h:(entradaMin&&v<entradaMin?entradaMin:v)));}}
+                    title={`Dia em que o serviço foi solicitado (Data Inserção do GEOCALL)${entradaMin?`. Há registro desde ${fmtDiaFull(entradaMin)}`:""}.`}
+                    style={{fontSize:10.5,fontFamily:FONTE_UI,letterSpacing:0,textTransform:"none",fontWeight:600,
+                      color:C.accent,background:C.accentBg,border:"1px solid rgba(59,130,246,0.35)",
+                      borderRadius:RAIO,padding:"1px 3px",cursor:"pointer",colorScheme:"dark"}}/>
+                  <span title={`${totalEntradas} serviços foram solicitados neste dia. Não diminui quando a OS é executada.`
+                      +(entradaInfo?.aproximadas?` ${entradaInfo.aproximadas} deles têm data aproximada, vinda da foto diária.`:"")}
+                    style={{...numStyle,fontSize:11,fontWeight:700,letterSpacing:0,cursor:"help",
+                      color:totalEntradas?C.accent:C.textDim}}>{totalEntradas}</span>
+                </span>}
+                {col.label}{sortBy===col.key?" ↓":""}
+              </th>
             )}
           </tr></thead>
-          <tbody>{sortedFams.map((f,i)=><FamilyRow key={f.name} fam={f.name} rows={f.rows} excludedTSS={excludedTSS} onToggleTSS={onToggleTSS} onToggleAll={onToggleAll} idx={i}/>)}</tbody>
+          <tbody>{sortedFams.map((f,i)=><FamilyRow key={f.name} fam={f.name} rows={f.rows} excludedTSS={excludedTSS} onToggleTSS={onToggleTSS} onToggleAll={onToggleAll} idx={i} diaEntrada={diaEntrada} entradaInfo={entradaInfo}/>)}</tbody>
         </table>
       </div>
     </div>
@@ -5310,6 +5451,45 @@ export default function App(){
   const [notaAberta,setNotaAberta]=useState(null);   // edicao vinda do modal de Notas
   const [buscaModal,setBuscaModal]=useState(null);   // {rows,familia} da OS pesquisada
   const [activeTab,setActiveTab]=useState("pendente");
+  // Dia da coluna Entradas. Começa em hoje: o robô do pendente roda de
+  // hora em hora, então o que entrou de manhã já está lá.
+  const [diaEntrada,setDiaEntrada]=useState(()=>diaISO(new Date()));
+  const [entradasDia,setEntradasDia]=useState(null);   // linhas da os_entrada; null = tabela não existe
+  const [entradaMin,setEntradaMin]=useState(null);     // piso do calendário, tirado do próprio dado
+
+  useEffect(()=>{let vivo=true;
+    (async()=>{try{const m=await fetchEntradaMaisAntiga();if(vivo)setEntradaMin(m);}catch{}})();
+    return()=>{vivo=false;};
+  },[]);
+  useEffect(()=>{
+    if(!diaEntrada){setEntradasDia(null);return;}
+    let vivo=true;
+    (async()=>{try{const e=await fetchEntradasDoDia(diaEntrada);if(vivo)setEntradasDia(e);}
+      catch{if(vivo)setEntradasDia(null);}})();
+    return()=>{vivo=false;};
+  },[diaEntrada]);
+
+  /* Contagem por família e por TSS, já na unidade da lateral e com as
+     mesmas TSS que a tabela mostra — senão a coluna contaria o que as
+     outras não contam. `fora` são entradas de família que não tem linha
+     na tabela porque nada dela está aberto hoje; aparecem no total do
+     cabeçalho e ficariam invisíveis sem esse aviso. */
+  const entradaInfo=useMemo(()=>{
+    if(!entradasDia) return null;
+    const atcAlvo=(UNITS.find(u=>u.id===activeUnit)||UNITS[0]).atc;
+    const porFam=new Map(),porTss=new Map(),lista=[];
+    for(const e of entradasDia){
+      if(atcAlvo===null?!VALID_ATCS.includes(Number(e.atc)):Number(e.atc)!==atcAlvo) continue;
+      const tss=String(e.tss||"").trim();
+      if(!familiaTssVisivel(e.familia,tss)||excludedTSS.has(tss)) continue;
+      const f=String(e.familia||"").trim();
+      porFam.set(f,(porFam.get(f)||0)+1);
+      porTss.set(tss,(porTss.get(tss)||0)+1);
+      lista.push(e);
+    }
+    return {porFam,porTss,lista,total:lista.length,
+      aproximadas:lista.filter(e=>e.origem==="foto").length};
+  },[entradasDia,activeUnit,excludedTSS]);
   const [desde,setDesde]=useState("");        // "a carteira desta data para frente" (AAAA-MM-DD)
   const [entrada,setEntrada]=useState(null);  // {osSet,primeiroDia} das OS que entraram a partir de `desde`
   const [buscandoDesde,setBuscandoDesde]=useState(false);
@@ -5653,7 +5833,8 @@ export default function App(){
               <button onClick={refresh} style={{fontSize:12,color:C.accent,cursor:"pointer",fontWeight:600,padding:"4px 12px",borderRadius:6,border:"1px solid rgba(59,130,246,0.3)",background:C.accentBg}}>↻ Atualizar</button>
             </div>
           </div>
-          <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label} historico={historico} activeUnit={activeUnit}/>
+          <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label} historico={historico} activeUnit={activeUnit}
+            diaEntrada={diaEntrada} setDiaEntrada={setDiaEntrada} entradaInfo={entradaInfo} entradaMin={entradaMin}/>
         </div>}
         {activeTab==="pendente"&&showGasModal&&gas.alerts.length>0&&<GasAlertModal alerts={gas.alerts} onIgnore={gas.doIgnore} onClose={()=>setShowGasModal(false)}/>}
         {buscaModal&&<OSModal rows={buscaModal.rows} familia={buscaModal.familia} tipo={buscaModal.tipo||"busca"} onClose={()=>setBuscaModal(null)}/>}
@@ -5671,4 +5852,4 @@ export default function App(){
     </div>
     <style>{`@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@keyframes modalIn{from{opacity:0;transform:scale(0.95)}to{opacity:1;transform:scale(1)}}@keyframes gasPulse{0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,0.3)}50%{box-shadow:0 0 12px 4px rgba(245,158,11,0.15)}}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}`}</style>
   </div></SessaoCtx.Provider>;
-}
+}
