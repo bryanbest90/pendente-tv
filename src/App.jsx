@@ -3355,11 +3355,12 @@ function HistoricoChart({historico,entradaSerie,activeUnit}){
             atrás, dois gradientes empilhados sujavam as barras. Só a
             Carteira tem preenchimento.
 
-            NÃO VOLTE A ESCREVER EXPLICAÇÃO NO RODAPÉ. Tinha aqui um
-            texto dizendo que as colunas são do eixo da direita e que
-            "Saíram" é deduzido. Saiu a pedido: o rodapé já tem legenda,
-            dica de clique e botão, e mais um parágrafo vira ruído. A
-            explicação mora neste comentário. */}
+            NÃO ESCREVA EXPLICAÇÃO NO RODAPÉ. Tinha ali um texto sobre
+            o eixo da direita e sobre "Saíram" ser deduzido, e a dica de
+            clicar no ponto. Saíram os dois, a pedido. Ficou só a
+            legenda, que é chave de leitura e não texto — sem ela não dá
+            para saber o que é a coluna âmbar — e o botão, que é
+            controle. A explicação mora neste comentário. */}
         <ResponsiveContainer width="100%" height={300}>
           <ComposedChart data={chartData} margin={{top:5,right:6,left:0,bottom:5}} onClick={handleChartClick} style={{cursor:"pointer"}}>
             <defs>
@@ -3386,7 +3387,6 @@ function HistoricoChart({historico,entradaSerie,activeUnit}){
           )}
         </div>
         <div style={{display:"flex",justifyContent:"center",gap:12,padding:"6px 0 4px"}}>
-          <span style={{fontSize:10,color:C.textDim}}>Clique em um ponto para ver a variação por família</span>
           {chartData.length>=2&&<button onClick={()=>{
             const dA=chartData[0].dia, dB=chartData[chartData.length-1].dia;
             setExitModal({diaA:dA,diaB:dB});
