@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef, useMemo, useEffect } from "react";
 import * as XLSX from "xlsx";
-import { XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Area, AreaChart } from "recharts";
+import { XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Area, AreaChart, ComposedChart, Bar as RBar, Line as RLine } from "recharts";
 
 // ━━━ SUPABASE ━━━
 const SUPABASE_URL = "https://iggnfikqbdgrvfshxhul.supabase.co";
@@ -276,6 +276,15 @@ async function fetchRows(){
 // e dia.asc, quem fica de fora sao os dias MAIS RECENTES — o grafico
 // simplesmente parava de crescer. Com ~46 linhas por dia, o corte chegou
 // em 08/09/2026, quando o historico passou de 24 dias.
+/* Série de entradas por dia/família/unidade, da v_entrada_serie.
+   Tem a mesma forma da pendente_historico de propósito: o gráfico já
+   filtra aquela por unidade e família, e assim as duas séries passam
+   pelo mesmo filtro. */
+async function fetchEntradaSerie(){
+  const r=await fetch(SUPABASE_URL+"/rest/v1/v_entrada_serie?select=dia,unidade,familia,entradas,aproximadas",{headers:HEADERS});
+  if(!r.ok) return null;          // view não criada: o gráfico volta ao que era
+  return r.json();
+}
 async function fetchHistorico(){
   const allRows=[];let from=0;const ps=1000;
   while(true){
@@ -746,7 +755,7 @@ function fmtDate(iso){if(!iso)return"—";try{const d=new Date(iso);return d.toL
 async function fetchEntradasDoDia(dia){
   const out=[];let from=0;const ps=1000;
   for(;;){
-    const r=await fetch(SUPABASE_URL+`/rest/v1/os_entrada?data_insercao=eq.${dia}&select=numero_os,tss,familia,atc,endereco,bairro,origem`,
+    const r=await fetch(SUPABASE_URL+`/rest/v1/os_entrada?origem=neq.inicial&data_insercao=eq.${dia}&select=numero_os,tss,familia,atc,endereco,bairro,origem`,
       {headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
     if(!r.ok&&r.status!==206) return null;
     const d=await r.json();
@@ -760,7 +769,7 @@ async function fetchEntradasDoDia(dia){
 // A entrada mais antiga registrada — é o piso do calendário, e sai do
 // próprio dado em vez de uma data escrita à mão.
 async function fetchEntradaMaisAntiga(){
-  const r=await fetch(SUPABASE_URL+"/rest/v1/os_entrada?select=data_insercao&order=data_insercao.asc&limit=1",{headers:HEADERS});
+  const r=await fetch(SUPABASE_URL+"/rest/v1/os_entrada?origem=neq.inicial&select=data_insercao&order=data_insercao.asc&limit=1",{headers:HEADERS});
   if(!r.ok) return null;
   return (await r.json())?.[0]?.data_insercao?.slice(0,10)||null;
 }
@@ -3073,9 +3082,12 @@ function CustomTooltip({active,payload,label}){
   if(!active||!payload?.length)return null;
   return <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",fontSize:12,boxShadow:"0 8px 24px rgba(0,0,0,0.4)"}}>
     <div style={{fontWeight:700,color:C.text,marginBottom:6}}>{label}</div>
-    {payload.map((p,i)=>(<div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"2px 0"}}>
+    {/* value nulo acontece no primeiro dia da série, onde "saíram" não
+        tem dia anterior com que comparar. Sem a guarda, o toLocaleString
+        derrubava o tooltip inteiro. */}
+    {payload.filter(p=>p.value!=null).map((p,i)=>(<div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"2px 0"}}>
       <span style={{width:8,height:8,borderRadius:"50%",background:p.color,flexShrink:0}}/><span style={{color:C.textMuted}}>{p.name}:</span>
-      <span style={{fontWeight:700,color:p.color,fontVariantNumeric:"tabular-nums"}}>{p.value.toLocaleString("pt-BR")}</span>
+      <span style={{fontWeight:700,color:p.color,fontVariantNumeric:"tabular-nums"}}>{Number(p.value).toLocaleString("pt-BR")}</span>
     </div>))}
     <div style={{fontSize:10,color:C.textDim,marginTop:4,borderTop:`1px solid ${C.border}`,paddingTop:4}}>Clique para ver variação</div>
   </div>;
@@ -3182,7 +3194,7 @@ function OSExitModal({diaA,diaB,activeUnit,familyFilter,onClose}){
   </div>;
 }
 
-function HistoricoChart({historico,activeUnit}){
+function HistoricoChart({historico,entradaSerie,activeUnit}){
   const [showChart,setShowChart]=useState(true);
   const [diffModal,setDiffModal]=useState(null);
   const [exitModal,setExitModal]=useState(null);
@@ -3220,10 +3232,53 @@ function HistoricoChart({historico,activeUnit}){
       byDay[r.dia].total += r.total;
     });
     let data = Object.values(byDay).sort((a,b)=>a.dia.localeCompare(b.dia));
+
+    /* ENTRADAS E SAÍDAS — as colunas.
+       A entrada vem medida da v_entrada_serie, com o MESMO filtro de
+       unidade e família que o saldo acima. Isso importa: a os_entrada
+       tem 6 famílias que a pendente_historico não tem (o robô as
+       exclui do histórico), e sem o filtro comum a conta de saída
+       sairia inflada.
+
+       A SAÍDA não é medida, é deduzida: saldo de hoje = saldo de
+       ontem + entraram − saíram, então saíram = entraram − variação
+       do saldo. Deduzir é melhor do que medir por fora aqui, por dois
+       motivos. Primeiro, fecha por construção: as colunas explicam
+       exatamente o movimento da linha, em vez de três séries que
+       quase batem. Segundo, não depende do os_desfecho, que só existe
+       nos dias em que o EM RUA foi importado com resultado.
+
+       Conferido nos 47 dias da série: nenhum dia deu saída negativa,
+       que é o sinal que apareceria se as duas fontes discordassem.
+
+       SAÍDA NÃO É EXECUÇÃO. É o que deixou a carteira — pode ter sido
+       executado, cancelado, ou encerrado sem execução. Por isso a
+       coluna se chama "Saíram". O porquê está na aba Etiquetas. */
+    if(entradaSerie?.length){
+      const ent={};
+      entradaSerie.forEach(r=>{
+        if(unidadeFilter!==null && r.unidade!==unidadeFilter) return;
+        if(familyFilter.size>0 && !familyFilter.has(r.familia)) return;
+        // família que o histórico não cobre fica de fora: sem saldo
+        // dela, a entrada dela viraria saída fantasma
+        if(!allFamilies.includes(r.familia)) return;
+        const d=String(r.dia).slice(0,10);
+        ent[d]=(ent[d]||0)+r.entradas;
+      });
+      let ant=null;
+      data=data.map(d=>{
+        const entraram=ent[d.dia]??null;
+        // o primeiro dia da série não tem com o que comparar
+        const sairam=(ant&&entraram!=null)?entraram-(d.total-ant.total):null;
+        ant=d;
+        return {...d,entraram,sairam};
+      });
+    }
+
     if(dateFrom) data = data.filter(d => d.dia >= dateFrom);
     if(dateTo) data = data.filter(d => d.dia <= dateTo);
     return data.map(d=>({...d,label:fmtDiaShort(d.dia)}));
-  },[historico,unidadeFilter,familyFilter,dateFrom,dateTo]);
+  },[historico,entradaSerie,allFamilies,unidadeFilter,familyFilter,dateFrom,dateTo]);
 
   const handleChartClick = useCallback((e)=>{
     if(!e?.activePayload?.length) return;
@@ -3239,6 +3294,12 @@ function HistoricoChart({historico,activeUnit}){
   const ultimo = chartData[chartData.length-1];
   const varTotal = primeiro&&ultimo ? ultimo.total-primeiro.total : 0;
   const varFora = primeiro&&ultimo ? ultimo.fora_prazo-primeiro.fora_prazo : 0;
+  // Só desenha as colunas se a série de entradas chegou. Sem a view no
+  // banco o gráfico volta a ser o que era, em vez de mostrar barras
+  // vazias ao longo de todo o período.
+  const temMovimento = chartData.some(d=>d.entraram!=null);
+  const somaEnt = chartData.reduce((a,d)=>a+(d.entraram||0),0);
+  const somaSai = chartData.reduce((a,d)=>a+(d.sairam||0),0);
 
   return <div style={{background:C.card,borderRadius:RAIO,border:`1px solid ${C.border}`,marginBottom:16,overflow:"hidden"}}>
     <div onClick={()=>setShowChart(!showChart)} style={{padding:"14px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",borderBottom:showChart?`1px solid ${C.border}`:"none"}}
@@ -3248,7 +3309,10 @@ function HistoricoChart({historico,activeUnit}){
         <span style={{fontSize:13,fontWeight:700,color:C.text}}>Evolução da Carteira</span>
         <span style={{fontSize:11,color:C.textDim}}>({chartData.length} dias)</span>
       </div>
-      {chartData.length>=2&&<div style={{display:"flex",gap:12,fontSize:12}}>
+      {chartData.length>=2&&<div style={{display:"flex",gap:12,fontSize:12,alignItems:"baseline",flexWrap:"wrap"}}>
+        {temMovimento&&<span style={{fontSize:11,color:C.textDim}}>
+          <b style={{color:C.accent}}>{somaEnt}</b> entraram · <b style={{color:C.amber}}>{somaSai}</b> saíram
+        </span>}
         <span style={{color:varTotal>0?C.red:varTotal<0?C.green:C.textDim,fontWeight:600}}>{varTotal>0?"+":""}{varTotal} OS</span>
         <span style={{color:varFora>0?C.red:varFora<0?C.green:C.textDim,fontWeight:600}}>{varFora>0?"+":""}{varFora} fora</span>
       </div>}
@@ -3271,26 +3335,53 @@ function HistoricoChart({historico,activeUnit}){
       </div>
 
       {chartData.length>0 ? <>
-        <ResponsiveContainer width="100%" height={260}>
-          <AreaChart data={chartData} margin={{top:5,right:10,left:0,bottom:5}} onClick={handleChartClick} style={{cursor:"pointer"}}>
+        {/* Linhas = saldo da carteira (eixo da esquerda).
+            Colunas = movimento do dia (eixo da direita).
+            Dois eixos porque as escalas não se parecem: o saldo anda
+            na casa dos 700-1000 e o movimento diário entre 70 e 320.
+            Num eixo só as colunas virariam um fio rente ao chão.
+            As colunas vêm antes das linhas no JSX para ficarem ATRÁS
+            delas — o saldo é a informação principal.
+
+            POR QUE "SAÍRAM" É ÂMBAR E NÃO VERDE
+            O verde é do No Prazo desde o começo do projeto, na tabela e
+            aqui, e a leitura de verde=bom está em toda a tela. Com a
+            coluna de saída também verde, o mesmo verde queria dizer duas
+            coisas no mesmo gráfico. E saída não é vitória: é tudo que
+            deixou a carteira, executado ou não. Âmbar é movimento, que é
+            o que a coluna mede.
+
+            O No Prazo voltou como LINHA e não como área: com as colunas
+            atrás, dois gradientes empilhados sujavam as barras. Só a
+            Carteira tem preenchimento.
+
+            NÃO VOLTE A ESCREVER EXPLICAÇÃO NO RODAPÉ. Tinha aqui um
+            texto dizendo que as colunas são do eixo da direita e que
+            "Saíram" é deduzido. Saiu a pedido: o rodapé já tem legenda,
+            dica de clique e botão, e mais um parágrafo vira ruído. A
+            explicação mora neste comentário. */}
+        <ResponsiveContainer width="100%" height={300}>
+          <ComposedChart data={chartData} margin={{top:5,right:6,left:0,bottom:5}} onClick={handleChartClick} style={{cursor:"pointer"}}>
             <defs>
-              <linearGradient id="gradTotal" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={C.accent} stopOpacity={0.15}/><stop offset="95%" stopColor={C.accent} stopOpacity={0}/></linearGradient>
-              <linearGradient id="gradPrazo" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={C.green} stopOpacity={0.15}/><stop offset="95%" stopColor={C.green} stopOpacity={0}/></linearGradient>
-              <linearGradient id="gradFora" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={C.red} stopOpacity={0.15}/><stop offset="95%" stopColor={C.red} stopOpacity={0}/></linearGradient>
+              <linearGradient id="gradTotal" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={C.accent} stopOpacity={0.14}/><stop offset="95%" stopColor={C.accent} stopOpacity={0}/></linearGradient>
             </defs>
             <CartesianGrid strokeDasharray="3 3" stroke={C.border} vertical={false}/>
             <XAxis dataKey="label" tick={{fill:C.textDim,fontSize:11}} tickLine={false} axisLine={{stroke:C.border}}/>
-            <YAxis tick={{fill:C.textDim,fontSize:11}} tickLine={false} axisLine={false} width={45}/>
+            <YAxis yAxisId="saldo" tick={{fill:C.textDim,fontSize:11}} tickLine={false} axisLine={false} width={45}/>
+            <YAxis yAxisId="mov" orientation="right" tick={{fill:C.textDim,fontSize:11}} tickLine={false} axisLine={false} width={40}/>
             <Tooltip content={<CustomTooltip/>}/>
-            <Area type="monotone" dataKey="total" name="Total" stroke={C.accent} fill="url(#gradTotal)" strokeWidth={2} dot={chartData.length<=31} activeDot={{r:6,stroke:C.accent,strokeWidth:2,fill:C.card}}/>
-            <Area type="monotone" dataKey="no_prazo" name="No Prazo" stroke={C.green} fill="url(#gradPrazo)" strokeWidth={2} dot={chartData.length<=31} activeDot={{r:5,stroke:C.green,strokeWidth:2,fill:C.card}}/>
-            <Area type="monotone" dataKey="fora_prazo" name="Fora do Prazo" stroke={C.red} fill="url(#gradFora)" strokeWidth={2} dot={chartData.length<=31} activeDot={{r:5,stroke:C.red,strokeWidth:2,fill:C.card}}/>
-          </AreaChart>
+            {temMovimento&&<RBar yAxisId="mov" dataKey="entraram" name="Entraram" fill={C.accent} fillOpacity={0.5} radius={[2,2,0,0]} maxBarSize={14}/>}
+            {temMovimento&&<RBar yAxisId="mov" dataKey="sairam"   name="Saíram"   fill={C.amber}  fillOpacity={0.5} radius={[2,2,0,0]} maxBarSize={14}/>}
+            <Area yAxisId="saldo" type="monotone" dataKey="total" name="Carteira" stroke={C.accent} fill="url(#gradTotal)" strokeWidth={2.4} dot={false} activeDot={{r:6,stroke:C.accent,strokeWidth:2,fill:C.card}}/>
+            <RLine yAxisId="saldo" type="monotone" dataKey="no_prazo" name="No Prazo" stroke={C.green} strokeWidth={2} dot={false} activeDot={{r:5,stroke:C.green,strokeWidth:2,fill:C.card}}/>
+            <RLine yAxisId="saldo" type="monotone" dataKey="fora_prazo" name="Fora do Prazo" stroke={C.red} strokeWidth={2} dot={false} activeDot={{r:5,stroke:C.red,strokeWidth:2,fill:C.card}}/>
+          </ComposedChart>
         </ResponsiveContainer>
-        <div style={{display:"flex",justifyContent:"center",gap:20,padding:"4px 0 2px"}}>
-          {[{label:"Total",color:C.accent},{label:"No Prazo",color:C.green},{label:"Fora do Prazo",color:C.red}].map(l=>
+        <div style={{display:"flex",justifyContent:"center",gap:18,padding:"4px 0 2px",flexWrap:"wrap"}}>
+          {[{label:"Carteira",color:C.accent,barra:false},{label:"No Prazo",color:C.green,barra:false},{label:"Fora do Prazo",color:C.red,barra:false},
+            ...(temMovimento?[{label:"Entraram",color:C.accent,barra:true},{label:"Saíram",color:C.amber,barra:true}]:[])].map(l=>
             <div key={l.label} style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:C.textMuted}}>
-              <span style={{width:10,height:3,borderRadius:2,background:l.color}}/>{l.label}
+              <span style={{width:l.barra?8:10,height:l.barra?9:3,borderRadius:2,background:l.color,opacity:l.barra?0.5:1}}/>{l.label}
             </div>
           )}
         </div>
@@ -3618,7 +3709,7 @@ function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,nNo
 }
 
 /* ── Dashboard ── */
-function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitLabel,historico,activeUnit,
+function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitLabel,historico,entradaSerie,activeUnit,
                     diaEntrada,setDiaEntrada,entradaInfo,entradaMin}){
   const totalEntradas=entradaInfo?.total??0;
   const {familyMap,totalPrazo,totalFora,total}=useMemo(()=>{
@@ -3646,7 +3737,7 @@ function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitL
       </div>
       <Bar prazo={totalPrazo} fora={totalFora} total={total}/>
     </div>
-    {historico&&historico.length>0&&<HistoricoChart historico={historico} activeUnit={activeUnit}/>}
+    {historico&&historico.length>0&&<HistoricoChart historico={historico} entradaSerie={entradaSerie} activeUnit={activeUnit}/>}
     <div style={{fontSize:12,color:C.textDim,marginBottom:10,padding:"0 4px",display:"flex",gap:16,flexWrap:"wrap"}}>
       <span>Clique na família para filtrar TSS</span>
       <span>Clique nos números para ver as OS</span>
@@ -5443,6 +5534,7 @@ export default function App(){
   const [activeUnit,setActiveUnit]=useState("geral");
   const [sideCollapsed,setSideCollapsed]=useState(false);
   const [historico,setHistorico]=useState(null);
+  const [entradaSerie,setEntradaSerie]=useState(null);   // v_entrada_serie; null = view não existe
   const [showGasModal,setShowGasModal]=useState(false);
   const [notas,setNotas]=useState([]);
   const [showNotas,setShowNotas]=useState(false);
@@ -5534,6 +5626,7 @@ export default function App(){
     try{const data=await fetchRows();if(data.rows?.length>0){setRawRows(data.rows);setUpdatedAt(data.updatedAt);cacheRows(data.rows,data.updatedAt);loaded=true;}}catch(e){flash("Erro Supabase: "+e.message);}
     if(!loaded){const cached=loadCache();if(cached?.rows?.length>0){setRawRows(cached.rows);setUpdatedAt(cached.updatedAt);flash("Usando dados em cache");}}
     try{const hist=await fetchHistorico();if(hist?.length>0)setHistorico(hist);}catch(e){console.warn("Historico indisponivel:",e.message);}
+    try{const es=await fetchEntradaSerie();if(es?.length>0)setEntradaSerie(es);}catch{}
     // Nota indisponivel nao derruba a tela, mas tambem nao pode
     // passar por "nenhuma nota": o menu some e ninguem desconfia.
     try{setNotas(await fetchTodasNotas());}catch(e){console.warn("Notas indisponiveis:",e.message);}
@@ -5833,7 +5926,7 @@ export default function App(){
               <button onClick={refresh} style={{fontSize:12,color:C.accent,cursor:"pointer",fontWeight:600,padding:"4px 12px",borderRadius:6,border:"1px solid rgba(59,130,246,0.3)",background:C.accentBg}}>↻ Atualizar</button>
             </div>
           </div>
-          <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label} historico={historico} activeUnit={activeUnit}
+          <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label} historico={historico} entradaSerie={entradaSerie} activeUnit={activeUnit}
             diaEntrada={diaEntrada} setDiaEntrada={setDiaEntrada} entradaInfo={entradaInfo} entradaMin={entradaMin}/>
         </div>}
         {activeTab==="pendente"&&showGasModal&&gas.alerts.length>0&&<GasAlertModal alerts={gas.alerts} onIgnore={gas.doIgnore} onClose={()=>setShowGasModal(false)}/>}
