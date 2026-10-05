@@ -280,10 +280,27 @@ async function fetchRows(){
    Tem a mesma forma da pendente_historico de propósito: o gráfico já
    filtra aquela por unidade e família, e assim as duas séries passam
    pelo mesmo filtro. */
+/* PAGINADA, e isso não é zelo: a view tem uma linha por dia × família ×
+   unidade e já passou de 1.500. O PostgREST corta em 1.000 por resposta
+   e não avisa — devolve 200 com o pedaço. Sem o Range, o gráfico ficava
+   com um recorte arbitrário da série: em 02/10 o VAZAMENTO aparecia com
+   2 entradas (só Embu-Guaçu) em vez de 39, porque as linhas de
+   Interlagos e Grajau caíam fora do corte. O order existe pelo mesmo
+   motivo: sem ele o Postgres não promete ordem entre as páginas, e a
+   paginação passa a poder repetir e pular linha. */
 async function fetchEntradaSerie(){
-  const r=await fetch(SUPABASE_URL+"/rest/v1/v_entrada_serie?select=dia,unidade,familia,entradas,aproximadas",{headers:HEADERS});
-  if(!r.ok) return null;          // view não criada: o gráfico volta ao que era
-  return r.json();
+  const out=[];let from=0;const ps=1000;
+  for(;;){
+    const r=await fetch(SUPABASE_URL+"/rest/v1/v_entrada_serie?select=dia,unidade,familia,entradas,aproximadas&order=dia.asc,unidade.asc,familia.asc",
+      {headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
+    if(!r.ok&&r.status!==206) return null;   // view não criada: o gráfico volta ao que era
+    const d=await r.json();
+    if(!d?.length) break;
+    out.push(...d);
+    if(d.length<ps) break;
+    from+=ps;
+  }
+  return out;
 }
 async function fetchHistorico(){
   const allRows=[];let from=0;const ps=1000;
