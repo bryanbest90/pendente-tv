@@ -3250,46 +3250,30 @@ function HistoricoChart({historico,entradaSerie,activeUnit}){
     });
     let data = Object.values(byDay).sort((a,b)=>a.dia.localeCompare(b.dia));
 
-    /* ENTRADAS E SAÍDAS — as colunas.
-       A entrada vem medida da v_entrada_serie, com o MESMO filtro de
-       unidade e família que o saldo acima. Isso importa: a os_entrada
-       tem 6 famílias que a pendente_historico não tem (o robô as
-       exclui do histórico), e sem o filtro comum a conta de saída
-       sairia inflada.
+    /* ENTRADAS — as colunas.
+       Vêm medidas da v_entrada_serie, com o MESMO filtro de unidade e
+       família que o saldo acima. Isso importa: a os_entrada tem 6
+       famílias que a pendente_historico não tem (o robô as exclui do
+       histórico), e sem o filtro comum a coluna contaria entrada de
+       família que não aparece em nenhuma das linhas.
 
-       A SAÍDA não é medida, é deduzida: saldo de hoje = saldo de
-       ontem + entraram − saíram, então saíram = entraram − variação
-       do saldo. Deduzir é melhor do que medir por fora aqui, por dois
-       motivos. Primeiro, fecha por construção: as colunas explicam
-       exatamente o movimento da linha, em vez de três séries que
-       quase batem. Segundo, não depende do os_desfecho, que só existe
-       nos dias em que o EM RUA foi importado com resultado.
-
-       Conferido nos 47 dias da série: nenhum dia deu saída negativa,
-       que é o sinal que apareceria se as duas fontes discordassem.
-
-       SAÍDA NÃO É EXECUÇÃO. É o que deixou a carteira — pode ter sido
-       executado, cancelado, ou encerrado sem execução. Por isso a
-       coluna se chama "Saíram". O porquê está na aba Etiquetas. */
+       NÃO EXISTE MAIS COLUNA "SAÍRAM", e isso foi pedido. Ela era
+       deduzida pela identidade do estoque (saíram = entraram − variação
+       do saldo), desenhada em âmbar ao lado da azul. Se um dia fizer
+       falta, é essa conta de uma linha, e ela precisa do dia anterior —
+       por isso o primeiro dia da série ficava sem valor. */
     if(entradaSerie?.length){
       const ent={};
       entradaSerie.forEach(r=>{
         if(unidadeFilter!==null && r.unidade!==unidadeFilter) return;
         if(familyFilter.size>0 && !familyFilter.has(r.familia)) return;
         // família que o histórico não cobre fica de fora: sem saldo
-        // dela, a entrada dela viraria saída fantasma
+        // dela, a entrada dela não teria linha com que conversar
         if(!allFamilies.includes(r.familia)) return;
         const d=String(r.dia).slice(0,10);
         ent[d]=(ent[d]||0)+r.entradas;
       });
-      let ant=null;
-      data=data.map(d=>{
-        const entraram=ent[d.dia]??null;
-        // o primeiro dia da série não tem com o que comparar
-        const sairam=(ant&&entraram!=null)?entraram-(d.total-ant.total):null;
-        ant=d;
-        return {...d,entraram,sairam};
-      });
+      data=data.map(d=>({...d,entraram:ent[d.dia]??null}));
     }
 
     if(dateFrom) data = data.filter(d => d.dia >= dateFrom);
@@ -3316,7 +3300,6 @@ function HistoricoChart({historico,entradaSerie,activeUnit}){
   // vazias ao longo de todo o período.
   const temMovimento = chartData.some(d=>d.entraram!=null);
   const somaEnt = chartData.reduce((a,d)=>a+(d.entraram||0),0);
-  const somaSai = chartData.reduce((a,d)=>a+(d.sairam||0),0);
 
   return <div style={{background:C.card,borderRadius:RAIO,border:`1px solid ${C.border}`,marginBottom:16,overflow:"hidden"}}>
     <div onClick={()=>setShowChart(!showChart)} style={{padding:"14px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",borderBottom:showChart?`1px solid ${C.border}`:"none"}}
@@ -3328,7 +3311,7 @@ function HistoricoChart({historico,entradaSerie,activeUnit}){
       </div>
       {chartData.length>=2&&<div style={{display:"flex",gap:12,fontSize:12,alignItems:"baseline",flexWrap:"wrap"}}>
         {temMovimento&&<span style={{fontSize:11,color:C.textDim}}>
-          <b style={{color:C.accent}}>{somaEnt}</b> entraram · <b style={{color:C.amber}}>{somaSai}</b> saíram
+          <b style={{color:C.accent}}>{somaEnt}</b> entraram
         </span>}
         <span style={{color:varTotal>0?C.red:varTotal<0?C.green:C.textDim,fontWeight:600}}>{varTotal>0?"+":""}{varTotal} OS</span>
         <span style={{color:varFora>0?C.red:varFora<0?C.green:C.textDim,fontWeight:600}}>{varFora>0?"+":""}{varFora} fora</span>
@@ -3352,32 +3335,23 @@ function HistoricoChart({historico,entradaSerie,activeUnit}){
       </div>
 
       {chartData.length>0 ? <>
-        {/* Linhas = saldo da carteira (eixo da esquerda).
-            Colunas = movimento do dia (eixo da direita).
+        {/* Três linhas = saldo da carteira (eixo da esquerda).
+            Uma coluna = entradas do dia (eixo da direita).
             Dois eixos porque as escalas não se parecem: o saldo anda
-            na casa dos 700-1000 e o movimento diário entre 70 e 320.
-            Num eixo só as colunas virariam um fio rente ao chão.
-            As colunas vêm antes das linhas no JSX para ficarem ATRÁS
+            na casa dos 700-1000 e a entrada diária entre 58 e 362.
+            Num eixo só a coluna viraria um fio rente ao chão.
+            A coluna vem antes das linhas no JSX para ficar ATRÁS
             delas — o saldo é a informação principal.
 
-            POR QUE "SAÍRAM" É ÂMBAR E NÃO VERDE
-            O verde é do No Prazo desde o começo do projeto, na tabela e
-            aqui, e a leitura de verde=bom está em toda a tela. Com a
-            coluna de saída também verde, o mesmo verde queria dizer duas
-            coisas no mesmo gráfico. E saída não é vitória: é tudo que
-            deixou a carteira, executado ou não. Âmbar é movimento, que é
-            o que a coluna mede.
-
-            O No Prazo voltou como LINHA e não como área: com as colunas
-            atrás, dois gradientes empilhados sujavam as barras. Só a
-            Carteira tem preenchimento.
+            O No Prazo é LINHA e não área: com a coluna atrás, dois
+            gradientes empilhados sujavam a barra. Só a Carteira tem
+            preenchimento.
 
             NÃO ESCREVA EXPLICAÇÃO NO RODAPÉ. Tinha ali um texto sobre
-            o eixo da direita e sobre "Saíram" ser deduzido, e a dica de
-            clicar no ponto. Saíram os dois, a pedido. Ficou só a
-            legenda, que é chave de leitura e não texto — sem ela não dá
-            para saber o que é a coluna âmbar — e o botão, que é
-            controle. A explicação mora neste comentário. */}
+            o eixo da direita e a dica de clicar no ponto. Saíram os
+            dois, a pedido. Ficou só a legenda, que é chave de leitura e
+            não texto, e o botão, que é controle. A explicação mora
+            neste comentário. */}
         <ResponsiveContainer width="100%" height={300}>
           <ComposedChart data={chartData} margin={{top:5,right:6,left:0,bottom:5}} onClick={handleChartClick} style={{cursor:"pointer"}}>
             <defs>
@@ -3389,7 +3363,6 @@ function HistoricoChart({historico,entradaSerie,activeUnit}){
             <YAxis yAxisId="mov" orientation="right" tick={{fill:C.textDim,fontSize:11}} tickLine={false} axisLine={false} width={40}/>
             <Tooltip content={<CustomTooltip/>}/>
             {temMovimento&&<RBar yAxisId="mov" dataKey="entraram" name="Entraram" fill={C.accent} fillOpacity={0.5} radius={[2,2,0,0]} maxBarSize={14}/>}
-            {temMovimento&&<RBar yAxisId="mov" dataKey="sairam"   name="Saíram"   fill={C.amber}  fillOpacity={0.5} radius={[2,2,0,0]} maxBarSize={14}/>}
             <Area yAxisId="saldo" type="monotone" dataKey="total" name="Carteira" stroke={C.accent} fill="url(#gradTotal)" strokeWidth={2.4} dot={false} activeDot={{r:6,stroke:C.accent,strokeWidth:2,fill:C.card}}/>
             <RLine yAxisId="saldo" type="monotone" dataKey="no_prazo" name="No Prazo" stroke={C.green} strokeWidth={2} dot={false} activeDot={{r:5,stroke:C.green,strokeWidth:2,fill:C.card}}/>
             <RLine yAxisId="saldo" type="monotone" dataKey="fora_prazo" name="Fora do Prazo" stroke={C.red} strokeWidth={2} dot={false} activeDot={{r:5,stroke:C.red,strokeWidth:2,fill:C.card}}/>
@@ -3397,7 +3370,7 @@ function HistoricoChart({historico,entradaSerie,activeUnit}){
         </ResponsiveContainer>
         <div style={{display:"flex",justifyContent:"center",gap:18,padding:"4px 0 2px",flexWrap:"wrap"}}>
           {[{label:"Carteira",color:C.accent,barra:false},{label:"No Prazo",color:C.green,barra:false},{label:"Fora do Prazo",color:C.red,barra:false},
-            ...(temMovimento?[{label:"Entraram",color:C.accent,barra:true},{label:"Saíram",color:C.amber,barra:true}]:[])].map(l=>
+            ...(temMovimento?[{label:"Entraram",color:C.accent,barra:true}]:[])].map(l=>
             <div key={l.label} style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:C.textMuted}}>
               <span style={{width:l.barra?8:10,height:l.barra?9:3,borderRadius:2,background:l.color,opacity:l.barra?0.5:1}}/>{l.label}
             </div>
