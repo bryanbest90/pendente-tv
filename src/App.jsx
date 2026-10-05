@@ -3215,7 +3215,19 @@ function HistoricoChart({historico,entradaSerie,activeUnit}){
   const [showChart,setShowChart]=useState(true);
   const [diffModal,setDiffModal]=useState(null);
   const [exitModal,setExitModal]=useState(null);
-  const [dateFrom,setDateFrom]=useState("");
+  /* Abre nos últimos 15 dias. Com a série passando de 50 dias, abrir no
+     período inteiro espremia o mês corrente — que é o que se olha todo
+     dia — num terço da largura, e deixava as colunas finas demais para
+     comparar um dia com o outro. Quem quiser mais, é o filtro de data,
+     e o "Limpar" devolve a série inteira.
+
+     O piso sai do 15º dia DE TRÁS PARA FRENTE na série, não de
+     "hoje − 14": se o robô falhar um dia, ou a série tiver buraco, a
+     conta pelo calendário mostraria menos de 15 pontos sem avisar. */
+  const [dateFrom,setDateFrom]=useState(()=>{
+    const d=[...new Set((historico||[]).map(r=>r.dia))].sort();
+    return d.length>15 ? d[d.length-15] : "";
+  });
   const [dateTo,setDateTo]=useState("");
   const [familyFilter,setFamilyFilter]=useState(new Set());
   const unidadeFilter = UNIT_TO_HISTORICO[activeUnit];
