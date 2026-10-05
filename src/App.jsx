@@ -4841,17 +4841,39 @@ function ProducaoView({sess,onLogout}){
     return (b&&!equipeSel)?ag.tipos.filter(t=>norm(t.tipo).includes(b)):ag.tipos;
   },[ag,busca,equipeSel]);
 
-  const baixarCSV=()=>{
-    if(!ag)return;
-    const campo=modo==="tss"?"TSS":"TSE";
-    const linhas=[["Equipe",campo,"Quantidade"]];
-    ag.equipes.forEach(e=>[...e.tipos.entries()].sort((a,b)=>b[1]-a[1])
-      .forEach(([tp,q])=>linhas.push([e.equipe,tp,q])));
-    const csv="﻿"+linhas.map(l=>l.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(";")).join("\n");
-    const a=document.createElement("a");
-    a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8"}));
-    a.download=`producao_${campo.toLowerCase()}_${ini}_a_${fim}.csv`;
-    a.click();URL.revokeObjectURL(a.href);
+  /* O relatório sai do `ag`, que é o mesmo objeto que desenha a tela:
+     o Excel não refaz conta nenhuma, só formata. Se o número do
+     arquivo discordasse do número da tela, seria uma reunião inteira
+     discutindo qual dos dois está certo.
+
+     O gerador mora em src/relatorioProducao.js e é carregado só aqui
+     dentro, com import(): a biblioteca que escreve estilo pesa ~940 KB
+     e não tem por que entrar no carregamento da tela de quem nunca
+     exporta. O primeiro clique demora um instante a mais; os
+     seguintes, não. */
+  const [baixando,setBaixando]=useState(false);
+  const baixarExcel=async()=>{
+    if(!ag||baixando)return;
+    setBaixando(true);
+    try{
+      const {gerarRelatorioProducao}=await import("./relatorioProducao.js");
+      const blob=await gerarRelatorioProducao({
+        ag, modo, ini, fim,
+        unidadeLabel: unidade==="geral" ? "Geral (todas as unidades)"
+                                        : (UNITS.find(u=>u.id===unidade)?.label||unidade),
+        usuario: sess.perfil?.nome||sess.perfil?.email||"",
+      });
+      const a=document.createElement("a");
+      a.href=URL.createObjectURL(blob);
+      a.download=`producao_${modo}_${ini}_a_${fim}.xlsx`;
+      a.click();
+      // revoga no próximo tick: revogar antes do clique ser processado
+      // deixa o download pela metade em alguns navegadores
+      setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+    }catch(e){
+      setErro("Não consegui montar o Excel: "+String(e.message||e));
+    }
+    setBaixando(false);
   };
 
   const presets=[
@@ -4881,7 +4903,12 @@ function ProducaoView({sess,onLogout}){
         <span style={{fontSize:12,color:C.textDim}}>{sess.perfil?.nome||sess.perfil?.email}</span>
       </div>
       <div style={{display:"flex",gap:8}}>
-        <button onClick={baixarCSV} style={{...btn(false),color:C.green,border:`1px solid ${C.greenBorder}`}}>⬇ CSV</button>
+        <button onClick={baixarExcel} disabled={baixando||!ag?.total}
+          title="Relatório formatado, com resumo, equipes, serviços, o cruzamento e o por dia"
+          style={{...btn(false),color:C.green,border:`1px solid ${C.greenBorder}`,
+            cursor:baixando?"wait":"pointer",opacity:(!ag?.total)?0.45:1}}>
+          {baixando?"Montando…":"⬇ Excel"}
+        </button>
         <button onClick={onLogout} style={btn(false)}>Sair</button>
       </div>
     </div>
