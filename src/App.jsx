@@ -5120,7 +5120,7 @@ async function fetchRuasCadastro(sess){
   const cab=authHeaders(await tokenFresco(sess));
   const out=[];let from=0;const ps=1000;
   for(;;){
-    const r=await fetch(SUPABASE_URL+"/rest/v1/v_ligacao_rua?select=rua,rua_busca,ligacoes,menor_numero,maior_numero&order=rua.asc",
+    const r=await fetch(SUPABASE_URL+"/rest/v1/v_ligacao_rua?select=rua,rua_busca,rua_geocall,rua_geocall_busca,ligacoes,menor_numero,maior_numero&order=rua.asc",
       {headers:{...cab,"Range":from+"-"+(from+ps-1)}});
     if(!r.ok&&r.status!==206) throw new Error("Cadastro: "+r.status+" "+(await r.text()).slice(0,140));
     const d=await r.json();
@@ -5140,7 +5140,9 @@ const CAMPOS_LIG="rgi,rua,imovel,complemento,setor,numero_sab,num_hidro,categori
    desistir cedo demais. */
 async function fetchEnderecoCadastro(sess,ruaBusca,numero){
   const cab=authHeaders(await tokenFresco(sess));
-  const q=`rua_busca=eq.${encodeURIComponent(ruaBusca)}&imovel=gte.${numero-30}&imovel=lte.${numero+30}`;
+  // or= para achar tanto pelo nome do cadastro quanto pelo nosso
+  const k=encodeURIComponent(ruaBusca);
+  const q=`or=(rua_busca.eq.${k},rua_geocall_busca.eq.${k})&imovel=gte.${numero-30}&imovel=lte.${numero+30}`;
   const r=await fetch(SUPABASE_URL+`/rest/v1/ligacao?${q}&select=${CAMPOS_LIG}&order=imovel.asc&limit=400`,{headers:cab});
   if(!r.ok) throw new Error("Cadastro: "+r.status+" "+(await r.text()).slice(0,140));
   return r.json();
@@ -5154,6 +5156,62 @@ async function fetchLigacoesPerto(sess,x,y,raio=45){
   const q=`x=gte.${x-raio}&x=lte.${x+raio}&y=gte.${y-raio}&y=lte.${y+raio}`;
   const r=await fetch(SUPABASE_URL+`/rest/v1/ligacao?${q}&select=${CAMPOS_LIG}&limit=600`,{headers:cab});
   if(!r.ok) throw new Error("Cadastro: "+r.status+" "+(await r.text()).slice(0,140));
+  return r.json();
+}
+
+/* QUANDO O CADASTRO NÃO CONHECE O NOME DA RUA.
+   A Sabesp não tem "ESTRADA ECOTURISTICA DE PARELHEIROS" na camada de
+   vias dela — e é a rua com mais serviço nosso. O que resolve é o
+   NÚMERO DA PORTA: uma rua com OS no 6959, no 5350 e no 212 só pode
+   ser o trecho que tem ligação nesses três números.
+
+   Cada número vale pelo inverso de quantos trechos o têm. O 10 existe
+   em quase toda rua e não decide nada; o 6959 existe em pouquíssimas e
+   decide quase sozinho. Sem esse peso a conta erra: medido aqui, ela
+   resolvia 85 ruas; com o peso, resolve o que importa e com folga.
+
+   A raridade é calculada do próprio resultado da consulta, então não
+   precisa de tabela auxiliar nenhuma. */
+async function acharCodlogPorNumeros(sess,numeros){
+  if(!numeros.length) return null;
+  const cab=authHeaders(await tokenFresco(sess));
+  const lista=numeros.slice(0,40).join(",");
+  const r=await fetch(SUPABASE_URL+`/rest/v1/ligacao?imovel=in.(${lista})&select=codlog,imovel,rua&limit=4000`,{headers:cab});
+  if(!r.ok) return null;
+  const linhas=await r.json();
+  if(!linhas?.length) return null;
+
+  const codsDoNumero=new Map();     // número -> conjunto de codlogs
+  const nomeDoCod=new Map();
+  for(const l of linhas){
+    const c=String(l.codlog||"").trim(); if(!c) continue;
+    if(!codsDoNumero.has(l.imovel)) codsDoNumero.set(l.imovel,new Set());
+    codsDoNumero.get(l.imovel).add(c);
+    if(l.rua) nomeDoCod.set(c,l.rua);
+  }
+  const nCods=new Set([...codsDoNumero.values()].flatMap(s=>[...s])).size||1;
+  const voto=new Map(); let totalPeso=0;
+  for(const [,cods] of codsDoNumero){
+    const peso=Math.log(1+nCods/cods.size);
+    totalPeso+=peso;
+    for(const c of cods) voto.set(c,(voto.get(c)||0)+peso);
+  }
+  const ord=[...voto.entries()].sort((a,b)=>b[1]-a[1]);
+  if(!ord.length||!totalPeso) return null;
+  const [cod,v]=ord[0];
+  const segundo=ord[1]?.[1]||0;
+  // mesma régua do sql/ligacao_apelidos.sql: cobre metade do peso e
+  // ganha do segundo com folga. Sem isso ela chuta, e chutar aqui
+  // significa mostrar a rua errada com cara de certeza.
+  if(v/totalPeso<0.5||(segundo&&v/segundo<1.3)) return null;
+  return {codlog:cod,ruaCadastro:nomeDoCod.get(cod)||null,confianca:v/totalPeso};
+}
+
+async function fetchPorCodlog(sess,codlog,numero){
+  const cab=authHeaders(await tokenFresco(sess));
+  const r=await fetch(SUPABASE_URL+`/rest/v1/ligacao?codlog=eq.${encodeURIComponent(codlog)}`
+    +`&imovel=gte.${numero-60}&imovel=lte.${numero+60}&select=${CAMPOS_LIG}&order=imovel.asc&limit=400`,{headers:cab});
+  if(!r.ok) return [];
   return r.json();
 }
 
@@ -5248,7 +5306,7 @@ function FichaLigacao({l,rotulo,destaque,extra,dist}){
   </div>;
 }
 
-function CadastroView({sess}){
+function CadastroView({sess,rawRows}){
   const [ruas,setRuas]=useState(null);
   const [rua,setRua]=useState("");
   const [numero,setNumero]=useState("");
@@ -5272,10 +5330,13 @@ function CadastroView({sess}){
     if(!k){setSug([]);return;}
     const comeca=[],contem=[];
     for(const r of ruas){
-      const rk=r.rua_busca||"";
-      if(rk===k){comeca.unshift(r);continue;}
-      if(rk.startsWith(k)) comeca.push(r);
-      else if(rk.includes(k)) contem.push(r);
+      // procura pelos DOIS nomes: o do cadastro da Sabesp e o que a
+      // gente usa. Quem digita "ECOTURISTICA" não tem como saber que
+      // na Sabesp aquilo se chama outra coisa.
+      const chaves=[r.rua_busca||"",r.rua_geocall_busca||""].filter(Boolean);
+      if(chaves.some(c=>c===k)){comeca.unshift(r);continue;}
+      if(chaves.some(c=>c.startsWith(k))) comeca.push(r);
+      else if(chaves.some(c=>c.includes(k))) contem.push(r);
       if(comeca.length>=8) break;
     }
     setSug([...comeca,...contem].slice(0,8));
@@ -5287,16 +5348,36 @@ function CadastroView({sess}){
     if(!alvoRua||!Number.isFinite(n)){setErro("Preencha a rua e o número.");return;}
     setBusy(true);setErro("");setRes(null);setSug([]);
     try{
-      const lista=await fetchEnderecoCadastro(sess,chaveRua(alvoRua),n);
+      let lista=await fetchEnderecoCadastro(sess,chaveRua(alvoRua),n);
+      let viaCarteira=null;
+      /* O cadastro da Sabesp não conhece todos os nomes que a gente
+         usa. Quando o nome não acha nada, a carteira resolve: as OS
+         dessa rua têm os números das portas, e são eles que apontam o
+         trecho certo. */
+      if(!lista.length&&rawRows?.length){
+        const k=chaveRua(alvoRua);
+        const nums=[...new Set(rawRows
+          .filter(r=>chaveRua(r["Endereço"])===k)
+          .map(r=>parseInt(String(r["Número"]||"").replace(/\D/g,""),10))
+          .filter(v=>Number.isFinite(v)&&v>0))];
+        if(nums.length>=2){
+          const achado=await acharCodlogPorNumeros(sess,[n,...nums]);
+          if(achado){
+            lista=await fetchPorCodlog(sess,achado.codlog,n);
+            viaCarteira=achado;
+          }
+        }
+      }
       if(!lista.length){
-        setErro(`Não achei nada perto do ${n} nessa rua. Confira o nome na lista que aparece ao digitar.`);
+        setErro(`Não achei nada perto do ${n} nessa rua. Confira o nome na lista que aparece ao digitar — `
+          +`o cadastro da Sabesp às vezes usa outro nome, e a lista mostra os dois.`);
         setBusy(false);return;
       }
       // o mais perto do número pedido; empate fica com a primeira
       let alvo=lista[0];
       for(const l of lista) if(Math.abs((l.imovel??1e9)-n)<Math.abs((alvo.imovel??1e9)-n)) alvo=l;
       const perto=await fetchLigacoesPerto(sess,alvo.x,alvo.y,45);
-      setRes({alvo,rua:alvoRua,pedido:n,...arrumarVizinhos(alvo,perto)});
+      setRes({alvo,rua:alvoRua,pedido:n,viaCarteira,...arrumarVizinhos(alvo,perto)});
     }catch(e){setErro(String(e.message||e));}
     setBusy(false);
   };
@@ -5336,12 +5417,15 @@ function CadastroView({sess}){
         background:C.card,border:`1px solid ${C.border}`,borderRadius:10,overflow:"hidden",
         boxShadow:"0 18px 40px rgba(2,6,16,0.6)"}}>
         {sug.map(s=>
-          <div key={s.rua} onClick={()=>{setRua(s.rua);setSug([]);buscar(s.rua);}}
+          <div key={s.rua} onClick={()=>{const n=s.rua_geocall||s.rua;setRua(n);setSug([]);buscar(n);}}
             style={{padding:"9px 13px",cursor:"pointer",borderBottom:`1px solid ${C.border}`,
               display:"flex",justifyContent:"space-between",gap:10,alignItems:"baseline"}}
             onMouseEnter={e=>e.currentTarget.style.background=C.rowHover}
             onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-            <span style={{fontSize:12.5,color:C.text}}>{s.rua}</span>
+            <span style={{fontSize:12.5,color:C.text,minWidth:0}}>
+              {s.rua_geocall||s.rua}
+              {s.rua_geocall&&<span style={{fontSize:10.5,color:C.textDim,marginLeft:7}}>no cadastro: {s.rua}</span>}
+            </span>
             <span style={{fontSize:10.5,color:C.textDim,whiteSpace:"nowrap"}}>
               nº {s.menor_numero}–{s.maior_numero} · {s.ligacoes} lig.
             </span>
@@ -5360,7 +5444,13 @@ function CadastroView({sess}){
       <div style={{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,overflow:"hidden",marginBottom:14}}>
         <div style={{padding:"11px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",
           justifyContent:"space-between",gap:10,flexWrap:"wrap",alignItems:"baseline"}}>
-          <span style={{fontSize:13,fontWeight:700}}>{res.alvo.rua||res.rua}</span>
+          <span style={{fontSize:13,fontWeight:700}}>
+            {res.rua}
+            {res.alvo.rua&&chaveRua(res.alvo.rua)!==chaveRua(res.rua)&&
+              <span style={{fontSize:11,fontWeight:400,color:C.amber,marginLeft:8}}>
+                no cadastro da Sabesp: {res.alvo.rua}
+              </span>}
+          </span>
           <span style={{fontSize:11,color:C.textDim}}>
             {res.alvo.imovel!==res.pedido?`o ${res.pedido} não existe no cadastro — mostrando o ${res.alvo.imovel}, o mais próximo · `:""}
             {res.todas.length} ligações num raio de 45 m
@@ -6295,7 +6385,7 @@ export default function App(){
         {activeTab==="etiquetas"&&<EtiquetasView notas={notas} rawRows={rawRows} sess={sess}/>}
         {activeTab==="producao"&&sess?.perfil?.pode_producao&&<ProducaoView sess={sess} onLogout={sair}/>}
         {activeTab==="itinerario"&&sess?.perfil?.pode_producao&&<ItinerarioView rawRows={rawRows} notas={notas} sess={sess}/>}
-        {activeTab==="cadastro"&&sess?.perfil?.pode_cadastro&&<CadastroView sess={sess}/>}
+        {activeTab==="cadastro"&&sess?.perfil?.pode_cadastro&&<CadastroView sess={sess} rawRows={rawRows}/>}
         {showLogin&&<LoginModal onClose={()=>setShowLogin(false)} onOk={entrar}/>}
         {activeTab==="pendente"&&!rawRows&&(sess?.perfil?.pode_importar
           ?<div onDragOver={e=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)} onDrop={onDrop}
