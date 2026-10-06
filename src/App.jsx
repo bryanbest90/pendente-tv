@@ -515,6 +515,35 @@ async function fetchProducao(tok,diaIni,diaFim){
 }
 
 // H = cabecalhos do login, igual as outras duas importacoes.
+/* CONFERIR ANTES DE SUBSTITUIR A CARTEIRA.
+   O GEOCALL as vezes exporta o arquivo torto — em 06/10/2026, as 19:02,
+   vieram 877 servicos com 81 na familia errada e 573 com nome que nunca
+   existiu. A conferencia roda no banco, comparando o arquivo com a
+   familia que cada servico sempre teve nas 47 mil linhas de historico.
+
+   Roda ANTES do limpar_pendente de proposito: arquivo recusado deixa a
+   carteira com a foto anterior, em vez de vazia. */
+async function conferirLote(rows,H){
+  try{
+    const r=await fetch(SUPABASE_URL+"/rest/v1/rpc/conferir_lote",
+      {method:"POST",headers:H,body:JSON.stringify({linhas:rows})});
+    if(!r.ok) return {ok:true,indisponivel:true};   // sem conferencia, nao trava o trabalho
+    return await r.json();
+  }catch{ return {ok:true,indisponivel:true}; }
+}
+async function registrarAuditoria(v,H){
+  if(v?.indisponivel) return;
+  try{ await fetch(SUPABASE_URL+"/rest/v1/rpc/registrar_auditoria",
+    {method:"POST",headers:{...H,"Prefer":"return=minimal"},body:JSON.stringify({v})}); }catch{}
+}
+async function fetchUltimaAuditoria(){
+  try{
+    const r=await fetch(SUPABASE_URL+"/rest/v1/pendente_auditoria?select=momento,total,veredito,motivo&order=momento.desc&limit=1",{headers:HEADERS});
+    if(!r.ok) return null;
+    return (await r.json())?.[0]||null;
+  }catch{ return null; }
+}
+
 async function uploadRows(rows,H){
   const delRes = await fetch(SUPABASE_URL+"/rest/v1/rpc/limpar_pendente",{method:"POST",headers:{...H,"Prefer":"return=minimal"},body:"{}"});
   if(!delRes.ok) throw new Error("Erro ao limpar: "+await delRes.text());
@@ -6068,9 +6097,14 @@ export default function App(){
   const [diaEntrada,setDiaEntrada]=useState(()=>diaISO(new Date()));
   const [entradasDia,setEntradasDia]=useState(null);   // linhas da os_entrada; null = tabela não existe
   const [entradaMin,setEntradaMin]=useState(null);     // piso do calendário, tirado do próprio dado
+  // Veredito da última subida do robô. Serve para a tarja: sem ela, um
+  // relatório recusado deixa a carteira parada no horário anterior sem
+  // ninguém perceber — e carteira parada parece carteira certa.
+  const [auditoria,setAuditoria]=useState(null);
 
   useEffect(()=>{let vivo=true;
     (async()=>{try{const m=await fetchEntradaMaisAntiga();if(vivo)setEntradaMin(m);}catch{}})();
+    (async()=>{try{const a=await fetchUltimaAuditoria();if(vivo)setAuditoria(a);}catch{}})();
     return()=>{vivo=false;};
   },[]);
   useEffect(()=>{
@@ -6165,7 +6199,15 @@ export default function App(){
       const filtered=all.map(sanitize).filter(r=>VALID_ATCS.includes(Number(r["ATC"]))&&!EXCLUDED_TSS.includes(String(r["TSS"]||"").trim()));
       setRawRows(filtered);setExcludedTSS(new Set());const now=new Date().toISOString();setUpdatedAt(now);
       cacheRows(filtered,now);saveFilters(new Set(),sortBy,activeUnit);
-      flash("Enviando "+filtered.length+" OS...");const result=await uploadRows(filtered,authHeaders(await tokenFresco(sess)));
+      const H=authHeaders(await tokenFresco(sess));
+      flash("Conferindo o arquivo...");
+      const veredito=await conferirLote(filtered,H);
+      await registrarAuditoria(veredito,H);
+      if(veredito.ok===false){
+        setAuditoria({veredito:"recusado",motivo:veredito.motivo,momento:new Date().toISOString(),total:veredito.total});
+        throw new Error("arquivo recusado — "+veredito.motivo+". A carteira ficou como estava.");
+      }
+      flash("Enviando "+filtered.length+" OS...");const result=await uploadRows(filtered,H);
       setUpdatedAt(result.updatedAt);cacheRows(filtered,result.updatedAt);flash("Pendente atualizado ✓ ("+result.count+" OS)");
     }catch(e){flash("Erro: "+e.message);}setUploading(false);
   },[saveFilters,sortBy,activeUnit,sess]);
@@ -6353,6 +6395,28 @@ export default function App(){
     {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed} nNotas={notasDoPendente.length} onNotas={t=>{setFiltroNota(t);setShowNotas(true);}} tagsNotas={tagsNotas} onBuscarOS={buscarOS} onBuscarEndereco={buscarEndereco}/>}
     <div style={{flex:1,padding:"24px 16px",overflowY:"auto",minHeight:"100vh"}}>
       <div style={{maxWidth:activeTab==="producao"||activeTab==="itinerario"||activeTab==="etiquetas"||activeTab==="cadastro"?1180:960,margin:"0 auto"}}>
+
+        {/* Tarja da subida recusada.
+            Relatório recusado deixa a carteira parada no horário
+            anterior, e carteira parada é indistinguível de carteira
+            certa — só os números não andam. A tarja é o que separa as
+            duas coisas para quem está olhando a tela. Some sozinha
+            quando a subida seguinte passa. */}
+        {auditoria?.veredito==="recusado"&&
+         (Date.now()-new Date(auditoria.momento).getTime())<12*3600e3&&
+          <div style={{background:C.redBg,border:`1px solid ${C.redBorder}`,borderRadius:10,
+            padding:"11px 16px",marginBottom:14,fontSize:12.5,color:C.textMuted,lineHeight:1.55,
+            display:"flex",gap:10,alignItems:"flex-start"}}>
+            <span style={{fontSize:14}}>⚠</span>
+            <div>
+              <b style={{color:C.red}}>O último relatório do GEOCALL foi recusado</b>
+              {auditoria.momento?` às ${new Date(auditoria.momento).toLocaleString("pt-BR")}`:""}.
+              {auditoria.motivo?` Motivo: ${auditoria.motivo}.`:""}
+              {" "}A carteira abaixo é a da última subida boa — não é a de agora.
+              O robô tenta de novo na hora seguinte.
+            </div>
+          </div>}
+
         <div style={{marginBottom:24,textAlign:"center"}}>
           <h1 style={{fontSize:17,fontWeight:500,margin:0,letterSpacing:"0.2em",textTransform:"uppercase",color:C.text,fontFamily:FONTE_NUM}}>
             {activeTab==="pendente"?"Controle de Prazos — OS Pendentes":activeTab==="carteira"?"Acompanhamento de Carteira":activeTab==="etiquetas"?"Etiquetas — o que fechou":activeTab==="itinerario"?"Itinerário das Equipes":activeTab==="cadastro"?"Cadastro — quem é o imóvel":"Produção por Equipes"}
