@@ -463,7 +463,7 @@ async function tokenFresco(sess){
 // A RLS de `perfis` devolve só a própria linha — daí a lista de quem
 // tem acesso não vaza nem para quem está logado.
 async function fetchPerfil(tok){
-  const res=await fetch(SUPABASE_URL+"/rest/v1/perfis?select=email,nome,pode_producao,pode_importar",{headers:authHeaders(tok)});
+  const res=await fetch(SUPABASE_URL+"/rest/v1/perfis?select=email,nome,pode_producao,pode_importar,pode_cadastro",{headers:authHeaders(tok)});
   if(!res.ok) return null;
   const j=await res.json().catch(()=>[]);
   return j?.[0]||null;
@@ -4717,7 +4717,7 @@ function LoginModal({onClose,onOk}){
       if(!perfil) throw new Error("Usuário sem linha em `perfis`. Rode a etapa 1 de sql/producao.sql.");
       // Duas permissões independentes: ver a Produção e importar arquivos.
       // O gerente tem a primeira sem a segunda.
-      if(!perfil.pode_producao&&!perfil.pode_importar)
+      if(!perfil.pode_producao&&!perfil.pode_importar&&!perfil.pode_cadastro)
         throw new Error("Este usuário existe, mas não está liberado para nada ainda.");
       onOk({access_token:s.access_token,refresh_token:s.refresh_token,expires_at:s.expires_at,perfil});
     }catch(e){setErro(e.message);}
@@ -5046,6 +5046,367 @@ function ProducaoView({sess,onLogout}){
         </div>
       </>}
     </>}
+  </div>;
+}
+
+/* ══════════════════════════════════════════════════════════
+   CADASTRO — quem é o imóvel deste endereço, e os vizinhos
+
+   Responde a pergunta que aparece quando o vazamento sai na rua: o
+   RGI, o fornecimento e o hidrômetro do imóvel ao lado. Vem do
+   pacote SignosMobile da Sabesp, 318 mil ligações do polo, na tabela
+   `ligacao` (sql/ligacao.sql).
+
+   RESTRITO DE VERDADE, não escondido. A tabela não tem policy para
+   `anon`: a chave que vai no site não lê, nem pelo console. Só
+   usuário logado com pode_cadastro. É uma permissão separada da
+   Produção de propósito — liberar uma não libera a outra.
+   ══════════════════════════════════════════════════════════ */
+
+/* Tira acento e o tipo de logradouro. O GEOCALL escreve "AVENIDA
+   GUARAPIRANGA", o cadastro da Sabesp escreve "AV GUARAPIRANGA", e
+   os dois querem dizer a mesma rua. Comparar só o nome resolve. */
+const TIPOS_LOGRADOURO=["RUA","AVENIDA","AV","TRAVESSA","PRACA","ALAMEDA","ESTRADA",
+  "RODOVIA","VIELA","LARGO","R","TV","PC","AL","EST","ROD","CAMINHO","ESTR","VIA"];
+function chaveRua(s){
+  const base=String(s||"").normalize("NFD").replace(/[̀-ͯ]/g,"")
+    .toUpperCase().replace(/[^A-Z0-9 ]/g," ").replace(/\s+/g," ").trim();
+  const p=base.split(" ");
+  while(p.length&&TIPOS_LOGRADOURO.includes(p[0])) p.shift();
+  return p.join(" ");
+}
+
+async function fetchRuasCadastro(sess){
+  const cab=authHeaders(await tokenFresco(sess));
+  const out=[];let from=0;const ps=1000;
+  for(;;){
+    const r=await fetch(SUPABASE_URL+"/rest/v1/v_ligacao_rua?select=rua,rua_busca,ligacoes,menor_numero,maior_numero&order=rua.asc",
+      {headers:{...cab,"Range":from+"-"+(from+ps-1)}});
+    if(!r.ok&&r.status!==206) throw new Error("Cadastro: "+r.status+" "+(await r.text()).slice(0,140));
+    const d=await r.json();
+    if(!d?.length) break;
+    out.push(...d);
+    if(d.length<ps) break;
+    from+=ps;
+  }
+  return out;
+}
+
+const CAMPOS_LIG="rgi,rua,imovel,complemento,setor,numero_sab,num_hidro,categoria,status,x,y";
+
+/* Procura o número pedido e, se ele não existir, uma faixa em volta:
+   o número da porta falta no cadastro com frequência, e cair em
+   "não achei" quando o 1000 não existe mas o 998 existe seria
+   desistir cedo demais. */
+async function fetchEnderecoCadastro(sess,ruaBusca,numero){
+  const cab=authHeaders(await tokenFresco(sess));
+  const q=`rua_busca=eq.${encodeURIComponent(ruaBusca)}&imovel=gte.${numero-30}&imovel=lte.${numero+30}`;
+  const r=await fetch(SUPABASE_URL+`/rest/v1/ligacao?${q}&select=${CAMPOS_LIG}&order=imovel.asc&limit=400`,{headers:cab});
+  if(!r.ok) throw new Error("Cadastro: "+r.status+" "+(await r.text()).slice(0,140));
+  return r.json();
+}
+
+/* Vizinhos pela POSIÇÃO, não pelo número da porta. O número pula,
+   repete e às vezes não existe; a coordenada do cavalete não mente.
+   A caixa é quadrada e o filtro redondo vem depois, no navegador. */
+async function fetchLigacoesPerto(sess,x,y,raio=45){
+  const cab=authHeaders(await tokenFresco(sess));
+  const q=`x=gte.${x-raio}&x=lte.${x+raio}&y=gte.${y-raio}&y=lte.${y+raio}`;
+  const r=await fetch(SUPABASE_URL+`/rest/v1/ligacao?${q}&select=${CAMPOS_LIG}&limit=600`,{headers:cab});
+  if(!r.ok) throw new Error("Cadastro: "+r.status+" "+(await r.text()).slice(0,140));
+  return r.json();
+}
+
+/* A direção da rua sai da NUVEM de pontos, não do vizinho mais
+   próximo: em vila, o vizinho mais próximo está a 1 m e a direção
+   vira ruído. Isto é o eixo principal da nuvem — a mesma conta de
+   uma regressão, resolvida de uma vez. */
+function eixoDaRua(pontos,cx,cy){
+  let sxx=0,sxy=0,syy=0;
+  pontos.forEach(p=>{const a=p.x-cx,b=p.y-cy;sxx+=a*a;sxy+=a*b;syy+=b*b;});
+  const th=0.5*Math.atan2(2*sxy,sxx-syy);
+  return [Math.cos(th),Math.sin(th)];
+}
+
+const LARGURA_CALCADA=7;   // metros até o eixo: além disso, é o outro lado
+
+function arrumarVizinhos(alvo,todas){
+  const outras=todas.filter(l=>l.rgi!==alvo.rgi);
+  if(!outras.length) return {esq:[],dir:[],frente:[],mesmoNumero:[],todas:[]};
+  const [ux,uy]=eixoDaRua(outras,alvo.x,alvo.y);
+  const com=outras.map(l=>{
+    const a=l.x-alvo.x,b=l.y-alvo.y;
+    return {...l,
+      ao:a*ux+b*uy,            // ao longo da rua
+      tr:a*(-uy)+b*ux,         // atravessando a rua
+      dist:Math.hypot(a,b)};
+  }).filter(l=>l.dist<=45).sort((a,b)=>a.dist-b.dist);
+
+  const mesmoLado=com.filter(l=>Math.abs(l.tr)<=LARGURA_CALCADA);
+  return {
+    esq:    mesmoLado.filter(l=>l.ao<0).sort((a,b)=>b.ao-a.ao),
+    dir:    mesmoLado.filter(l=>l.ao>0).sort((a,b)=>a.ao-b.ao),
+    frente: com.filter(l=>Math.abs(l.tr)>LARGURA_CALCADA).sort((a,b)=>Math.abs(a.ao)-Math.abs(b.ao)),
+    mesmoNumero: com.filter(l=>l.imovel===alvo.imovel),
+    todas: com,
+  };
+}
+
+/* ── O desenho ──
+   Uma casa por posição. O cavalete fica do lado de fora porque é
+   onde ele fica na rua, e é o ponto que a base realmente guarda. */
+function Casa({cor,espelhada,grande}){
+  const t=grande?3:2.5, w=grande?170:150, h=grande?112:104;
+  const s=grande?1.12:1;
+  const g=cor;
+  return <svg viewBox={`0 0 ${w} ${h}`} style={{display:"block",width:"100%",height:"auto",
+    transform:espelhada?"scaleX(-1)":"none"}} aria-hidden="true">
+    <path d={`M8 14 L${w-8} 14`} stroke={C.border} strokeWidth="5" strokeLinecap="round"/>
+    <path d={`M${w-20} 14 L${w-20} ${30+4*s}`} stroke={g} strokeWidth={t} strokeLinecap="round"/>
+    <rect x={w-27} y={29+4*s} width={14} height={12} rx="2.5" fill={C.cardAlt} stroke={g} strokeWidth={t-0.3}/>
+    <circle cx={w-20} cy={35+4*s} r="2.3" fill={g}/>
+    <path d={`M${0.12*w} ${0.56*h} L${w/2} ${0.26*h} L${0.88*w} ${0.56*h}`} fill="none"
+      stroke={g} strokeWidth={t+1} strokeLinejoin="round" strokeLinecap="round"/>
+    <path d={`M${0.18*w} ${0.56*h} L${0.82*w} ${0.56*h} L${0.82*w} ${0.885*h} L${0.18*w} ${0.885*h} Z`}
+      fill={grande?"rgba(59,130,246,0.1)":"#161f31"} stroke={g} strokeWidth={t} strokeLinejoin="round"/>
+    <rect x={0.30*w} y={0.635*h} width={0.145*w} height={0.165*h} rx="2.5" fill={C.cardAlt} stroke={g} strokeWidth={t-0.3}/>
+    <path d={`M${0.575*w} ${0.885*h} L${0.575*w} ${0.615*h} L${0.70*w} ${0.615*h} L${0.70*w} ${0.885*h}`}
+      fill={C.cardAlt} stroke={g} strokeWidth={t-0.3} strokeLinejoin="round"/>
+    <circle cx={0.60*w} cy={0.76*h} r="1.8" fill={g}/>
+  </svg>;
+}
+
+function FichaLigacao({l,rotulo,destaque,extra,dist}){
+  const cor=destaque?C.accent:C.textDim;
+  return <div style={{width:destaque?190:168,flex:"0 0 auto",maxWidth:"100%"}}>
+    <div style={{fontSize:10,letterSpacing:"0.12em",textTransform:"uppercase",fontWeight:700,
+      color:destaque?C.accent:C.textDim,marginBottom:6,textAlign:"center"}}>{rotulo}</div>
+    <Casa cor={destaque?C.accent:"#475569"} espelhada={extra?.espelhada} grande={destaque}/>
+    <div style={{marginTop:8,background:destaque?"rgba(59,130,246,0.07)":C.cardAlt,
+      border:`1px solid ${destaque?"rgba(59,130,246,0.45)":C.border}`,borderRadius:10,padding:"9px 11px"}}>
+      <div style={{fontSize:17,fontWeight:700,fontFamily:FONTE_UI,letterSpacing:"-0.02em",
+        color:destaque?C.accent:C.text}}>
+        {l.imovel??"—"}{l.complemento?<span style={{fontSize:10.5,color:C.textDim,fontWeight:600,marginLeft:5}}>{l.complemento}</span>:null}
+      </div>
+      {[["RGI",l.rgi],["Hidrômetro",l.num_hidro||"sem hidrômetro"],["Setor",l.setor]].map(([k,v])=>
+        <div key={k} style={{display:"flex",justifyContent:"space-between",gap:8,fontSize:11,marginTop:5,alignItems:"baseline"}}>
+          <span style={{color:C.textDim,flex:"0 0 auto"}}>{k}</span>
+          <b style={{fontFamily:FONTE_UI,fontWeight:500,fontSize:11,minWidth:0,overflow:"hidden",
+            textOverflow:"ellipsis",whiteSpace:"nowrap",color:destaque?C.text:C.textMuted}}>{v??"—"}</b>
+        </div>)}
+      {destaque&&<div style={{display:"flex",justifyContent:"space-between",gap:8,fontSize:11,marginTop:5,alignItems:"baseline"}}>
+        <span style={{color:C.textDim}}>Fornecimento</span>
+        <b title={l.numero_sab} style={{fontFamily:FONTE_UI,fontWeight:500,fontSize:11,minWidth:0,
+          overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:C.text}}>{l.numero_sab}</b>
+      </div>}
+      {extra?.mais>0&&<div style={{fontSize:10.5,color:C.amber,marginTop:6,fontWeight:600}}>
+        +{extra.mais} ligação{extra.mais>1?"ões":""} no mesmo número</div>}
+      <div style={{fontSize:10,color:C.textDim,marginTop:7,paddingTop:6,borderTop:`1px solid ${C.border}`}}>
+        {dist}
+      </div>
+    </div>
+  </div>;
+}
+
+function CadastroView({sess}){
+  const [ruas,setRuas]=useState(null);
+  const [rua,setRua]=useState("");
+  const [numero,setNumero]=useState("");
+  const [sug,setSug]=useState([]);
+  const [res,setRes]=useState(null);
+  const [busy,setBusy]=useState(false);
+  const [erro,setErro]=useState("");
+
+  // A lista de ruas vem inteira uma vez (~5,7 mil) e fica em memória:
+  // é ela que resolve a grafia. Você escolhe o nome que existe no
+  // cadastro em vez de adivinhar como a Sabesp escreveu.
+  useEffect(()=>{let vivo=true;
+    (async()=>{try{const r=await fetchRuasCadastro(sess);if(vivo)setRuas(r);}
+      catch(e){if(vivo)setErro(String(e.message||e));}})();
+    return()=>{vivo=false;};
+  },[sess.access_token]);
+
+  useEffect(()=>{
+    if(!ruas||rua.trim().length<3){setSug([]);return;}
+    const k=chaveRua(rua);
+    if(!k){setSug([]);return;}
+    const comeca=[],contem=[];
+    for(const r of ruas){
+      const rk=r.rua_busca||"";
+      if(rk===k){comeca.unshift(r);continue;}
+      if(rk.startsWith(k)) comeca.push(r);
+      else if(rk.includes(k)) contem.push(r);
+      if(comeca.length>=8) break;
+    }
+    setSug([...comeca,...contem].slice(0,8));
+  },[rua,ruas]);
+
+  const buscar=async(nomeRua)=>{
+    const alvoRua=nomeRua??rua;
+    const n=parseInt(String(numero).replace(/\D/g,""),10);
+    if(!alvoRua||!Number.isFinite(n)){setErro("Preencha a rua e o número.");return;}
+    setBusy(true);setErro("");setRes(null);setSug([]);
+    try{
+      const lista=await fetchEnderecoCadastro(sess,chaveRua(alvoRua),n);
+      if(!lista.length){
+        setErro(`Não achei nada perto do ${n} nessa rua. Confira o nome na lista que aparece ao digitar.`);
+        setBusy(false);return;
+      }
+      // o mais perto do número pedido; empate fica com a primeira
+      let alvo=lista[0];
+      for(const l of lista) if(Math.abs((l.imovel??1e9)-n)<Math.abs((alvo.imovel??1e9)-n)) alvo=l;
+      const perto=await fetchLigacoesPerto(sess,alvo.x,alvo.y,45);
+      setRes({alvo,rua:alvoRua,pedido:n,...arrumarVizinhos(alvo,perto)});
+    }catch(e){setErro(String(e.message||e));}
+    setBusy(false);
+  };
+
+  const inp={flex:"1 1 240px",minWidth:0,padding:"9px 13px",borderRadius:9,fontSize:13,
+    border:`1px solid ${C.border}`,background:C.bg,color:C.text,outline:"none",fontFamily:FONTE_UI};
+
+  const esq=res?.esq?.[0], dir=res?.dir?.[0], frente=res?.frente?.[0];
+  const noMesmoNumero=(l)=>res?res.todas.filter(o=>o.imovel===l.imovel&&o.rgi!==l.rgi).length:0;
+
+  return <div style={{animation:"fadeIn 0.35s ease"}}>
+
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexWrap:"wrap",
+      padding:"10px 16px",background:C.card,borderRadius:10,border:`1px solid ${C.border}`,marginBottom:14}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+        <span style={{fontSize:12,padding:"2px 10px",borderRadius:8,background:"rgba(139,92,246,0.1)",
+          color:"#8b5cf6",border:"1px solid rgba(139,92,246,0.25)",fontWeight:700}}>🔒 restrito</span>
+        <span style={{fontSize:12,color:C.textDim}}>{sess.perfil?.nome||sess.perfil?.email}</span>
+      </div>
+      {ruas&&<span style={{fontSize:11,color:C.textDim}}>{ruas.length.toLocaleString("pt-BR")} ruas no cadastro</span>}
+    </div>
+
+    <div style={{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,padding:"14px 16px",marginBottom:14,position:"relative"}}>
+      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+        <input style={inp} value={rua} placeholder="rua — comece a digitar e escolha da lista"
+          onChange={e=>setRua(e.target.value)} onKeyDown={e=>e.key==="Enter"&&buscar()}/>
+        <input style={{...inp,flex:"0 0 92px"}} value={numero} placeholder="nº" inputMode="numeric"
+          onChange={e=>setNumero(e.target.value)} onKeyDown={e=>e.key==="Enter"&&buscar()}/>
+        <button onClick={()=>buscar()} disabled={busy||!ruas}
+          style={{padding:"9px 20px",borderRadius:9,fontSize:12.5,fontWeight:700,cursor:busy?"wait":"pointer",
+            border:"1px solid rgba(59,130,246,0.4)",background:C.accentBg,color:C.accent,opacity:ruas?1:0.5}}>
+          {busy?"Procurando…":"Buscar"}
+        </button>
+      </div>
+      {!ruas&&!erro&&<div style={{fontSize:11,color:C.textDim,marginTop:8}}>carregando a lista de ruas…</div>}
+      {sug.length>0&&<div style={{position:"absolute",left:16,right:16,top:"100%",marginTop:-6,zIndex:50,
+        background:C.card,border:`1px solid ${C.border}`,borderRadius:10,overflow:"hidden",
+        boxShadow:"0 18px 40px rgba(2,6,16,0.6)"}}>
+        {sug.map(s=>
+          <div key={s.rua} onClick={()=>{setRua(s.rua);setSug([]);buscar(s.rua);}}
+            style={{padding:"9px 13px",cursor:"pointer",borderBottom:`1px solid ${C.border}`,
+              display:"flex",justifyContent:"space-between",gap:10,alignItems:"baseline"}}
+            onMouseEnter={e=>e.currentTarget.style.background=C.rowHover}
+            onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+            <span style={{fontSize:12.5,color:C.text}}>{s.rua}</span>
+            <span style={{fontSize:10.5,color:C.textDim,whiteSpace:"nowrap"}}>
+              nº {s.menor_numero}–{s.maior_numero} · {s.ligacoes} lig.
+            </span>
+          </div>)}
+      </div>}
+    </div>
+
+    {erro&&<div style={{background:C.redBg,border:`1px solid ${C.redBorder}`,borderRadius:10,
+      padding:"12px 16px",marginBottom:14,fontSize:12.5,color:C.red,lineHeight:1.5}}>
+      {erro}
+      {erro.includes("401")||erro.includes("permission")?
+        <div style={{color:C.textMuted,marginTop:6}}>Falta rodar <code>sql/ligacao.sql</code> ou marcar <code>pode_cadastro = true</code> no seu perfil.</div>:null}
+    </div>}
+
+    {res&&<>
+      <div style={{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,overflow:"hidden",marginBottom:14}}>
+        <div style={{padding:"11px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",
+          justifyContent:"space-between",gap:10,flexWrap:"wrap",alignItems:"baseline"}}>
+          <span style={{fontSize:13,fontWeight:700}}>{res.alvo.rua||res.rua}</span>
+          <span style={{fontSize:11,color:C.textDim}}>
+            {res.alvo.imovel!==res.pedido?`o ${res.pedido} não existe no cadastro — mostrando o ${res.alvo.imovel}, o mais próximo · `:""}
+            {res.todas.length} ligações num raio de 45 m
+          </span>
+        </div>
+
+        <div style={{padding:"18px 16px 6px"}}>
+          {frente&&<div style={{display:"flex",gap:14,justifyContent:"center",flexWrap:"wrap"}}>
+            <FichaLigacao l={frente} rotulo="Em frente" dist={`${frente.dist.toFixed(1)} m · do outro lado da rua`}
+              extra={{mais:noMesmoNumero(frente)}}/>
+          </div>}
+
+          <div style={{position:"relative",height:56,margin:"14px 0",borderRadius:4,
+            background:`repeating-linear-gradient(90deg,#151c2b 0 44px,#172032 44px 46px)`,
+            borderTop:`3px solid #1b2437`,borderBottom:`3px solid #1b2437`}}>
+            <div style={{position:"absolute",left:0,right:0,top:"50%",height:2,transform:"translateY(-50%)",
+              background:"repeating-linear-gradient(90deg,rgba(245,158,11,0.55) 0 26px,transparent 26px 50px)"}}/>
+            <div style={{position:"absolute",left:"50%",top:"50%",transform:"translate(-50%,-50%)",
+              background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"3px 11px",
+              fontSize:10.5,letterSpacing:"0.09em",fontWeight:700,color:C.textMuted,whiteSpace:"nowrap",
+              maxWidth:"92%",overflow:"hidden",textOverflow:"ellipsis"}}>
+              {res.alvo.rua||res.rua}
+            </div>
+          </div>
+
+          <div style={{display:"flex",gap:14,justifyContent:"center",alignItems:"flex-start",flexWrap:"wrap"}}>
+            {esq&&<FichaLigacao l={esq} rotulo="Vizinho ◀" dist={`${esq.dist.toFixed(1)} m à esquerda`}
+              extra={{mais:noMesmoNumero(esq)}}/>}
+            <FichaLigacao l={res.alvo} rotulo="◆ Endereço procurado" destaque
+              dist={`${res.alvo.categoria||"—"}${res.alvo.status?` · status ${res.alvo.status}`:""}`}
+              extra={{mais:res.mesmoNumero.length}}/>
+            {dir&&<FichaLigacao l={dir} rotulo="▶ Vizinho" dist={`${dir.dist.toFixed(1)} m à direita`}
+              extra={{mais:noMesmoNumero(dir),espelhada:true}}/>}
+          </div>
+
+          {!esq&&!dir&&!frente&&<div style={{textAlign:"center",padding:"20px 0",fontSize:12.5,color:C.textDim}}>
+            Nenhuma outra ligação a até 45 m. Imóvel isolado, ou ponta de rua.
+          </div>}
+        </div>
+      </div>
+
+      <div style={{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,overflow:"hidden"}}>
+        <div style={{padding:"10px 16px",borderBottom:`1px solid ${C.border}`,fontSize:12,fontWeight:800}}>
+          Todas as ligações a até 45 m ({res.todas.length})
+        </div>
+        <div style={{overflowX:"auto",maxHeight:420,overflowY:"auto"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:11.5}}>
+            <thead><tr>{["Nº","Compl.","RGI","Fornecimento","Hidrômetro","Categoria","St","Distância","Posição"].map(h=>
+              <th key={h} style={{position:"sticky",top:0,background:C.headerBg,textAlign:"left",fontSize:10,
+                letterSpacing:"0.08em",textTransform:"uppercase",color:C.textDim,fontWeight:700,
+                padding:"8px 10px",whiteSpace:"nowrap",borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead>
+            <tbody>
+              {[{...res.alvo,dist:0,ao:0,tr:0,_alvo:true},...res.todas].map((l,i)=>{
+                const pos=l._alvo?"procurado":Math.abs(l.tr)>LARGURA_CALCADA?"em frente":l.ao<0?"esquerda":"direita";
+                return <tr key={l.rgi} style={{background:i%2?"rgba(15,23,42,0.35)":"transparent"}}>
+                  <td style={{padding:"6px 10px",fontWeight:700,color:l._alvo?C.accent:C.text,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{l.imovel??"—"}</td>
+                  <td style={{padding:"6px 10px",color:C.textDim,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{l.complemento||"—"}</td>
+                  <td style={{padding:"6px 10px",color:C.textMuted,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{l.rgi}</td>
+                  <td style={{padding:"6px 10px",color:C.textDim,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{l.numero_sab}</td>
+                  <td style={{padding:"6px 10px",color:C.textMuted,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{l.num_hidro||"—"}</td>
+                  <td style={{padding:"6px 10px",color:C.textDim,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{l.categoria||"—"}</td>
+                  <td style={{padding:"6px 10px",color:C.textDim,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{l.status||"—"}</td>
+                  <td style={{padding:"6px 10px",color:C.textDim,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{l._alvo?"—":l.dist.toFixed(1)+" m"}</td>
+                  <td style={{padding:"6px 10px",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>
+                    <span style={{fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:5,
+                      ...(l._alvo?{background:C.accentBg,color:C.accent,border:"1px solid rgba(59,130,246,0.25)"}
+                                :{color:C.textDim})}}>{pos}</span>
+                  </td>
+                </tr>;})}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div style={{marginTop:12,fontSize:11,color:C.textDim,lineHeight:1.6}}>
+        Lado e frente são calculados pela posição do cavalete, não pelo número da porta — o número pula,
+        repete e às vezes não existe. O nome da rua foi deduzido da posição de cada ligação e pode errar;
+        a vizinhança, não, porque ela não depende do nome.
+      </div>
+    </>}
+
+    {!res&&!erro&&ruas&&<div style={{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,
+      padding:"44px 24px",textAlign:"center",color:C.textDim,fontSize:13,lineHeight:1.7}}>
+      Digite a rua e o número.<br/>
+      <span style={{fontSize:12}}>Sai o RGI, o fornecimento e o hidrômetro do imóvel e dos vizinhos dos lados e da frente.</span>
+    </div>}
   </div>;
 }
 
@@ -5635,7 +5996,7 @@ export default function App(){
       s.access_token=novo.access_token;s.refresh_token=novo.refresh_token;s.expires_at=novo.expires_at;
     }
     const perfil=await fetchPerfil(tok);
-    if(!perfil?.pode_producao&&!perfil?.pode_importar){saveSess(null);return;}
+    if(!perfil?.pode_producao&&!perfil?.pode_importar&&!perfil?.pode_cadastro){saveSess(null);return;}
     const atual={...s,perfil};
     saveSess(atual);setSess(atual);
   })();},[]);
@@ -5857,18 +6218,19 @@ export default function App(){
   return <SessaoCtx.Provider value={sess}><div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:FONTE_UI,display:"flex"}}>
     {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed} nNotas={notasDoPendente.length} onNotas={t=>{setFiltroNota(t);setShowNotas(true);}} tagsNotas={tagsNotas} onBuscarOS={buscarOS} onBuscarEndereco={buscarEndereco}/>}
     <div style={{flex:1,padding:"24px 16px",overflowY:"auto",minHeight:"100vh"}}>
-      <div style={{maxWidth:activeTab==="producao"||activeTab==="itinerario"||activeTab==="etiquetas"?1180:960,margin:"0 auto"}}>
+      <div style={{maxWidth:activeTab==="producao"||activeTab==="itinerario"||activeTab==="etiquetas"||activeTab==="cadastro"?1180:960,margin:"0 auto"}}>
         <div style={{marginBottom:24,textAlign:"center"}}>
           <h1 style={{fontSize:17,fontWeight:500,margin:0,letterSpacing:"0.2em",textTransform:"uppercase",color:C.text,fontFamily:FONTE_NUM}}>
-            {activeTab==="pendente"?"Controle de Prazos — OS Pendentes":activeTab==="carteira"?"Acompanhamento de Carteira":activeTab==="etiquetas"?"Etiquetas — o que fechou":activeTab==="itinerario"?"Itinerário das Equipes":"Produção por Equipes"}
+            {activeTab==="pendente"?"Controle de Prazos — OS Pendentes":activeTab==="carteira"?"Acompanhamento de Carteira":activeTab==="etiquetas"?"Etiquetas — o que fechou":activeTab==="itinerario"?"Itinerário das Equipes":activeTab==="cadastro"?"Cadastro — quem é o imóvel":"Produção por Equipes"}
           </h1>
           <p style={{color:C.textDim,margin:"6px 0 0",fontSize:13}}>
-            {activeTab==="pendente"?"Análise por família de serviço":activeTab==="carteira"?"Carteira diária por frente de serviço":activeTab==="etiquetas"?"Executadas e encerradas sem execução, por etiqueta, no período":activeTab==="itinerario"?"O dia de cada equipe — sugerido pelo sistema, fechado por você":"Execuções confirmadas por equipe e tipo de serviço"}
+            {activeTab==="pendente"?"Análise por família de serviço":activeTab==="carteira"?"Carteira diária por frente de serviço":activeTab==="etiquetas"?"Executadas e encerradas sem execução, por etiqueta, no período":activeTab==="itinerario"?"O dia de cada equipe — sugerido pelo sistema, fechado por você":activeTab==="cadastro"?"RGI, fornecimento e hidrômetro do endereço e dos vizinhos":"Execuções confirmadas por equipe e tipo de serviço"}
           </p>
           {/* Tabs */}
           <div style={{display:"flex",justifyContent:"center",gap:4,marginTop:14}}>
             {[{id:"pendente",label:"Pendente",icon:"📋"},{id:"carteira",label:"Carteira",icon:"📊"},{id:"etiquetas",label:"Etiquetas",icon:"🏷"},
-              ...(sess?.perfil?.pode_producao?[{id:"producao",label:"Produção",icon:"👷"},{id:"itinerario",label:"Itinerário",icon:"🚚"}]:[])].map(tab=>
+              ...(sess?.perfil?.pode_producao?[{id:"producao",label:"Produção",icon:"👷"},{id:"itinerario",label:"Itinerário",icon:"🚚"}]:[]),
+              ...(sess?.perfil?.pode_cadastro?[{id:"cadastro",label:"Cadastro",icon:"🚰"}]:[])].map(tab=>
               <button key={tab.id} onClick={()=>setActiveTab(tab.id)}
                 style={{padding:"8px 24px",borderRadius:8,fontSize:13,fontWeight:700,cursor:"pointer",border:activeTab===tab.id?`1px solid rgba(59,130,246,0.4)`:`1px solid ${C.border}`,
                   background:activeTab===tab.id?C.accentBg:"transparent",color:activeTab===tab.id?C.accent:C.textMuted,transition:"all 0.15s",display:"flex",alignItems:"center",gap:6}}
@@ -5889,6 +6251,7 @@ export default function App(){
         {activeTab==="etiquetas"&&<EtiquetasView notas={notas} rawRows={rawRows} sess={sess}/>}
         {activeTab==="producao"&&sess?.perfil?.pode_producao&&<ProducaoView sess={sess} onLogout={sair}/>}
         {activeTab==="itinerario"&&sess?.perfil?.pode_producao&&<ItinerarioView rawRows={rawRows} notas={notas} sess={sess}/>}
+        {activeTab==="cadastro"&&sess?.perfil?.pode_cadastro&&<CadastroView sess={sess}/>}
         {showLogin&&<LoginModal onClose={()=>setShowLogin(false)} onOk={entrar}/>}
         {activeTab==="pendente"&&!rawRows&&(sess?.perfil?.pode_importar
           ?<div onDragOver={e=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)} onDrop={onDrop}
