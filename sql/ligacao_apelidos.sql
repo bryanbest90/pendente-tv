@@ -61,7 +61,15 @@ UPDATE ligacao SET rua_geocall='RUA CORONEL LUIZ TENORIO DE BRITO', rua_geocall_
 UPDATE ligacao SET rua_geocall='ALAMEDA DOS BANDEIRANTES', rua_geocall_busca='DOS BANDEIRANTES' WHERE codlog='0299000427';  -- 8 numeros, 70%
 
 -- ---------- a lista de ruas passa a mostrar os dois nomes ----------
-CREATE OR REPLACE VIEW v_ligacao_rua AS
+-- DROP antes do CREATE, e nao CREATE OR REPLACE: o replace so aceita
+-- colunas novas NO FIM da view, e as duas novas entram no meio, ao lado
+-- das outras de nome. Com o replace o Postgres recusa:
+--   cannot change name of view column "ligacoes" to "rua_geocall"
+-- Derrubar e recriar nao custa nada aqui: view nao guarda dado, e
+-- ninguem depende dela alem da tela.
+DROP VIEW IF EXISTS v_ligacao_rua;
+
+CREATE VIEW v_ligacao_rua AS
 SELECT rua, rua_busca, rua_geocall, rua_geocall_busca, count(*)::int AS ligacoes,
        min(imovel) AS menor_numero, max(imovel) AS maior_numero
   FROM ligacao
