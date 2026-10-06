@@ -116,11 +116,31 @@ const EXCLUDED_TSS = [
   "REMANEJAR REDE DE ESGOTO","HIDRANTE VAZANDO",
 ];
 
+/* TSS QUE NÃO É TSS.
+   O relatório do GEOCALL às vezes vem com uma mensagem de erro do
+   sistema dele no lugar do nome do serviço — "IndexOutOfBoundsException
+   nel campo AODLID_TODL", em italiano. Não é um serviço raro: é o
+   GEOCALL falhando ao montar a linha e exportando o próprio erro.
+
+   Medido em 06/10/2026: 1.005 das 12.292 entradas registradas, 8,2%.
+   Em 89% delas a MESMA OS aparece no mesmo dia também com a TSS de
+   verdade — ou seja, cada uma dessas linhas era uma entrada fantasma,
+   inflando a contagem de serviços solicitados.
+
+   Barrado aqui e no gatilho do banco (sql/os_entrada.sql), porque o
+   dado entra pelos dois caminhos. */
+function tssValida(tss){
+  const t=String(tss||"").trim();
+  if(!t) return false;
+  return !/exception|nel campo/i.test(t);
+}
+
 // A mesma pergunta estava escrita em quatro lugares, com redações
 // ligeiramente diferentes. Regra de negócio copiada é regra que
 // diverge: basta alguém mexer em uma cópia. Agora é uma só.
 function familiaTssVisivel(familia,tss){
   const fam=String(familia||"").trim(), t=String(tss||"").trim();
+  if(!tssValida(t)) return false;
   if(EXCLUDED_DISPLAY.includes(fam)) return false;
   if(EXCLUDED_TSS.includes(t)) return false;
   return true;
@@ -3451,19 +3471,39 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx,diaEntrada,
   // Os grupos guardam os MEMBROS, nao so o nome: o filtro de TSS e
   // o modal continuam trabalhando com a TSS crua do GEOCALL, que e
   // o que existe na linha. O agrupamento e so de apresentacao.
+  /* A lista de TSS sai do pendente MAIS as TSS que tiveram entrada no
+     dia e já não estão abertas.
+
+     Sem a segunda parte, o total da família não fechava com a soma das
+     linhas, e a diferença não tinha onde aparecer: a entrada não
+     diminui quando a OS é executada (é o ponto da coluna), mas a lista
+     de TSS vinha só da carteira de agora. Serviço pedido e executado no
+     mesmo dia entrava no total da família e não tinha linha nenhuma.
+
+     Elas entram com prazo e fora zerados, porque é isso que são: não há
+     nada aberto para ter prazo. */
   const tssGroups=useMemo(()=>{
     const m={};
+    const grupo=nome=>m[nome]||(m[nome]={all:[],prazo:[],fora:[],membros:new Set()});
     rows.forEach(r=>{
       const crua=String(r["TSS"]||"").trim();
-      const nome=grupoDaTss(crua);
-      if(!m[nome])m[nome]={all:[],prazo:[],fora:[],membros:new Set()};
-      m[nome].membros.add(crua);
-      m[nome].all.push(r);
-      const st=tempo(r["Tempo Residual"]);if(st)m[nome][st].push(r);
+      const g=grupo(grupoDaTss(crua));
+      g.membros.add(crua);
+      g.all.push(r);
+      const st=tempo(r["Tempo Residual"]);if(st)g[st].push(r);
     });
+    if(entradaInfo){
+      const abertas=new Set(rows.map(r=>String(r["TSS"]||"").trim()));
+      for(const e of entradaInfo.lista){
+        if(String(e.familia||"").trim()!==fam) continue;
+        const crua=String(e.tss||"").trim();
+        if(!crua||abertas.has(crua)) continue;
+        grupo(grupoDaTss(crua)).membros.add(crua);
+      }
+    }
     return Object.entries(m).sort(([a],[b])=>a.localeCompare(b))
       .map(([name,d])=>({name,...d,membros:[...d.membros]}));
-  },[rows]);
+  },[rows,entradaInfo,fam]);
   const prazo=activeRows.filter(r=>tempo(r["Tempo Residual"])==="prazo").length;
   const fora=activeRows.filter(r=>tempo(r["Tempo Residual"])==="fora").length;
   const total=prazo+fora;
@@ -3539,7 +3579,7 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx,diaEntrada,
           const linhaTss=t=>{
             const on=!t.membros.every(m=>excludedTSS.has(m));
             const tP=on?t.prazo.length:0,tF=on?t.fora.length:0;
-            const tE=on?t.membros.reduce((a,m)=>a+(entradaInfo?.porTss.get(m)||0),0):0;
+            const tE=on?t.membros.reduce((a,m)=>a+(entradaInfo?.porTss.get(fam+"\u0000"+m)||0),0):0;
             return <div key={t.name} style={{display:"flex",alignItems:"center",gap:10,padding:"5px 6px",borderRadius:RAIO,opacity:on?1:0.45,transition:"opacity 0.15s"}}
               onMouseEnter={e=>(e.currentTarget.style.background="rgba(255,255,255,0.02)")} onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
               <Check checked={on} onChange={()=>onToggleAll(t.membros,!on)}/>
@@ -5966,7 +6006,11 @@ export default function App(){
       if(!familiaTssVisivel(e.familia,tss)||excludedTSS.has(tss)) continue;
       const f=String(e.familia||"").trim();
       porFam.set(f,(porFam.get(f)||0)+1);
-      porTss.set(tss,(porTss.get(tss)||0)+1);
+      // chave por familia+TSS: a mesma TSS aparece em mais de uma
+      // familia, e a chave so pelo nome fazia as duas somarem a
+      // contagem cheia, cada uma mostrando o total da outra junto.
+      const k=f+"\u0000"+tss;
+      porTss.set(k,(porTss.get(k)||0)+1);
       lista.push(e);
     }
     return {porFam,porTss,lista,total:lista.length,
