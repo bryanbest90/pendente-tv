@@ -103,7 +103,9 @@ const FONTE_NUM = `"Azeret Mono",ui-monospace,SFMono-Regular,monospace`;
 const numStyle  = {fontFamily:FONTE_NUM,fontVariantNumeric:"tabular-nums",letterSpacing:"-0.04em"};
 const RAIO      = 2;
 
-const EXCLUDED_DISPLAY = ["VISTORIA","CORTE SUPRESSÃO ADM","FISCALIZAÇÃO","SERV COMPLEMENTAR","ABASTECIMENTO"];
+// GARANTIA entrou em 06/10/2026: e servico de verificacao de garantia,
+// nao faz parte da carteira que a gente mede.
+const EXCLUDED_DISPLAY = ["VISTORIA","CORTE SUPRESSÃO ADM","FISCALIZAÇÃO","SERV COMPLEMENTAR","ABASTECIMENTO","GARANTIA"];
 // Também saíram três TSS de OUTROS SERVIÇOS DE ESGOTO, na mesma
 // data e pelo mesmo motivo: TESTE DE CORANTE OP, LAVAR REDE DE
 // ESGOTO PREVENTIVA e LIMPAR POÇO INSPEÇÃO/VISITA A VACUO.
