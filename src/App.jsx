@@ -137,12 +137,29 @@ function tssValida(tss){
   return !/exception|nel campo/i.test(t);
 }
 
+/* SERVIÇO DE VERIFICAÇÃO NÃO É CARTEIRA, VENHA NA FAMÍLIA QUE VIER.
+   "VERIFICAR HIDROMETRO TELEMEDIDO", "VERIFICAR SERVIÇO SOLICITADO",
+   "VERIFICAR EXISTÊNCIA LIG ESGOTO AVULSA" — são vistoria, e vistoria
+   já está fora. Só que elas chegaram marcadas como VAZAMENTO DE ÁGUA
+   em alguns relatórios de 06 e 07/10, e aí passaram pelo filtro de
+   família e foram parar na carteira.
+
+   Por isso a regra é pelo NOME DO SERVIÇO e não pela família: o nome
+   do serviço o GEOCALL acerta; a família ele troca. Medido na
+   os_entrada: a mesma "VERIFICAR EXISTÊNCIA LIG ESGOTO AVULSA" veio
+   42 vezes como VISTORIA e 18 como VAZAMENTO DE ÁGUA.
+
+   Se um dia existir um "VERIFICAR ..." que SEJA serviço da carteira,
+   é esta linha que tem de sair. Até hoje não existe nenhum. */
+const tssDeVerificacao = tss => /^VERIFICAR\s/i.test(String(tss||"").trim());
+
 // A mesma pergunta estava escrita em quatro lugares, com redações
 // ligeiramente diferentes. Regra de negócio copiada é regra que
 // diverge: basta alguém mexer em uma cópia. Agora é uma só.
 function familiaTssVisivel(familia,tss){
   const fam=String(familia||"").trim(), t=String(tss||"").trim();
   if(!tssValida(t)) return false;
+  if(tssDeVerificacao(t)) return false;
   if(EXCLUDED_DISPLAY.includes(fam)) return false;
   if(EXCLUDED_TSS.includes(t)) return false;
   return true;
