@@ -533,6 +533,41 @@ async function fetchProducao(tok,diaIni,diaFim){
   }
 }
 
+// O IDG. A view v_idg já devolve o veredito calculado no banco — a conta
+// é a da Sabesp, decifrada da planilha ISAP e conferida linha a linha
+// (ver ANALISE_IDG_ISAP.md). Aqui é só leitura.
+//
+// Pagina de propósito: um mês passa de 4 mil linhas e o PostgREST corta
+// em mil DEVOLVENDO 200. Já nos mordeu uma vez, no gráfico de entradas.
+async function fetchIdg(tok,diaIni,diaFim){
+  const H=authHeaders(tok);
+  const out=[];let from=0;const ps=1000;
+  for(;;){
+    const r=await fetch(SUPABASE_URL+
+      `/rest/v1/v_idg?select=numero_os,cod_tss,tss,dia,equipe,resultado,executado,familia,atc,indicador,prazo,tipo_prazo,tempo_atendimento,veredito,data_competencia,data_execucao`+
+      `&dia=gte.${diaIni}&dia=lte.${diaFim}&order=dia.asc,numero_os.asc`,
+      {headers:{...H,"Range":from+"-"+(from+ps-1)}});
+    if(!r.ok&&r.status!==206){const t=await r.text();throw new Error(r.status+" "+t.slice(0,160));}
+    const d=await r.json();
+    if(!d?.length)break;
+    out.push(...d);
+    if(d.length<ps)break;
+    from+=ps;
+  }
+  return out;
+}
+
+// A régua: qual frente e qual prazo de cada serviço. Serve para projetar
+// a carteira ABERTA — o serviço que ainda não foi baixado mas já passou
+// do prazo é um "fora" contratado, que entra no índice no dia em que for
+// executado. É isso que permite enxergar antes da Sabesp enviar.
+async function fetchReguaIsap(tok){
+  const r=await fetch(SUPABASE_URL+"/rest/v1/isap_tss?select=cod_tss,tss,tss_busca,indicador,prazo,tipo_prazo",
+    {headers:authHeaders(tok)});
+  if(!r.ok)throw new Error("régua ISAP: "+r.status);
+  return r.json();
+}
+
 // H = cabecalhos do login, igual as outras duas importacoes.
 /* CONFERIR ANTES DE SUBSTITUIR A CARTEIRA.
    O GEOCALL as vezes exporta o arquivo torto — em 06/10/2026, as 19:02,
@@ -5354,6 +5389,295 @@ function FichaLigacao({l,rotulo,destaque,extra,dist}){
   </div>;
 }
 
+/* ══════════════════════════════════════════════════════════
+   ABA IDG — o índice da Sabesp, calculado por nós
+
+   O IDG é a média de três frentes: ISAPa (água), ISAPe (esgoto) e
+   ISAPr (reposição). Cada uma é `dentro / (dentro + fora)`, com o
+   expurgo fora das duas pontas. Média SIMPLES, não ponderada por
+   volume: o ISAPr pesa igual ao ISAPa apesar de ter cinco vezes
+   menos serviços. Foi a única forma que reproduziu o número deles.
+
+   A conta inteira foi decifrada da planilha ISAP e conferida linha
+   a linha — 1.256 vereditos iguais em 1.259. O caminho está no
+   ANALISE_IDG_ISAP.md; aqui a view v_idg já entrega mastigado.
+
+   O QUE ESTA TELA FAZ QUE A PLANILHA DELES NÃO FAZ: mostra a dívida
+   da carteira. Serviço aberto que já passou do prazo é um "fora"
+   contratado — ele vai entrar no índice no dia em que for baixado,
+   faça o que fizer. Esse número não existe no relatório da Sabesp
+   porque lá só entra o que já fechou.
+   ══════════════════════════════════════════════════════════ */
+function IdgView({sess,rawRows}){
+  const primeiroDoMes=()=>{const d=new Date();return fmtISO(new Date(d.getFullYear(),d.getMonth(),1));};
+  const [ini,setIni]=useState(primeiroDoMes());
+  const [fim,setFim]=useState(fmtISO(new Date()));
+  const [unidade,setUnidade]=useState("geral");
+  const [frenteSel,setFrenteSel]=useState(null);
+  const [linhas,setLinhas]=useState(null);
+  const [regua,setRegua]=useState(null);
+  const [loading,setLoading]=useState(true);
+  const [erro,setErro]=useState("");
+
+  useEffect(()=>{let vivo=true;
+    (async()=>{
+      setLoading(true);setErro("");
+      try{
+        const [d,r]=await Promise.all([fetchIdg(sess.access_token,ini,fim),fetchReguaIsap(sess.access_token)]);
+        if(vivo){setLinhas(d);setRegua(r);}
+      }catch(e){ if(vivo){setErro(String(e.message||e));setLinhas(null);} }
+      if(vivo)setLoading(false);
+    })();
+    return()=>{vivo=false;};
+  },[sess.access_token,ini,fim]);
+
+  const atcAlvo=UNITS.find(u=>u.id===unidade)?.atc??null;
+
+  /* ── o índice ──────────────────────────────────────────── */
+  const idg=useMemo(()=>{
+    if(!linhas)return null;
+    const L=linhas.filter(r=>atcAlvo===null?true:Number(r.atc)===atcAlvo);
+    const frentes=["ISAPa","ISAPe","ISAPr"].map(id=>{
+      const g=L.filter(r=>r.indicador===id);
+      const dentro=g.filter(r=>r.veredito==="DENTRO").length;
+      const fora=g.filter(r=>r.veredito==="FORA").length;
+      const exp=g.length-dentro-fora;
+      // denominador zero existe de verdade: no dia 1 do mês uma frente
+      // pode não ter fechado nada ainda. null, e não 0% nem 100%.
+      const pct=(dentro+fora)?100*dentro/(dentro+fora):null;
+      return {id,dentro,fora,exp,total:g.length,pct};
+    });
+    const validas=frentes.filter(f=>f.pct!==null);
+    // A média é das frentes que têm serviço. Somar zero por uma frente
+    // vazia derrubaria o IDG por falta de dado, não por desempenho.
+    const media=validas.length?validas.reduce((s,f)=>s+f.pct,0)/validas.length:null;
+    return {frentes,media,completo:validas.length===3,total:L.length,linhas:L};
+  },[linhas,atcAlvo]);
+
+  /* ── a dívida da carteira ──────────────────────────────────
+     Cada serviço ainda aberto, medido contra o prazo do ISAP a
+     partir da Data de Competência. O que já estourou é perda
+     certa — só falta ser baixado para aparecer no índice.
+
+     Casa pelo NOME sem acento porque o pendente não traz o código
+     do serviço: a Sabesp escreve "VAZAMENTO DE AGUA" e o GEOCALL
+     manda "VAZAMENTO DE ÁGUA".                                  */
+  const divida=useMemo(()=>{
+    if(!regua||!rawRows)return null;
+    const semAcento=s=>String(s||"").normalize("NFD").replace(/[̀-ͯ]/g,"").toUpperCase().replace(/\s+/g," ").trim();
+    const porNome=new Map(regua.map(r=>[r.tss_busca||semAcento(r.tss),r]));
+    const agora=new Date();
+    const conta={ISAPa:{venc:0,abertos:0},ISAPe:{venc:0,abertos:0},ISAPr:{venc:0,abertos:0}};
+    const vencidos=[];
+    let semRegua=0;
+    for(const r of rawRows){
+      if(atcAlvo!==null&&Number(r["ATC"])!==atcAlvo)continue;
+      const ref=porNome.get(semAcento(r["TSS"]));
+      if(!ref){semRegua++;continue;}
+      const m=String(r["Data de Competência"]||"").match(/(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+      if(!m)continue;
+      const comp=new Date(+m[3],+m[2]-1,+m[1],+(m[4]||0),+(m[5]||0));
+      const unidadeMin=ref.tipo_prazo==="DC"?1440:60;
+      const idade=Math.floor((agora-comp)/60000/unidadeMin);
+      const c=conta[ref.indicador]; if(!c)continue;
+      c.abertos++;
+      if(idade>Number(ref.prazo)){
+        c.venc++;
+        vencidos.push({os:r["Número OS"],tss:r["TSS"],familia:r["Família"],indicador:ref.indicador,
+          idade,prazo:Number(ref.prazo),unidade:ref.tipo_prazo==="DC"?"d":"h",
+          excesso:idade-Number(ref.prazo),endereco:r["Endereço"],bairro:r["Bairro"]});
+      }
+    }
+    vencidos.sort((a,b)=>b.excesso-a.excesso);
+    const tot=Object.values(conta).reduce((s,c)=>s+c.venc,0);
+    return {conta,vencidos,total:tot,semRegua};
+  },[regua,rawRows,atcAlvo]);
+
+  /* ── onde o índice está sendo perdido ──────────────────── */
+  const ofensores=useMemo(()=>{
+    if(!idg)return null;
+    const base=frenteSel?idg.linhas.filter(r=>r.indicador===frenteSel):idg.linhas;
+    const agrupa=(campo)=>{
+      const m=new Map();
+      for(const r of base){
+        if(r.veredito==="DENTRO"||r.veredito==="FORA"){
+          const k=String(r[campo]||"—").trim()||"—";
+          if(!m.has(k))m.set(k,{nome:k,total:0,fora:0});
+          const o=m.get(k); o.total++; if(r.veredito==="FORA")o.fora++;
+        }
+      }
+      return [...m.values()].filter(o=>o.fora>0)
+        .map(o=>({...o,pct:100*o.fora/o.total}))
+        .sort((a,b)=>b.fora-a.fora);
+    };
+    return {porMotivo:agrupa("resultado").slice(0,12),porTss:agrupa("tss").slice(0,12)};
+  },[idg,frenteSel]);
+
+  /* quase deu: fora do prazo por uma unidade só. É a fila que mais
+     responde a ação — uma hora de diferença, um dia de diferença. */
+  const quaseDeu=useMemo(()=>{
+    if(!idg)return 0;
+    return idg.linhas.filter(r=>r.veredito==="FORA"&&(Number(r.tempo_atendimento)-Number(r.prazo))<=1).length;
+  },[idg]);
+
+  const btn=(on)=>({padding:"5px 12px",borderRadius:7,fontSize:12,fontWeight:700,cursor:"pointer",
+    border:`1px solid ${on?C.accent:C.border}`,background:on?C.accentBg:C.cardAlt,color:on?C.accent:C.textMuted});
+  const presets=[
+    {rot:"Este mês",ini:primeiroDoMes(),fim:fmtISO(new Date())},
+    {rot:"Mês passado",...(()=>{const h=new Date();return {ini:fmtISO(new Date(h.getFullYear(),h.getMonth()-1,1)),fim:fmtISO(new Date(h.getFullYear(),h.getMonth(),0))};})()},
+    {rot:"Últimos 7 dias",ini:diasAtras(6),fim:fmtISO(new Date())},
+  ];
+  const corDoIndice=p=>p===null?C.textDim:p>=95?C.green:p>=85?C.amber:C.red;
+  const ROTULO={ISAPa:"ISAPa · água",ISAPe:"ISAPe · esgoto",ISAPr:"ISAPr · reposição"};
+
+  return <div style={{animation:"fadeIn 0.35s ease"}}>
+    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14,flexWrap:"wrap"}}>
+      <span style={{fontSize:12,padding:"2px 10px",borderRadius:8,background:"rgba(139,92,246,0.1)",color:"#8b5cf6",border:"1px solid rgba(139,92,246,0.25)",fontWeight:700}}>🔒 restrito</span>
+      <span style={{fontSize:12,color:C.textDim}}>{sess.perfil?.nome||sess.perfil?.email}</span>
+    </div>
+
+    {/* filtros */}
+    <div style={{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,padding:"12px 16px",marginBottom:14,display:"flex",flexDirection:"column",gap:10}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+        <span style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,fontWeight:700,minWidth:56}}>Período</span>
+        {presets.map(p=><button key={p.rot} onClick={()=>{setIni(p.ini);setFim(p.fim);}} style={btn(ini===p.ini&&fim===p.fim)}>{p.rot}</button>)}
+        <span style={{width:1,height:18,background:C.border,margin:"0 2px"}}/>
+        <input type="date" value={ini} max={fim} onChange={e=>setIni(e.target.value)} style={dateInputStyle}/>
+        <span style={{color:C.textDim,fontSize:12}}>até</span>
+        <input type="date" value={fim} min={ini} onChange={e=>setFim(e.target.value)} style={dateInputStyle}/>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+        <span style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,fontWeight:700,minWidth:56}}>Unidade</span>
+        {UNITS.map(u=><button key={u.id} onClick={()=>setUnidade(u.id)} style={btn(unidade===u.id)}>{u.label}</button>)}
+      </div>
+    </div>
+
+    {erro&&<div style={{background:C.redBg,border:`1px solid ${C.redBorder}`,borderRadius:10,padding:"12px 16px",marginBottom:14,fontSize:12,color:C.red,lineHeight:1.5}}>
+      Não consegui ler o IDG: {erro}
+      <div style={{color:C.textMuted,marginTop:6}}>Se fala em relação inexistente, faltou rodar <code>sql/isap_regua.sql</code> e <code>sql/isap_execucao.sql</code>.</div>
+    </div>}
+
+    {loading&&<div style={{textAlign:"center",padding:"40px 0",color:C.textDim,fontSize:13}}>Calculando o IDG…</div>}
+
+    {!loading&&idg&&<>
+      {/* ── o número ── */}
+      <div style={{display:"flex",gap:12,marginBottom:14,flexWrap:"wrap"}}>
+        <div style={{flex:"1 1 200px",minWidth:190,background:C.card,borderRadius:RAIO,padding:"18px 20px",
+          border:`1px solid ${C.border}`,position:"relative",overflow:"hidden"}}>
+          <span style={{position:"absolute",top:0,left:0,width:14,height:1,background:corDoIndice(idg.media),opacity:.85}}/>
+          <span style={{position:"absolute",top:0,left:0,width:1,height:14,background:corDoIndice(idg.media),opacity:.85}}/>
+          <div style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:0.6,fontWeight:700}}>IDG</div>
+          <div style={{fontSize:38,fontWeight:800,lineHeight:1.1,color:corDoIndice(idg.media),
+            textShadow:idg.media!==null&&idg.media<85?`0 0 18px ${C.red}55`:"none"}}>
+            {idg.media===null?"—":idg.media.toFixed(2)+"%"}
+          </div>
+          <div style={{fontSize:11,color:C.textMuted,marginTop:2}}>
+            média simples das três frentes{!idg.completo&&idg.media!==null?" com serviço no período":""}
+          </div>
+        </div>
+        {idg.frentes.map(f=>{
+          const on=frenteSel===f.id;
+          return <div key={f.id} onClick={()=>setFrenteSel(on?null:f.id)}
+            style={{flex:"1 1 170px",minWidth:160,background:on?C.accentBg:C.card,borderRadius:RAIO,padding:"14px 16px",
+              border:`1px solid ${on?C.accent:C.border}`,cursor:"pointer",position:"relative",overflow:"hidden"}}>
+            <span style={{position:"absolute",top:0,left:0,width:11,height:1,background:corDoIndice(f.pct),opacity:.8}}/>
+            <span style={{position:"absolute",top:0,left:0,width:1,height:11,background:corDoIndice(f.pct),opacity:.8}}/>
+            <div style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,fontWeight:700}}>{ROTULO[f.id]}</div>
+            <div style={{fontSize:26,fontWeight:800,lineHeight:1.2,color:corDoIndice(f.pct)}}>
+              {f.pct===null?"—":f.pct.toFixed(2)+"%"}
+            </div>
+            <div style={{fontSize:11,color:C.textMuted,marginTop:2}}>
+              {f.dentro} dentro · {f.fora} fora{f.exp?` · ${f.exp} expurgo`:""}
+            </div>
+          </div>;
+        })}
+      </div>
+
+      {/* ── a dívida da carteira: o que a planilha deles não mostra ── */}
+      {divida&&<div style={{background:C.card,borderRadius:12,border:`1px solid ${divida.total?C.redBorder:C.border}`,
+        padding:"14px 18px",marginBottom:14}}>
+        <div style={{display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap",marginBottom:6}}>
+          <span style={{fontSize:13,fontWeight:800,color:C.text}}>Dívida da carteira</span>
+          <span style={{fontSize:26,fontWeight:800,color:divida.total?C.red:C.green,lineHeight:1}}>{divida.total}</span>
+          <span style={{fontSize:12,color:C.textMuted}}>
+            serviços abertos que JÁ passaram do prazo do ISAP
+          </span>
+        </div>
+        <div style={{fontSize:12,color:C.textMuted,lineHeight:1.55,marginBottom:10}}>
+          Cada um é um “fora do prazo” contratado: vai entrar no índice no dia em que for baixado,
+          faça o que fizer. Esse número não existe no relatório da Sabesp, porque lá só entra o que já fechou —
+          é ele que dá para enxergar antes.
+        </div>
+        <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
+          {["ISAPa","ISAPe","ISAPr"].map(k=>divida.conta[k]&&
+            <div key={k} style={{fontSize:12,color:C.textMuted}}>
+              <b style={{color:divida.conta[k].venc?C.red:C.textMuted,fontSize:15}}>{divida.conta[k].venc}</b>
+              {" "}vencidos de {divida.conta[k].abertos} abertos · <span style={{color:C.textDim}}>{ROTULO[k]}</span>
+            </div>)}
+        </div>
+        {divida.vencidos.length>0&&<div style={{marginTop:12,borderTop:`1px solid ${C.border}`,paddingTop:10}}>
+          <div style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,fontWeight:700,marginBottom:6}}>
+            os 10 mais atrasados
+          </div>
+          {divida.vencidos.slice(0,10).map((v,i)=>
+            <div key={i} style={{display:"flex",gap:10,alignItems:"baseline",padding:"4px 0",
+              borderBottom:i<9?`1px solid ${C.border}`:"none",fontSize:12}}>
+              <span style={{color:C.red,fontWeight:800,minWidth:70}}>+{v.excesso}{v.unidade}</span>
+              <span style={{color:C.text,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.tss}</span>
+              <span style={{color:C.textDim,fontSize:11}}>{v.bairro||""}</span>
+              <span style={{color:C.textDim,fontSize:11,minWidth:90,textAlign:"right"}}>{v.os}</span>
+            </div>)}
+        </div>}
+        {divida.semRegua>0&&<div style={{marginTop:8,fontSize:11,color:C.textDim}}>
+          {divida.semRegua} serviços da carteira não estão na régua do ISAP — ou não entram no índice,
+          ou nunca apareceram numa planilha deles. Ficam de fora da conta.
+        </div>}
+      </div>}
+
+      {/* ── onde está sendo perdido ── */}
+      {ofensores&&(ofensores.porMotivo.length>0||ofensores.porTss.length>0)&&
+      <div style={{display:"flex",gap:14,flexWrap:"wrap",marginBottom:14}}>
+        {[["Por que a OS encerrou",ofensores.porMotivo],["Por serviço",ofensores.porTss]].map(([titulo,lista])=>
+          <div key={titulo} style={{flex:"1 1 340px",minWidth:300,background:C.card,borderRadius:12,border:`1px solid ${C.border}`,overflow:"hidden"}}>
+            <div style={{padding:"10px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:12,fontWeight:800,color:C.text}}>{titulo}</span>
+              <span style={{fontSize:11,color:C.textDim}}>fora / total</span>
+            </div>
+            {lista.map((o,i)=>
+              <div key={o.nome} style={{padding:"8px 16px",borderBottom:i<lista.length-1?`1px solid ${C.border}`:"none",
+                display:"flex",alignItems:"center",gap:10,fontSize:12}}>
+                <span style={{flex:1,minWidth:0,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{o.nome}</span>
+                <span style={{color:C.red,fontWeight:800,minWidth:36,textAlign:"right"}}>{o.fora}</span>
+                <span style={{color:C.textDim,minWidth:40,textAlign:"right"}}>/{o.total}</span>
+                <span style={{color:o.pct>=30?C.red:C.textMuted,minWidth:46,textAlign:"right",fontWeight:700}}>{o.pct.toFixed(0)}%</span>
+              </div>)}
+            {!lista.length&&<div style={{padding:"20px",textAlign:"center",color:C.textDim,fontSize:12}}>nada fora do prazo</div>}
+          </div>)}
+      </div>}
+
+      {quaseDeu>0&&<div style={{background:C.amberBg,border:`1px solid ${C.amber}44`,borderRadius:10,
+        padding:"10px 16px",marginBottom:14,fontSize:12,color:C.textMuted,lineHeight:1.55}}>
+        <b style={{color:C.amber,fontSize:14}}>{quaseDeu}</b> dos serviços fora do prazo passaram por
+        {" "}<b>uma unidade só</b> — um dia, ou uma hora. É a fila que mais responde a ação.
+      </div>}
+
+      {/* ── a tarja honesta ── */}
+      <div style={{background:C.cardAlt,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 16px",
+        fontSize:11.5,color:C.textDim,lineHeight:1.6}}>
+        <b style={{color:C.textMuted}}>Como ler este número.</b> A conta é a da Sabesp, decifrada da planilha ISAP:
+        tempo de atendimento = fim da execução menos a data de competência, truncado no dia (DC) ou na hora (HS),
+        e fora é tempo <i>maior</i> que o prazo. Conferido contra 1.259 serviços deles: 1.256 vereditos iguais.
+        <br/>
+        <b style={{color:C.textMuted}}>O que ainda falta.</b> Dos três expurgos, calculamos só o de tempo de execução
+        (início igual ao fim). Faltam o de atraso de transmissão, que precisa da <i>hora</i> da Data Inserção —
+        hoje gravada só como data —, e o de suspensão, que é ato administrativo deles. Em outubro os dois valeram
+        1,19 ponto. Ou seja: <b style={{color:C.textMuted}}>este número tende a ser menor que o oficial</b>, não maior.
+      </div>
+    </>}
+  </div>;
+}
+
+
 function CadastroView({sess,rawRows}){
   const [ruas,setRuas]=useState(null);
   const [rua,setRua]=useState("");
@@ -6413,7 +6737,7 @@ export default function App(){
   return <SessaoCtx.Provider value={sess}><div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:FONTE_UI,display:"flex"}}>
     {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed} nNotas={notasDoPendente.length} onNotas={t=>{setFiltroNota(t);setShowNotas(true);}} tagsNotas={tagsNotas} onBuscarOS={buscarOS} onBuscarEndereco={buscarEndereco}/>}
     <div style={{flex:1,padding:"24px 16px",overflowY:"auto",minHeight:"100vh"}}>
-      <div style={{maxWidth:activeTab==="producao"||activeTab==="itinerario"||activeTab==="etiquetas"||activeTab==="cadastro"?1180:960,margin:"0 auto"}}>
+      <div style={{maxWidth:activeTab==="producao"||activeTab==="itinerario"||activeTab==="etiquetas"||activeTab==="cadastro"||activeTab==="idg"?1180:960,margin:"0 auto"}}>
 
         {/* Tarja da subida recusada.
             Relatório recusado deixa a carteira parada no horário
@@ -6438,15 +6762,15 @@ export default function App(){
 
         <div style={{marginBottom:24,textAlign:"center"}}>
           <h1 style={{fontSize:17,fontWeight:500,margin:0,letterSpacing:"0.2em",textTransform:"uppercase",color:C.text,fontFamily:FONTE_NUM}}>
-            {activeTab==="pendente"?"Controle de Prazos — OS Pendentes":activeTab==="carteira"?"Acompanhamento de Carteira":activeTab==="etiquetas"?"Etiquetas — o que fechou":activeTab==="itinerario"?"Itinerário das Equipes":activeTab==="cadastro"?"Cadastro — quem é o imóvel":"Produção por Equipes"}
+            {activeTab==="pendente"?"Controle de Prazos — OS Pendentes":activeTab==="carteira"?"Acompanhamento de Carteira":activeTab==="etiquetas"?"Etiquetas — o que fechou":activeTab==="itinerario"?"Itinerário das Equipes":activeTab==="cadastro"?"Cadastro — quem é o imóvel":activeTab==="idg"?"IDG — Índice de Demandas Global":"Produção por Equipes"}
           </h1>
           <p style={{color:C.textDim,margin:"6px 0 0",fontSize:13}}>
-            {activeTab==="pendente"?"Análise por família de serviço":activeTab==="carteira"?"Carteira diária por frente de serviço":activeTab==="etiquetas"?"Executadas e encerradas sem execução, por etiqueta, no período":activeTab==="itinerario"?"O dia de cada equipe — sugerido pelo sistema, fechado por você":activeTab==="cadastro"?"RGI, fornecimento e hidrômetro do endereço e dos vizinhos":"Execuções confirmadas por equipe e tipo de serviço"}
+            {activeTab==="pendente"?"Análise por família de serviço":activeTab==="carteira"?"Carteira diária por frente de serviço":activeTab==="etiquetas"?"Executadas e encerradas sem execução, por etiqueta, no período":activeTab==="itinerario"?"O dia de cada equipe — sugerido pelo sistema, fechado por você":activeTab==="cadastro"?"RGI, fornecimento e hidrômetro do endereço e dos vizinhos":activeTab==="idg"?"Água, esgoto e reposição — a conta da Sabesp, antes de a Sabesp enviar":"Execuções confirmadas por equipe e tipo de serviço"}
           </p>
           {/* Tabs */}
           <div style={{display:"flex",justifyContent:"center",gap:4,marginTop:14}}>
             {[{id:"pendente",label:"Pendente",icon:"📋"},{id:"carteira",label:"Carteira",icon:"📊"},{id:"etiquetas",label:"Etiquetas",icon:"🏷"},
-              ...(sess?.perfil?.pode_producao?[{id:"producao",label:"Produção",icon:"👷"},{id:"itinerario",label:"Itinerário",icon:"🚚"}]:[]),
+              ...(sess?.perfil?.pode_producao?[{id:"producao",label:"Produção",icon:"👷"},{id:"idg",label:"IDG",icon:"🎯"},{id:"itinerario",label:"Itinerário",icon:"🚚"}]:[]),
               ...(sess?.perfil?.pode_cadastro?[{id:"cadastro",label:"Cadastro",icon:"🚰"}]:[])].map(tab=>
               <button key={tab.id} onClick={()=>setActiveTab(tab.id)}
                 style={{padding:"8px 24px",borderRadius:8,fontSize:13,fontWeight:700,cursor:"pointer",border:activeTab===tab.id?`1px solid rgba(59,130,246,0.4)`:`1px solid ${C.border}`,
@@ -6467,6 +6791,7 @@ export default function App(){
         {activeTab==="carteira"&&<CarteiraView rawRows={rawRows} sess={sess}/>}
         {activeTab==="etiquetas"&&<EtiquetasView notas={notas} rawRows={rawRows} sess={sess}/>}
         {activeTab==="producao"&&sess?.perfil?.pode_producao&&<ProducaoView sess={sess} onLogout={sair}/>}
+        {activeTab==="idg"&&sess?.perfil?.pode_producao&&<IdgView sess={sess} rawRows={rawRows}/>}
         {activeTab==="itinerario"&&sess?.perfil?.pode_producao&&<ItinerarioView rawRows={rawRows} notas={notas} sess={sess}/>}
         {activeTab==="cadastro"&&sess?.perfil?.pode_cadastro&&<CadastroView sess={sess} rawRows={rawRows}/>}
         {showLogin&&<LoginModal onClose={()=>setShowLogin(false)} onOk={entrar}/>}
