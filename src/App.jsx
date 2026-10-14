@@ -5446,11 +5446,13 @@ function IdgView({sess,rawRows}){
   const [horaIni,setHoraIni]=useState("00:00");
   const [horaFim,setHoraFim]=useState("23:59");
   const [aba,setAba]=useState("FORA");          // qual lista aparece ao abrir uma frente
-  const [verComo,setVerComo]=useState(false);   // a explicação fica guardada
   const [verDivida,setVerDivida]=useState(false);
   const [verEscondido,setVerEscondido]=useState(false);
-  // o espelho é o padrão: é o número que a Sabesp vai cobrar
-  const [espelho,setEspelho]=useState(true);
+  // A aba mede de UM jeito só: o da Sabesp. Ter dois números na tela fazia
+  // a conversa virar sobre qual deles valia, quando o que vale é sempre o
+  // deles — é o que vai ser cobrado. O que a regra do espelho esconde
+  // continua medido, no cartão de exposição, mas não como índice rival.
+  const espelho=true;
   const [linhas,setLinhas]=useState(null);
   const [regua,setRegua]=useState(null);
   const [loading,setLoading]=useState(true);
@@ -5616,8 +5618,12 @@ function IdgView({sess,rawRows}){
   /* ── a árvore, no formato do painel da Sabesp ───────────────
      IDA = ISAPa, IDE = ISAPe, IDR = ISAPr: no nosso contrato os IQES e o
      ICERP não se aplicam (aparecem com X no painel deles), então cada ID
-     é o seu ISAP. Média ID é a média simples dos três, e o IDG é ela —
-     o IRA fica de fora enquanto não entrar na conta.                    */
+     é o seu ISAP. O IDG é a média simples dos três.
+
+     O painel da Sabesp mostra um nó "Média ID" entre o IDG e os três, com
+     o mesmo valor do IDG — porque o IRA, que seria o outro lado da conta,
+     está zerado no nosso contrato. Dois nós com o mesmo número não dizem
+     nada, então aqui ficou um só.                                       */
   const LIN="#334155";
   const pct=v=>v===null||v===undefined?"—":v.toFixed(2)+"%";
   const ID_DE={ISAPa:"IDA",ISAPe:"IDE",ISAPr:"IDR"};
@@ -5682,11 +5688,6 @@ function IdgView({sess,rawRows}){
       <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
         <span style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,fontWeight:700,minWidth:56}}>Unidade</span>
         {UNITS.map(u=><button key={u.id} onClick={()=>setUnidade(u.id)} style={btn(unidade===u.id)}>{u.label}</button>)}
-        <span style={{width:1,height:18,background:C.border,margin:"0 2px"}}/>
-        <button onClick={()=>setEspelho(true)} disabled={semEspelho} style={{...btn(espelho&&!semEspelho),opacity:semEspelho?0.4:1,cursor:semEspelho?"not-allowed":"pointer"}}
-          title="Conta como a Sabesp conta — é o número que vai ser cobrado">Espelho da Sabesp</button>
-        <button onClick={()=>setEspelho(false)} style={btn(!espelho||semEspelho)}
-          title="Conta tudo o que saiu da carteira, inclusive o que a Sabesp não conta">Nossa conta</button>
         {semEspelho&&<span style={{fontSize:11,color:C.amber}}>falta rodar o <code>sql/isap_espelho.sql</code></span>}
       </div>
     </div>
@@ -5704,13 +5705,9 @@ function IdgView({sess,rawRows}){
         <div style={{minWidth:580,maxWidth:760,margin:"0 auto"}}>
           <div style={{display:"flex",justifyContent:"center"}}>
             <No cod="IDG" valor={pct(idg.media)} cor={corDoIndice(idg.media)} w={200}
-                sub={espelho?"espelho da Sabesp":"nossa conta"}/>
+                sub="como a Sabesp mede"/>
           </div>
-          <Tronco h={16}/>
-          <div style={{display:"flex",justifyContent:"center"}}>
-            <No cod="Média ID" valor={pct(idg.media)} cor={C.textMuted} w={168} alt/>
-          </div>
-          <Tronco h={14}/>
+          <Tronco h={18}/>
           <Garfo/>
           <Col3>{idg.frentes.map(f=>
             <div key={f.id} style={{display:"flex",justifyContent:"center"}}>
@@ -5865,29 +5862,6 @@ function IdgView({sess,rawRows}){
           </div>)}
       </div>}
 
-      {/* ── a explicação, guardada ── */}
-      <div style={{background:C.cardAlt,border:`1px solid ${C.border}`,borderRadius:10,overflow:"hidden"}}>
-        <div onClick={()=>setVerComo(!verComo)} style={{padding:"9px 16px",cursor:"pointer",display:"flex",
-          alignItems:"center",gap:8,fontSize:11.5,color:C.textDim,fontWeight:700}}>
-          <span>{verComo?"▾":"▸"}</span> como este número é calculado
-        </div>
-        {verComo&&<div style={{padding:"0 16px 14px",fontSize:11.5,color:C.textDim,lineHeight:1.65}}>
-          <b style={{color:C.textMuted}}>A conta.</b> Tempo de atendimento = fim da execução menos a data de competência,
-          truncado no dia (DC) ou na hora (HS); fora é tempo <i>maior</i> que o prazo. Conferido linha a linha contra a
-          planilha deles de 01 a 07/10: 1.808 vereditos iguais em 1.812 — 99,78%.
-          <br/>
-          <b style={{color:C.textMuted}}>Espelho.</b> Em <i>Espelho da Sabesp</i>, os vazamentos resolvidos com troca de ramal
-          saem da conta, porque é assim que eles contam. Em <i>Nossa conta</i> eles voltam e o ISAPa cai cerca de 1,2 ponto.
-          A regra está na tabela <code>isap_excecao</code> e desliga com um UPDATE.
-          <br/>
-          <b style={{color:C.textMuted}}>O que ainda falta.</b> Dos três expurgos calculamos só o de tempo de execução.
-          Faltam o de transmissão (precisa da <i>hora</i> da Data Inserção) e o de suspensão, que é ato deles — juntos
-          valeram 1,19 ponto em outubro. Este número tende a ser <b style={{color:C.textMuted}}>menor</b> que o oficial, não maior.
-          <br/>
-          <b style={{color:C.textMuted}}>Diferença conhecida.</b> 103 OS que executamos não aparecem na planilha da Sabesp
-          (01 a 07/10, de 1.963). Tirando elas e a troca de ramal, toda frente fecha dentro de 0,3 ponto.
-        </div>}
-      </div>
     </>}
   </div>;
 }
