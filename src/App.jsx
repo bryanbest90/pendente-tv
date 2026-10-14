@@ -344,7 +344,7 @@ async function fetchEntradaSerie(){
 async function fetchHistorico(){
   const allRows=[];let from=0;const ps=1000;
   while(true){
-    const res=await fetch(SUPABASE_URL+"/rest/v1/pendente_historico?select=dia,unidade,familia,no_prazo,fora_prazo,total&order=dia.asc",
+    const res=await fetch(SUPABASE_URL+"/rest/v1/pendente_historico?select=dia,unidade,familia,no_prazo,fora_prazo,total&order=dia.asc,unidade.asc,familia.asc",
       {headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
     if(!res.ok&&res.status!==206) throw new Error("Erro historico "+res.status);
     const data=await res.json();
@@ -375,7 +375,7 @@ async function fetchTssToFamiliaMap(){
 async function fetchDiarioOS(dia){
   const allRows=[];let from=0;const ps=1000;
   while(true){
-    const res=await fetch(SUPABASE_URL+`/rest/v1/pendente_diario_os?dia=eq.${dia}&select=numero_os,familia,unidade,tss,fora_prazo,endereco,numero_end,complemento`,{headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
+    const res=await fetch(SUPABASE_URL+`/rest/v1/pendente_diario_os?dia=eq.${dia}&select=numero_os,familia,unidade,tss,fora_prazo,endereco,numero_end,complemento&order=numero_os.asc,tss.asc`,{headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
     if(!res.ok&&res.status!==206) break;
     const data=await res.json();
     if(!data?.length)break;
@@ -398,7 +398,7 @@ async function fetchDiarioOS(dia){
 async function fetchEntradaDesde(dia){
   const os=[];let from=0;const ps=1000;
   while(true){
-    const res=await fetch(SUPABASE_URL+`/rest/v1/v_os_entrada?entrou_em=gte.${dia}&select=numero_os`,
+    const res=await fetch(SUPABASE_URL+`/rest/v1/v_os_entrada?entrou_em=gte.${dia}&select=numero_os&order=numero_os.asc`,
       {headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
     if(!res.ok&&res.status!==206){
       const txt=await res.text().catch(()=>"");
@@ -438,7 +438,7 @@ async function fetchExecucao(diaIni,diaFim){
   const tentar=async fonte=>{
     const allRows=[];let from=0;const ps=1000;
     while(true){
-      const res=await fetch(SUPABASE_URL+`/rest/v1/${fonte}?dia=gte.${diaIni}&dia=lte.${diaFim}&select=numero_os,tss,dia`,{headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
+      const res=await fetch(SUPABASE_URL+`/rest/v1/${fonte}?dia=gte.${diaIni}&dia=lte.${diaFim}&select=numero_os,tss,dia&order=dia.asc,numero_os.asc,tss.asc`,{headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
       if(!res.ok&&res.status!==206) return null;
       const data=await res.json();
       if(!data?.length)break;
@@ -511,10 +511,14 @@ async function fetchPerfil(tok){
 // navegador); se ela não existe ainda, lê a tabela e soma aqui.
 async function fetchProducao(tok,diaIni,diaFim){
   const H={...authHeaders(tok)};
-  const puxar=async(rota,sel)=>{
+  const puxar=async(rota,sel,ord)=>{
     const out=[];let from=0;const ps=1000;
     while(true){
-      const res=await fetch(SUPABASE_URL+`/rest/v1/${rota}?dia=gte.${diaIni}&dia=lte.${diaFim}&select=${sel}`,{headers:{...H,"Range":from+"-"+(from+ps-1)}});
+      // order é obrigatório junto com Range: sem ele o PostgREST devolve
+      // as páginas em ordem arbitrária, e a mesma consulta repete e omite
+      // linhas entre uma página e outra. Tem de ser uma ordem ÚNICA — se
+      // duas linhas empatam, elas podem trocar de lado no meio da leitura.
+      const res=await fetch(SUPABASE_URL+`/rest/v1/${rota}?dia=gte.${diaIni}&dia=lte.${diaFim}&select=${sel}&order=${ord}`,{headers:{...H,"Range":from+"-"+(from+ps-1)}});
       if(!res.ok&&res.status!==206){const t=await res.text();throw new Error(res.status+" "+t.slice(0,160));}
       const data=await res.json();
       if(!data?.length)break;
@@ -525,10 +529,12 @@ async function fetchProducao(tok,diaIni,diaFim){
     return out;
   };
   try{
-    const v=await puxar("v_producao_detalhe","dia,equipe,tss,tse,atc,qtd,os_distintas");
+    const v=await puxar("v_producao_detalhe","dia,equipe,tss,tse,atc,qtd,os_distintas",
+                        "dia.asc,equipe.asc,tss.asc,tse.asc,atc.asc");
     return {rows:v,agregado:true};
   }catch(e){
-    const t=await puxar("execucao","dia,equipe,tss,tse,atc,numero_os");
+    const t=await puxar("execucao","dia,equipe,tss,tse,atc,numero_os",
+                        "dia.asc,numero_os.asc,tss.asc");
     return {rows:t.map(r=>({...r,qtd:1,os_distintas:1})),agregado:false};
   }
 }
@@ -550,7 +556,10 @@ async function fetchIdg(tok,diaIni,diaFim){
     const out=[];let from=0;const ps=1000;
     for(;;){
       const r=await fetch(SUPABASE_URL+`/rest/v1/${rota}?select=${sel}`+
-        `&dia=gte.${diaIni}&dia=lte.${diaFim}&order=dia.asc,numero_os.asc`,
+        // cod_tss entra na ordenação porque (dia, numero_os) NÃO é único:
+        // uma OS com duas etapas no mesmo dia empata, e linhas empatadas
+        // podem trocar de página no meio da leitura.
+        `&dia=gte.${diaIni}&dia=lte.${diaFim}&order=dia.asc,numero_os.asc,cod_tss.asc`,
         {headers:{...H,"Range":from+"-"+(from+ps-1)}});
       if(!r.ok&&r.status!==206){const t=await r.text();throw new Error(r.status+" "+t.slice(0,160));}
       const d=await r.json();
@@ -649,7 +658,7 @@ async function uploadEmRua(dia, records, H){
 async function fetchEmRua(dia){
   const allRows=[];let from=0;const ps=1000;
   while(true){
-    const res=await fetch(SUPABASE_URL+`/rest/v1/em_rua?dia=eq.${dia}&select=equipe,lider,numero_os,tss,status_os,resultado,causa_resultado,endereco,bairro,municipio`,{headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
+    const res=await fetch(SUPABASE_URL+`/rest/v1/em_rua?dia=eq.${dia}&select=equipe,lider,numero_os,tss,status_os,resultado,causa_resultado,endereco,bairro,municipio&order=equipe.asc,numero_os.asc,tss.asc`,{headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
     if(!res.ok&&res.status!==206) break;
     const data=await res.json();
     if(!data?.length)break;
@@ -891,7 +900,7 @@ function fmtDate(iso){if(!iso)return"—";try{const d=new Date(iso);return d.toL
 async function fetchEntradasDoDia(dia){
   const out=[];let from=0;const ps=1000;
   for(;;){
-    const r=await fetch(SUPABASE_URL+`/rest/v1/os_entrada?origem=neq.inicial&data_insercao=eq.${dia}&select=numero_os,tss,familia,atc,endereco,bairro,origem`,
+    const r=await fetch(SUPABASE_URL+`/rest/v1/os_entrada?origem=neq.inicial&data_insercao=eq.${dia}&select=numero_os,tss,familia,atc,endereco,bairro,origem&order=numero_os.asc,tss.asc`,
       {headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
     if(!r.ok&&r.status!==206) return null;
     const d=await r.json();
@@ -1325,11 +1334,11 @@ function padronizarNota(txt){
 async function fetchTodasNotas(){
   const todas=[];let de=0;const ps=1000;
   while(true){
-    let res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select="+SEL_NOTA+"&order=atualizado_em.desc",
+    let res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select="+SEL_NOTA+"&order=atualizado_em.desc,numero_os.asc,tss.asc",
       {headers:{...HEADERS,"Range":de+"-"+(de+ps-1)}});
     if(!res.ok&&res.status!==206&&SEL_NOTA!==SEL_NOTA_ANTIGO){
       SEL_NOTA=SEL_NOTA_ANTIGO;
-      res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select="+SEL_NOTA+"&order=atualizado_em.desc",
+      res=await fetch(SUPABASE_URL+"/rest/v1/os_nota?select="+SEL_NOTA+"&order=atualizado_em.desc,numero_os.asc,tss.asc",
         {headers:{...HEADERS,"Range":de+"-"+(de+ps-1)}});
     }
     if(!res.ok&&res.status!==206) throw new Error("Erro notas "+res.status);
@@ -5430,6 +5439,10 @@ function IdgView({sess,rawRows}){
   const [fim,setFim]=useState(fmtISO(new Date()));
   const [unidade,setUnidade]=useState("geral");
   const [frenteSel,setFrenteSel]=useState(null);
+  const [aba,setAba]=useState("FORA");          // qual lista aparece ao abrir uma frente
+  const [verComo,setVerComo]=useState(false);   // a explicação fica guardada
+  const [verDivida,setVerDivida]=useState(false);
+  const [verEscondido,setVerEscondido]=useState(false);
   // o espelho é o padrão: é o número que a Sabesp vai cobrar
   const [espelho,setEspelho]=useState(true);
   const [linhas,setLinhas]=useState(null);
@@ -5574,6 +5587,59 @@ function IdgView({sess,rawRows}){
   const corDoIndice=p=>p===null?C.textDim:p>=95?C.green:p>=85?C.amber:C.red;
   const ROTULO={ISAPa:"ISAPa · água",ISAPe:"ISAPe · esgoto",ISAPr:"ISAPr · reposição"};
 
+  /* a lista que abre ao clicar numa frente */
+  const listaFrente=useMemo(()=>{
+    if(!idg||!frenteSel)return null;
+    const g=idg.linhas.filter(r=>r.indicador===frenteSel);
+    const sep=v=>g.filter(r=>v==="EXP"?(r.veredito!=="DENTRO"&&r.veredito!=="FORA"):r.veredito===v)
+                  .sort((a,b)=>(Number(b.tempo_atendimento)-Number(b.prazo))-(Number(a.tempo_atendimento)-Number(a.prazo)));
+    return {FORA:sep("FORA"),DENTRO:sep("DENTRO"),EXP:sep("EXP")};
+  },[idg,frenteSel]);
+
+  /* ── a árvore, no formato do painel da Sabesp ───────────────
+     IDA = ISAPa, IDE = ISAPe, IDR = ISAPr: no nosso contrato os IQES e o
+     ICERP não se aplicam (aparecem com X no painel deles), então cada ID
+     é o seu ISAP. Média ID é a média simples dos três, e o IDG é ela —
+     o IRA fica de fora enquanto não entrar na conta.                    */
+  const LIN="#334155";
+  const pct=v=>v===null||v===undefined?"—":v.toFixed(2)+"%";
+  const ID_DE={ISAPa:"IDA",ISAPe:"IDE",ISAPr:"IDR"};
+  const SEM_USO={ISAPa:["IQESa"],ISAPe:["IQESe"],ISAPr:["IQESr","ICERP"]};
+
+  const No=({cod,valor,sub,cor,ativo,onClick,w=152,alt})=>
+    <div onClick={onClick} title={onClick?"ver os serviços":undefined}
+      style={{width:w,borderRadius:8,overflow:"hidden",background:C.card,transition:"box-shadow .15s,border-color .15s",
+        border:`1px solid ${ativo?C.accent:C.border}`,cursor:onClick?"pointer":"default",
+        boxShadow:ativo?`0 0 0 3px ${C.accent}22`:"none"}}>
+      <div style={{background:ativo?C.accent:C.headerBg,color:ativo?"#fff":C.textMuted,
+        fontSize:11,fontWeight:800,letterSpacing:.4,padding:"4px 0",textAlign:"center"}}>{cod}</div>
+      <div style={{padding:alt?"7px 6px":"10px 6px",textAlign:"center"}}>
+        <div style={{fontSize:alt?19:26,fontWeight:800,lineHeight:1.1,color:cor}}>{valor}</div>
+        {sub&&<div style={{fontSize:10.5,color:C.textDim,marginTop:3,lineHeight:1.3}}>{sub}</div>}
+      </div>
+    </div>;
+
+  const XNo=({cod})=>
+    <div title="não se aplica neste contrato"
+      style={{width:62,borderRadius:8,overflow:"hidden",border:`1px solid ${C.border}`,background:C.cardAlt,opacity:.55}}>
+      <div style={{background:C.headerBg,color:C.textDim,fontSize:9.5,fontWeight:700,padding:"4px 0",textAlign:"center"}}>{cod}</div>
+      <div style={{padding:"9px 0",textAlign:"center",fontSize:15,color:C.red,fontWeight:800}}>✕</div>
+    </div>;
+
+  const Tronco=({h=16})=><div style={{width:2,height:h,background:LIN,margin:"0 auto"}}/>;
+  const Garfo=({h=18})=>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",height:h}}>
+      {[0,1,2].map(i=>
+        <div key={i} style={{position:"relative"}}>
+          <div style={{position:"absolute",top:0,left:i===0?"50%":0,right:i===2?"50%":0,height:2,background:LIN}}/>
+          <div style={{position:"absolute",top:0,height:h,left:"calc(50% - 1px)",width:2,background:LIN}}/>
+        </div>)}
+    </div>;
+  const Col3=({children})=><div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)"}}>{children}</div>;
+
+  const VER={FORA:{rot:"Fora do prazo",cor:C.red},DENTRO:{rot:"Dentro do prazo",cor:C.green},
+             EXP:{rot:"Expurgado",cor:C.textMuted}};
+
   return <div style={{animation:"fadeIn 0.35s ease"}}>
     <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14,flexWrap:"wrap"}}>
       <span style={{fontSize:12,padding:"2px 10px",borderRadius:8,background:"rgba(139,92,246,0.1)",color:"#8b5cf6",border:"1px solid rgba(139,92,246,0.25)",fontWeight:700}}>🔒 restrito</span>
@@ -5595,7 +5661,7 @@ function IdgView({sess,rawRows}){
         {UNITS.map(u=><button key={u.id} onClick={()=>setUnidade(u.id)} style={btn(unidade===u.id)}>{u.label}</button>)}
         <span style={{width:1,height:18,background:C.border,margin:"0 2px"}}/>
         <button onClick={()=>setEspelho(true)} disabled={semEspelho} style={{...btn(espelho&&!semEspelho),opacity:semEspelho?0.4:1,cursor:semEspelho?"not-allowed":"pointer"}}
-          title={semEspelho?"falta rodar o sql/isap_espelho.sql":"Conta como a Sabesp conta — é o número que vai ser cobrado"}>Espelho da Sabesp</button>
+          title="Conta como a Sabesp conta — é o número que vai ser cobrado">Espelho da Sabesp</button>
         <button onClick={()=>setEspelho(false)} style={btn(!espelho||semEspelho)}
           title="Conta tudo o que saiu da carteira, inclusive o que a Sabesp não conta">Nossa conta</button>
         {semEspelho&&<span style={{fontSize:11,color:C.amber}}>falta rodar o <code>sql/isap_espelho.sql</code></span>}
@@ -5610,113 +5676,150 @@ function IdgView({sess,rawRows}){
     {loading&&<div style={{textAlign:"center",padding:"40px 0",color:C.textDim,fontSize:13}}>Calculando o IDG…</div>}
 
     {!loading&&idg&&<>
-      {/* ── o número ── */}
-      <div style={{display:"flex",gap:12,marginBottom:14,flexWrap:"wrap"}}>
-        <div style={{flex:"1 1 200px",minWidth:190,background:C.card,borderRadius:RAIO,padding:"18px 20px",
-          border:`1px solid ${C.border}`,position:"relative",overflow:"hidden"}}>
-          <span style={{position:"absolute",top:0,left:0,width:14,height:1,background:corDoIndice(idg.media),opacity:.85}}/>
-          <span style={{position:"absolute",top:0,left:0,width:1,height:14,background:corDoIndice(idg.media),opacity:.85}}/>
-          <div style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:0.6,fontWeight:700}}>IDG</div>
-          <div style={{fontSize:38,fontWeight:800,lineHeight:1.1,color:corDoIndice(idg.media),
-            textShadow:idg.media!==null&&idg.media<85?`0 0 18px ${C.red}55`:"none"}}>
-            {idg.media===null?"—":idg.media.toFixed(2)+"%"}
+      {/* ── a árvore ── */}
+      <div style={{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,padding:"22px 16px 18px",marginBottom:14,overflowX:"auto"}}>
+        <div style={{minWidth:580,maxWidth:760,margin:"0 auto"}}>
+          <div style={{display:"flex",justifyContent:"center"}}>
+            <No cod="IDG" valor={pct(idg.media)} cor={corDoIndice(idg.media)} w={200}
+                sub={espelho?"espelho da Sabesp":"nossa conta"}/>
           </div>
-          <div style={{fontSize:11,color:C.textMuted,marginTop:2}}>
-            média simples das três frentes{!idg.completo&&idg.media!==null?" com serviço no período":""}
+          <Tronco h={16}/>
+          <div style={{display:"flex",justifyContent:"center"}}>
+            <No cod="Média ID" valor={pct(idg.media)} cor={C.textMuted} w={168} alt/>
+          </div>
+          <Tronco h={14}/>
+          <Garfo/>
+          <Col3>{idg.frentes.map(f=>
+            <div key={f.id} style={{display:"flex",justifyContent:"center"}}>
+              <No cod={ID_DE[f.id]} valor={pct(f.pct)} cor={corDoIndice(f.pct)} w={120} alt/>
+            </div>)}</Col3>
+          <Col3>{idg.frentes.map(f=><div key={f.id}><Tronco h={16}/></div>)}</Col3>
+          <Col3>{idg.frentes.map(f=>
+            <div key={f.id} style={{display:"flex",justifyContent:"center",gap:6,alignItems:"flex-start"}}>
+              <No cod={f.id} valor={pct(f.pct)} cor={corDoIndice(f.pct)} w={122} alt
+                  sub={`${f.dentro} dentro · ${f.fora} fora`}
+                  ativo={frenteSel===f.id}
+                  onClick={()=>{setFrenteSel(frenteSel===f.id?null:f.id);setAba("FORA");}}/>
+              {SEM_USO[f.id].map(x=><XNo key={x} cod={x}/>)}
+            </div>)}</Col3>
+          <div style={{textAlign:"center",fontSize:11,color:C.textDim,marginTop:14}}>
+            clique em ISAPa, ISAPe ou ISAPr para ver os serviços
           </div>
         </div>
-        {idg.frentes.map(f=>{
-          const on=frenteSel===f.id;
-          return <div key={f.id} onClick={()=>setFrenteSel(on?null:f.id)}
-            style={{flex:"1 1 170px",minWidth:160,background:on?C.accentBg:C.card,borderRadius:RAIO,padding:"14px 16px",
-              border:`1px solid ${on?C.accent:C.border}`,cursor:"pointer",position:"relative",overflow:"hidden"}}>
-            <span style={{position:"absolute",top:0,left:0,width:11,height:1,background:corDoIndice(f.pct),opacity:.8}}/>
-            <span style={{position:"absolute",top:0,left:0,width:1,height:11,background:corDoIndice(f.pct),opacity:.8}}/>
-            <div style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,fontWeight:700}}>{ROTULO[f.id]}</div>
-            <div style={{fontSize:26,fontWeight:800,lineHeight:1.2,color:corDoIndice(f.pct)}}>
-              {f.pct===null?"—":f.pct.toFixed(2)+"%"}
-            </div>
-            <div style={{fontSize:11,color:C.textMuted,marginTop:2}}>
-              {f.dentro} dentro · {f.fora} fora{f.exp?` · ${f.exp} expurgo`:""}
-            </div>
-          </div>;
-        })}
       </div>
 
-      {/* ── a dívida da carteira: o que a planilha deles não mostra ── */}
-      {divida&&<div style={{background:C.card,borderRadius:12,border:`1px solid ${divida.total?C.redBorder:C.border}`,
-        padding:"14px 18px",marginBottom:14}}>
-        <div style={{display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap",marginBottom:6}}>
-          <span style={{fontSize:13,fontWeight:800,color:C.text}}>Dívida da carteira</span>
-          <span style={{fontSize:26,fontWeight:800,color:divida.total?C.red:C.green,lineHeight:1}}>{divida.total}</span>
-          <span style={{fontSize:12,color:C.textMuted}}>
-            serviços abertos que JÁ passaram do prazo do ISAP
-          </span>
-        </div>
-        <div style={{fontSize:12,color:C.textMuted,lineHeight:1.55,marginBottom:10}}>
-          Cada um é um “fora do prazo” contratado: vai entrar no índice no dia em que for baixado,
-          faça o que fizer. Esse número não existe no relatório da Sabesp, porque lá só entra o que já fechou —
-          é ele que dá para enxergar antes.
-        </div>
-        <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
-          {["ISAPa","ISAPe","ISAPr"].map(k=>divida.conta[k]&&
-            <div key={k} style={{fontSize:12,color:C.textMuted}}>
-              <b style={{color:divida.conta[k].venc?C.red:C.textMuted,fontSize:15}}>{divida.conta[k].venc}</b>
-              {" "}vencidos de {divida.conta[k].abertos} abertos · <span style={{color:C.textDim}}>{ROTULO[k]}</span>
-            </div>)}
-        </div>
-        {divida.vencidos.length>0&&<div style={{marginTop:12,borderTop:`1px solid ${C.border}`,paddingTop:10}}>
-          <div style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,fontWeight:700,marginBottom:6}}>
-            os 10 mais atrasados
+      {/* ── a lista da frente escolhida ── */}
+      {frenteSel&&listaFrente&&(()=>{
+        const lista=listaFrente[aba]||[];
+        const f=idg.frentes.find(x=>x.id===frenteSel);
+        return <div style={{background:C.card,borderRadius:12,border:`1px solid ${C.accent}55`,marginBottom:14,overflow:"hidden"}}>
+          <div style={{padding:"10px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+            <span style={{fontSize:13,fontWeight:800,color:C.text}}>{ROTULO[frenteSel]}</span>
+            <span style={{fontSize:12,color:corDoIndice(f?.pct??null),fontWeight:800}}>{pct(f?.pct??null)}</span>
+            <span style={{flex:1}}/>
+            {["FORA","DENTRO","EXP"].map(k=>{
+              const on=aba===k,n=listaFrente[k].length;
+              return <button key={k} onClick={()=>setAba(k)} disabled={!n}
+                style={{padding:"4px 11px",borderRadius:7,fontSize:11.5,fontWeight:700,cursor:n?"pointer":"default",
+                  border:`1px solid ${on?VER[k].cor:C.border}`,background:on?`${VER[k].cor}18`:C.cardAlt,
+                  color:on?VER[k].cor:C.textDim,opacity:n?1:.4}}>{VER[k].rot} · {n}</button>;
+            })}
+            <button onClick={()=>setFrenteSel(null)} style={{padding:"4px 9px",borderRadius:7,fontSize:12,fontWeight:700,
+              cursor:"pointer",border:`1px solid ${C.border}`,background:C.cardAlt,color:C.textDim}}>fechar</button>
           </div>
-          {divida.vencidos.slice(0,10).map((v,i)=>
-            <div key={i} style={{display:"flex",gap:10,alignItems:"baseline",padding:"4px 0",
-              borderBottom:i<9?`1px solid ${C.border}`:"none",fontSize:12}}>
-              <span style={{color:C.red,fontWeight:800,minWidth:70}}>+{v.excesso}{v.unidade}</span>
-              <span style={{color:C.text,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.tss}</span>
-              <span style={{color:C.textDim,fontSize:11}}>{v.bairro||""}</span>
-              <span style={{color:C.textDim,fontSize:11,minWidth:90,textAlign:"right"}}>{v.os}</span>
-            </div>)}
-        </div>}
-        {divida.semRegua>0&&<div style={{marginTop:8,fontSize:11,color:C.textDim}}>
-          {divida.semRegua} serviços da carteira não estão na régua do ISAP — ou não entram no índice,
-          ou nunca apareceram numa planilha deles. Ficam de fora da conta.
-        </div>}
-      </div>}
+          <div style={{maxHeight:460,overflowY:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+              <thead><tr style={{position:"sticky",top:0,background:C.headerBg,zIndex:1}}>
+                {["Dia","OS","Serviço","Como encerrou","Tempo","Prazo","Bairro"].map((h,i)=>
+                  <th key={h} style={{padding:"7px 10px",textAlign:i>=4&&i<=5?"right":"left",color:C.textDim,
+                    fontSize:10.5,textTransform:"uppercase",letterSpacing:0.4,fontWeight:700,
+                    borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{h}</th>)}
+              </tr></thead>
+              <tbody>
+                {lista.slice(0,400).map((r,i)=>{
+                  const u=r.tipo_prazo==="DC"?"d":"h";
+                  const estourou=Number(r.tempo_atendimento)>Number(r.prazo);
+                  return <tr key={r.numero_os+"-"+r.cod_tss+"-"+i} style={{borderBottom:`1px solid ${C.border}`}}>
+                    <td style={{padding:"6px 10px",color:C.textDim,whiteSpace:"nowrap"}}>{String(r.dia||"").slice(8,10)}/{String(r.dia||"").slice(5,7)}</td>
+                    <td style={{padding:"6px 10px",color:C.textMuted,whiteSpace:"nowrap",fontVariantNumeric:"tabular-nums"}}>{r.numero_os}</td>
+                    <td style={{padding:"6px 10px",color:C.text,maxWidth:240,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={r.tss}>{r.tss}</td>
+                    <td style={{padding:"6px 10px",color:C.textMuted,maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={r.resultado}>{r.resultado||"—"}</td>
+                    <td style={{padding:"6px 10px",textAlign:"right",fontWeight:800,whiteSpace:"nowrap",
+                      color:aba==="EXP"?C.textMuted:estourou?C.red:C.green}}>{r.tempo_atendimento}{u}</td>
+                    <td style={{padding:"6px 10px",textAlign:"right",color:C.textDim,whiteSpace:"nowrap"}}>{r.prazo}{u}</td>
+                    <td style={{padding:"6px 10px",color:C.textDim,maxWidth:140,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.bairro||""}</td>
+                  </tr>;
+                })}
+              </tbody>
+            </table>
+            {!lista.length&&<div style={{padding:"26px",textAlign:"center",color:C.textDim,fontSize:12}}>nenhum serviço aqui</div>}
+            {lista.length>400&&<div style={{padding:"8px 16px",fontSize:11,color:C.textDim,textAlign:"center"}}>
+              mostrando 400 de {lista.length}
+            </div>}
+          </div>
+        </div>;
+      })()}
 
-      {/* ── o que o espelho esconde ── */}
-      {espelho&&escondido&&<div style={{background:C.card,borderRadius:12,border:`1px solid ${C.amber}44`,
-        padding:"14px 18px",marginBottom:14}}>
-        <div style={{display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap",marginBottom:6}}>
-          <span style={{fontSize:13,fontWeight:800,color:C.text}}>O que o espelho esconde</span>
-          <span style={{fontSize:26,fontWeight:800,color:C.amber,lineHeight:1}}>{escondido.casos}</span>
-          <span style={{fontSize:12,color:C.textMuted}}>
-            vazamentos resolvidos com troca de ramal — <b style={{color:C.amber}}>{escondido.fora}</b> deles fora do prazo
-          </span>
-        </div>
-        <div style={{fontSize:12,color:C.textMuted,lineHeight:1.55,marginBottom:10}}>
-          A Sabesp não conta a etapa do vazamento nesses casos: 45 de 45 conferidos em outubro.
-          E as reposições que vêm depois nascem com o relógio zerado no instante da baixa,
-          então a espera do cliente some do índice. Estes serviços estão fora da conta acima —
-          o botão <b>Nossa conta</b> traz eles de volta.
-        </div>
-        <div style={{display:"flex",gap:18,flexWrap:"wrap",marginBottom:10}}>
-          <div style={{fontSize:12,color:C.textMuted}}><b style={{color:C.text,fontSize:15}}>{escondido.media}h</b> de espera média <span style={{color:C.textDim}}>(prazo: 24h)</span></div>
-          <div style={{fontSize:12,color:C.textMuted}}><b style={{color:C.red,fontSize:15}}>{escondido.pior}h</b> a pior <span style={{color:C.textDim}}>({Math.round(escondido.pior/24)} dias)</span></div>
-          <div style={{fontSize:12,color:C.textMuted}}><b style={{color:C.text,fontSize:15}}>{Math.round(escondido.horas/24)}</b> dias de espera somados</div>
-        </div>
-        <div style={{borderTop:`1px solid ${C.border}`,paddingTop:10}}>
-          <div style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,fontWeight:700,marginBottom:6}}>as maiores esperas</div>
-          {escondido.lista.slice(0,6).map((v,i)=>
-            <div key={i} style={{display:"flex",gap:10,alignItems:"baseline",padding:"4px 0",
-              borderBottom:i<Math.min(5,escondido.lista.length-1)?`1px solid ${C.border}`:"none",fontSize:12}}>
-              <span style={{color:C.amber,fontWeight:800,minWidth:60}}>{v.tempo_atendimento}h</span>
-              <span style={{color:C.text,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.tss}</span>
-              <span style={{color:C.textDim,fontSize:11}}>{v.bairro||""}</span>
-              <span style={{color:C.textDim,fontSize:11,minWidth:90,textAlign:"right"}}>{v.numero_os}</span>
-            </div>)}
-        </div>
-      </div>}
+      {/* ── os dois números que a planilha deles não tem ── */}
+      <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:14}}>
+        {divida&&<div onClick={()=>setVerDivida(!verDivida)}
+          style={{flex:"1 1 260px",minWidth:250,background:C.card,borderRadius:12,cursor:"pointer",
+            border:`1px solid ${divida.total?C.redBorder:C.border}`,padding:"12px 16px"}}>
+          <div style={{display:"flex",alignItems:"baseline",gap:9}}>
+            <span style={{fontSize:24,fontWeight:800,color:divida.total?C.red:C.green,lineHeight:1}}>{divida.total}</span>
+            <span style={{fontSize:12,fontWeight:700,color:C.text}}>na dívida da carteira</span>
+            <span style={{flex:1}}/>
+            <span style={{fontSize:14,color:C.textDim}}>{verDivida?"▾":"▸"}</span>
+          </div>
+          <div style={{fontSize:11,color:C.textDim,marginTop:4}}>abertos que já passaram do prazo — perda certa quando baixarem</div>
+          {verDivida&&<div style={{marginTop:10,borderTop:`1px solid ${C.border}`,paddingTop:9}}>
+            <div style={{display:"flex",gap:14,flexWrap:"wrap",marginBottom:8}}>
+              {["ISAPa","ISAPe","ISAPr"].map(k=>divida.conta[k]&&
+                <span key={k} style={{fontSize:11.5,color:C.textMuted}}>
+                  <b style={{color:divida.conta[k].venc?C.red:C.textMuted,fontSize:14}}>{divida.conta[k].venc}</b>
+                  {" de "}{divida.conta[k].abertos} · {k}
+                </span>)}
+            </div>
+            {divida.vencidos.slice(0,8).map((v,i)=>
+              <div key={i} style={{display:"flex",gap:8,alignItems:"baseline",padding:"3px 0",fontSize:11.5}}>
+                <span style={{color:C.red,fontWeight:800,minWidth:52}}>+{v.excesso}{v.unidade}</span>
+                <span style={{color:C.textMuted,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.tss}</span>
+                <span style={{color:C.textDim,fontSize:10.5}}>{v.os}</span>
+              </div>)}
+          </div>}
+        </div>}
+
+        {espelho&&escondido&&<div onClick={()=>setVerEscondido(!verEscondido)}
+          style={{flex:"1 1 260px",minWidth:250,background:C.card,borderRadius:12,cursor:"pointer",
+            border:`1px solid ${C.amber}44`,padding:"12px 16px"}}>
+          <div style={{display:"flex",alignItems:"baseline",gap:9}}>
+            <span style={{fontSize:24,fontWeight:800,color:C.amber,lineHeight:1}}>{escondido.casos}</span>
+            <span style={{fontSize:12,fontWeight:700,color:C.text}}>que o espelho esconde</span>
+            <span style={{flex:1}}/>
+            <span style={{fontSize:14,color:C.textDim}}>{verEscondido?"▾":"▸"}</span>
+          </div>
+          <div style={{fontSize:11,color:C.textDim,marginTop:4}}>
+            vazamentos resolvidos com troca de ramal · {escondido.fora} fora do prazo · {Math.round(escondido.horas/24)} dias de espera
+          </div>
+          {verEscondido&&<div style={{marginTop:10,borderTop:`1px solid ${C.border}`,paddingTop:9}}>
+            {escondido.lista.slice(0,8).map((v,i)=>
+              <div key={i} style={{display:"flex",gap:8,alignItems:"baseline",padding:"3px 0",fontSize:11.5}}>
+                <span style={{color:C.amber,fontWeight:800,minWidth:46}}>{v.tempo_atendimento}h</span>
+                <span style={{color:C.textMuted,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.tss}</span>
+                <span style={{color:C.textDim,fontSize:10.5}}>{v.numero_os}</span>
+              </div>)}
+          </div>}
+        </div>}
+
+        {quaseDeu>0&&<div style={{flex:"1 1 200px",minWidth:190,background:C.card,borderRadius:12,
+          border:`1px solid ${C.amber}33`,padding:"12px 16px"}}>
+          <div style={{display:"flex",alignItems:"baseline",gap:9}}>
+            <span style={{fontSize:24,fontWeight:800,color:C.amber,lineHeight:1}}>{quaseDeu}</span>
+            <span style={{fontSize:12,fontWeight:700,color:C.text}}>quase deram</span>
+          </div>
+          <div style={{fontSize:11,color:C.textDim,marginTop:4}}>estouraram por uma unidade só — um dia, uma hora</div>
+        </div>}
+      </div>
 
       {/* ── onde está sendo perdido ── */}
       {ofensores&&(ofensores.porMotivo.length>0||ofensores.porTss.length>0)&&
@@ -5724,7 +5827,7 @@ function IdgView({sess,rawRows}){
         {[["Por que a OS encerrou",ofensores.porMotivo],["Por serviço",ofensores.porTss]].map(([titulo,lista])=>
           <div key={titulo} style={{flex:"1 1 340px",minWidth:300,background:C.card,borderRadius:12,border:`1px solid ${C.border}`,overflow:"hidden"}}>
             <div style={{padding:"10px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <span style={{fontSize:12,fontWeight:800,color:C.text}}>{titulo}</span>
+              <span style={{fontSize:12,fontWeight:800,color:C.text}}>{titulo}{frenteSel?` · ${frenteSel}`:""}</span>
               <span style={{fontSize:11,color:C.textDim}}>fora / total</span>
             </div>
             {lista.map((o,i)=>
@@ -5739,28 +5842,28 @@ function IdgView({sess,rawRows}){
           </div>)}
       </div>}
 
-      {quaseDeu>0&&<div style={{background:C.amberBg,border:`1px solid ${C.amber}44`,borderRadius:10,
-        padding:"10px 16px",marginBottom:14,fontSize:12,color:C.textMuted,lineHeight:1.55}}>
-        <b style={{color:C.amber,fontSize:14}}>{quaseDeu}</b> dos serviços fora do prazo passaram por
-        {" "}<b>uma unidade só</b> — um dia, ou uma hora. É a fila que mais responde a ação.
-      </div>}
-
-      {/* ── a tarja honesta ── */}
-      <div style={{background:C.cardAlt,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 16px",
-        fontSize:11.5,color:C.textDim,lineHeight:1.6}}>
-        <b style={{color:C.textMuted}}>Como ler este número.</b> A conta é a da Sabesp, decifrada da planilha ISAP:
-        tempo de atendimento = fim da execução menos a data de competência, truncado no dia (DC) ou na hora (HS),
-        e fora é tempo <i>maior</i> que o prazo. Conferido contra 1.259 serviços deles: 1.256 vereditos iguais.
-        <br/>
-        <b style={{color:C.textMuted}}>Espelho.</b> Com o botão em <i>Espelho da Sabesp</i>, os vazamentos resolvidos com
-        troca de ramal ficam fora da conta, porque é assim que eles contam — é o número que vai ser cobrado.
-        Em <i>Nossa conta</i> eles voltam, e o ISAPa cai cerca de 1,2 ponto. A regra está na tabela
-        <code> isap_excecao</code> e desliga com um UPDATE, sem mexer em código.
-        <br/>
-        <b style={{color:C.textMuted}}>O que ainda falta.</b> Dos três expurgos, calculamos só o de tempo de execução
-        (início igual ao fim). Faltam o de atraso de transmissão, que precisa da <i>hora</i> da Data Inserção —
-        hoje gravada só como data —, e o de suspensão, que é ato administrativo deles. Em outubro os dois valeram
-        1,19 ponto. Ou seja: <b style={{color:C.textMuted}}>este número tende a ser menor que o oficial</b>, não maior.
+      {/* ── a explicação, guardada ── */}
+      <div style={{background:C.cardAlt,border:`1px solid ${C.border}`,borderRadius:10,overflow:"hidden"}}>
+        <div onClick={()=>setVerComo(!verComo)} style={{padding:"9px 16px",cursor:"pointer",display:"flex",
+          alignItems:"center",gap:8,fontSize:11.5,color:C.textDim,fontWeight:700}}>
+          <span>{verComo?"▾":"▸"}</span> como este número é calculado
+        </div>
+        {verComo&&<div style={{padding:"0 16px 14px",fontSize:11.5,color:C.textDim,lineHeight:1.65}}>
+          <b style={{color:C.textMuted}}>A conta.</b> Tempo de atendimento = fim da execução menos a data de competência,
+          truncado no dia (DC) ou na hora (HS); fora é tempo <i>maior</i> que o prazo. Conferido linha a linha contra a
+          planilha deles de 01 a 07/10: 1.808 vereditos iguais em 1.812 — 99,78%.
+          <br/>
+          <b style={{color:C.textMuted}}>Espelho.</b> Em <i>Espelho da Sabesp</i>, os vazamentos resolvidos com troca de ramal
+          saem da conta, porque é assim que eles contam. Em <i>Nossa conta</i> eles voltam e o ISAPa cai cerca de 1,2 ponto.
+          A regra está na tabela <code>isap_excecao</code> e desliga com um UPDATE.
+          <br/>
+          <b style={{color:C.textMuted}}>O que ainda falta.</b> Dos três expurgos calculamos só o de tempo de execução.
+          Faltam o de transmissão (precisa da <i>hora</i> da Data Inserção) e o de suspensão, que é ato deles — juntos
+          valeram 1,19 ponto em outubro. Este número tende a ser <b style={{color:C.textMuted}}>menor</b> que o oficial, não maior.
+          <br/>
+          <b style={{color:C.textMuted}}>Diferença conhecida.</b> 103 OS que executamos não aparecem na planilha da Sabesp
+          (01 a 07/10, de 1.963). Tirando elas e a troca de ramal, toda frente fecha dentro de 0,3 ponto.
+        </div>}
       </div>
     </>}
   </div>;
@@ -6110,7 +6213,7 @@ async function fetchDesfechoTipos(){
 async function fetchDesfechos(de,ate){
   const out=[];let from=0;const ps=1000;
   for(;;){
-    const r=await fetch(SUPABASE_URL+`/rest/v1/os_desfecho?select=numero_os,tss,dia,desfecho,equipe&dia=gte.${de}&dia=lte.${ate}&order=dia.asc`,
+    const r=await fetch(SUPABASE_URL+`/rest/v1/os_desfecho?select=numero_os,tss,dia,desfecho,equipe&dia=gte.${de}&dia=lte.${ate}&order=dia.asc,numero_os.asc,tss.asc`,
       {headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
     if(!r.ok&&r.status!==206) return null;
     const d=await r.json();

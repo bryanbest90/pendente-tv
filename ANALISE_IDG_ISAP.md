@@ -374,3 +374,143 @@ A suspensão fica de fora de vez: é ato administrativo, 2 casos em 2.089 (0,1%)
 3. o leitor novo no `robo-executados/relatorios.js` — cabeçalhos diferentes, leitor novo e não ajuste
 4. `os_entrada.data_insercao` de `DATE` para `TIMESTAMPTZ`, e o robô do pendente guardando a hora
 5. a aba IDG no app
+
+---
+
+## 9. A conferência OS por OS — 01 a 07/10/2026
+
+Feita como o Bryan propôs: pegar a planilha da Sabesp, procurar cada OS no
+nosso banco, aplicar as nossas regras e ver se bate. A janela é 01 a 07/10
+porque só esses dias têm o relatório novo carregado (ver a seção 10).
+
+### O que a conferência separa
+
+As duas perguntas estavam embaralhadas nas comparações anteriores, e é por
+isso que o IDG médio parecia bater enquanto água e esgoto não batiam:
+
+1. **A regra está certa?** — nas linhas que existem nas duas bases, o
+   veredito que calculamos é o mesmo que o deles?
+2. **O universo é o mesmo?** — as duas bases têm as mesmas linhas?
+
+A resposta é: a regra está certa, o universo não é o mesmo, e **toda** a
+diferença de índice vem da segunda.
+
+### Pergunta 1 — a regra
+
+| Campo | Igual |
+|---|---|
+| data de competência | 1.812 de 1.812 — 100% |
+| frente (ISAPa/e/r) | 1.812 de 1.812 — 100% |
+| prazo + tipo de prazo | 1.811 de 1.812 |
+| fim da execução | 1.782 de 1.812 — 98,34% |
+| tempo de atendimento | 1.789 de 1.812 |
+| **veredito dentro/fora/expurgo** | **1.808 de 1.812 — 99,78%** |
+
+4 discordâncias: 2 em ISAPa (nós FORA, eles DENTRO), 1 em ISAPe (nós
+DENTRO, eles FORA), 1 em ISAPr (nós FORA, eles expurgaram).
+
+E a prova de que a única linha deles que não achamos não muda nada: o
+índice calculado com o veredito **deles** nas 1.812 linhas em comum é
+idêntico ao da planilha inteira — 84,72 / 85,17 / 96,18.
+
+### Pergunta 2 — o universo
+
+Deles que achamos: 1.812 de 1.813 (99,94%). Nossos que eles têm: 1.812 de
+1.963 — **sobram 151 linhas nossas**.
+
+| Grupo | Linhas | O que é |
+|---|---|---|
+| 1 | 28 | Troca de ramal — a regra do espelho. **23 das 28 OS estão na planilha deles, só sem a etapa do vazamento**: a regra se confirma de novo. Todas ISAPa, 20 de 28 FORA. |
+| 2 | 5 | A mesma etapa aparece na planilha, em outra data |
+| 3 | 15 | A OS está na planilha com outro serviço, mas não esta etapa |
+| 4 | **103** | **A OS não existe em lugar nenhum na planilha deles** |
+
+### O índice, nas quatro leituras
+
+| | ISAPa | ISAPe | ISAPr | IDG |
+|---|---|---|---|---|
+| SABESP | 84,72 | 85,17 | 96,18 | **88,69** |
+| nosso, só o universo deles | 84,55 | 85,59 | 95,82 | 88,65 |
+| nosso, espelho de hoje (sem troca de ramal) | 84,04 | 86,19 | 95,53 | 88,59 |
+| nosso, espelho **e** sem as 103 | 84,57 | 85,06 | 95,91 | 88,51 |
+| nosso, tudo (a conta honesta) | 82,89 | 86,19 | 95,53 | 88,21 |
+
+Tirando a troca de ramal e as 103, **toda frente fica dentro de 0,3 pp** —
+água −0,15, esgoto −0,11, reposição −0,27. É aí que a conta fecha.
+
+E é por isso que o IDG médio engana: as 103 puxam o esgoto para cima
+(+1,13 pp) e a água para baixo ao mesmo tempo, e a média esconde as duas.
+**Nunca validar por IDG; validar por frente.**
+
+### Uma hipótese que o teste derrubou
+
+Parecia óbvio que a Sabesp não contasse no ISAP os serviços "matados" sem
+execução — TRATA-SE DE OUTRO SERVIÇO, DUPLICIDADE, IMÓVEL FECHADO. **Ela
+conta.** Das nossas 732 linhas de não executado, 660 estão na planilha
+deles — 90,2%, praticamente a mesma taxa dos executados (93,6%).
+
+| Resultado | Nossas | Na planilha deles |
+|---|---|---|
+| IMÓVEL FECHADO, ORDEM ENCERRADA | 233 | 218 |
+| TRATA-SE DE OUTRO SERVIÇO | 160 | 138 |
+| DUPLICIDADE | 117 | 107 |
+| NADA CONSTA NO LOCAL | 36 | 33 |
+
+Tirar os não executados do espelho daria IDG 91,00 em vez de 88,59. Seria
+um número falso, e bonito — o pior tipo. **Não fazer.**
+
+### As 103 — o item aberto
+
+Não é atraso de processamento deles: a taxa de sobra é plana nos sete dias
+(5,1% a 9,6%), e a planilha é de 13/10, muito depois. Não é uma equipe: as
+103 se espalham por mais de vinte, a maior com 8. Não é um serviço:
+TRANSFORMAÇÃO LIG NOVA (8), NIVELAR POÇO (8), DESOBSTRUIR RETORNO (8).
+
+83 delas estão DENTRO do prazo, 18 FORA. Ou seja, **incluí-las melhora o
+nosso número em esgoto e piora em água** — não há viés a nosso favor, o que
+reforça que é escopo e não erro de lado nenhum.
+
+Detalhe linha a linha: `scratchpad/isap/sobram_01a07out.csv`.
+
+É isso que vale levar à Sabesp junto com a pergunta da troca de ramal.
+
+---
+
+## 10. Dois defeitos achados na conferência
+
+### a) Paginação sem `order` — corrigido
+
+O PostgREST, quando se pede `Range`, devolve as páginas em ordem
+**arbitrária** se a consulta não tem `order`. A mesma consulta repetia e
+omitia linhas: medi 512 e depois 513 linhas em 05/10 na mesma chamada.
+
+Nove consultas paginadas do app estavam assim — seis sem `order` nenhum
+(`fetchDiarioOS`, `fetchEntradaDesde`, `fetchExecucao`, `fetchProducao`,
+`fetchEmRua`, `fetchEntradasDoDia`) e três com `order` **não único**
+(`pendente_historico`, `os_nota`, `os_desfecho`), onde linhas empatadas
+podem trocar de página no meio da leitura. A `fetchIdg` tinha
+`dia,numero_os`, que empata quando uma OS tem duas etapas no mesmo dia.
+
+Todas passaram a ter uma ordenação única. As que varrem faixa de data
+(`fetchExecucao`, `fetchProducao`, `fetchEntradaDesde`) passam de mil
+linhas com folga, então essas estavam errando de verdade.
+
+**Regra: `Range` sem `order` único é bug, sempre.**
+
+### b) O relatório novo só trouxe sete dias — aberto
+
+A corrida de 13/10 15:55 gravou **2.682 linhas, 01 a 07/10 e nada mais**,
+com 07/10 completo (execuções das 4h às 21h). Não foi corte no meio do dia.
+
+Os dias 08 a 13/10 na `execucao` são do robô horário antigo: importados
+14/10 07:16, com `status_os` nulo porque o robô antigo não conhece as
+colunas novas. A `v_execucao_final` exige `status_os = 'Fechada'`, então
+**esses seis dias não chegam na aba IDG**.
+
+Não é o robô antigo atropelando o novo: a forma das linhas é a do antigo
+(240/205/133/103/99 por dia, só executados) contra 410 a 512 nos dias que
+o novo trouxe. O novo simplesmente não cobriu 08 a 13.
+
+A causa tem de ser achada no log do robô ou no arquivo que ele baixou — as
+datas que ele escreveu em `DATAINIZIOESITO`/`DATAFINEESITO`, e quantas
+linhas tinha o .xls. Enquanto isso, a aba IDG só é confiável de 01 a 07/10.

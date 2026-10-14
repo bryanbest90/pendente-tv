@@ -57,3 +57,29 @@ foto diária e no histórico, que é o que alimenta o gráfico.
 - **A aba IDG é só do Bryan** (`perfis.pode_idg`), e a trava está no banco,
   na view `v_idg_seguro` — esconder a aba na tela não protegeria uma view
   que a chave do navegador alcança. *(Bryan, 13/10/2026)*
+
+- **A Sabesp CONTA os não executados no ISAP.** Parece óbvio que serviços
+  "matados" sem execução (TRATA-SE DE OUTRO SERVIÇO, DUPLICIDADE, IMÓVEL
+  FECHADO) ficassem fora do índice. Não ficam: 660 das nossas 732 linhas de
+  não executado estão na planilha deles — 90,2%, a mesma taxa dos
+  executados. Tirá-las do espelho daria IDG 91,00 em vez de 88,59: um
+  número falso e bonito. Não fazer. *(conferido 01-07/10/2026)*
+
+- **Validar o IDG por frente, nunca pela média.** A média esconde frentes
+  errando em direções opostas: em 01-07/10 o IDG batia em 0,10 pp enquanto
+  água estava −0,68 e esgoto +1,02.
+
+- **Restam 103 OS que não existem na planilha da Sabesp** (01-07/10, de
+  1.963). Não é atraso deles (taxa plana nos sete dias), nem uma equipe
+  (espalhadas por mais de vinte), nem um serviço. Tirando elas e a troca de
+  ramal, toda frente fecha dentro de 0,3 pp. É o item a levar à Sabesp.
+  Detalhe em `scratchpad/isap/sobram_01a07out.csv`.
+
+## PostgREST
+
+- **`Range` sem `order` único é bug, sempre.** Sem `order` o PostgREST
+  devolve as páginas em ordem arbitrária e a mesma consulta repete e omite
+  linhas; com `order` não único, linhas empatadas trocam de página no meio
+  da leitura. Dez consultas do app estavam assim e foram corrigidas em
+  14/10/2026. Toda consulta paginada nova precisa de ordenação que termine
+  numa chave única (em geral `...,numero_os.asc,tss.asc`).
