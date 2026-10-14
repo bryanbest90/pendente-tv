@@ -541,20 +541,28 @@ async function fetchProducao(tok,diaIni,diaFim){
 // em mil DEVOLVENDO 200. Já nos mordeu uma vez, no gráfico de entradas.
 async function fetchIdg(tok,diaIni,diaFim){
   const H=authHeaders(tok);
-  const out=[];let from=0;const ps=1000;
-  for(;;){
-    const r=await fetch(SUPABASE_URL+
-      `/rest/v1/v_idg?select=numero_os,cod_tss,tss,dia,equipe,resultado,executado,familia,atc,indicador,prazo,tipo_prazo,tempo_atendimento,veredito,data_competencia,data_execucao`+
-      `&dia=gte.${diaIni}&dia=lte.${diaFim}&order=dia.asc,numero_os.asc`,
-      {headers:{...H,"Range":from+"-"+(from+ps-1)}});
-    if(!r.ok&&r.status!==206){const t=await r.text();throw new Error(r.status+" "+t.slice(0,160));}
-    const d=await r.json();
-    if(!d?.length)break;
-    out.push(...d);
-    if(d.length<ps)break;
-    from+=ps;
-  }
-  return out;
+  const BASE="numero_os,cod_tss,tss,dia,equipe,resultado,executado,familia,bairro,atc,indicador,prazo,tipo_prazo,tempo_atendimento,veredito,data_competencia,data_execucao";
+  // `no_espelho` só existe depois do sql/isap_espelho.sql. Pedir uma
+  // coluna que não existe faz o PostgREST recusar a consulta inteira —
+  // então a primeira tentativa pede, e a segunda não. Sem isso, quem
+  // ainda não rodou o SQL vê a aba quebrada em vez de ver o número.
+  const puxar=async(sel)=>{
+    const out=[];let from=0;const ps=1000;
+    for(;;){
+      const r=await fetch(SUPABASE_URL+`/rest/v1/v_idg?select=${sel}`+
+        `&dia=gte.${diaIni}&dia=lte.${diaFim}&order=dia.asc,numero_os.asc`,
+        {headers:{...H,"Range":from+"-"+(from+ps-1)}});
+      if(!r.ok&&r.status!==206){const t=await r.text();throw new Error(r.status+" "+t.slice(0,160));}
+      const d=await r.json();
+      if(!d?.length)break;
+      out.push(...d);
+      if(d.length<ps)break;
+      from+=ps;
+    }
+    return out;
+  };
+  try{ return await puxar(BASE+",no_espelho"); }
+  catch(e){ return await puxar(BASE); }
 }
 
 // A régua: qual frente e qual prazo de cada serviço. Serve para projetar
@@ -5414,6 +5422,8 @@ function IdgView({sess,rawRows}){
   const [fim,setFim]=useState(fmtISO(new Date()));
   const [unidade,setUnidade]=useState("geral");
   const [frenteSel,setFrenteSel]=useState(null);
+  // o espelho é o padrão: é o número que a Sabesp vai cobrar
+  const [espelho,setEspelho]=useState(true);
   const [linhas,setLinhas]=useState(null);
   const [regua,setRegua]=useState(null);
   const [loading,setLoading]=useState(true);
@@ -5436,7 +5446,11 @@ function IdgView({sess,rawRows}){
   /* ── o índice ──────────────────────────────────────────── */
   const idg=useMemo(()=>{
     if(!linhas)return null;
-    const L=linhas.filter(r=>atcAlvo===null?true:Number(r.atc)===atcAlvo);
+    const todas=linhas.filter(r=>atcAlvo===null?true:Number(r.atc)===atcAlvo);
+    // `no_espelho` vem do banco: é false nas linhas que a Sabesp não
+    // conta. A view guarda em vez de apagar, porque o que ela esconde
+    // é justamente o que precisamos medir.
+    const L=espelho?todas.filter(r=>r.no_espelho!==false):todas;
     const frentes=["ISAPa","ISAPe","ISAPr"].map(id=>{
       const g=L.filter(r=>r.indicador===id);
       const dentro=g.filter(r=>r.veredito==="DENTRO").length;
@@ -5451,8 +5465,30 @@ function IdgView({sess,rawRows}){
     // A média é das frentes que têm serviço. Somar zero por uma frente
     // vazia derrubaria o IDG por falta de dado, não por desempenho.
     const media=validas.length?validas.reduce((s,f)=>s+f.pct,0)/validas.length:null;
-    return {frentes,media,completo:validas.length===3,total:L.length,linhas:L};
-  },[linhas,atcAlvo]);
+    return {frentes,media,completo:validas.length===3,total:L.length,linhas:L,todas};
+  },[linhas,atcAlvo,espelho]);
+
+  /* ── o que o espelho esconde ────────────────────────────────
+     Quando o vazamento é resolvido com troca de ramal, a etapa do
+     vazamento some do ISAP da Sabesp — 45 de 45 casos conferidos em
+     outubro. As reposições que vêm depois nascem com o relógio zerado
+     no instante da baixa, então a espera do cliente desaparece.
+
+     Isto não é um ajuste cosmético: é o tamanho da exposição se um dia
+     a Sabesp fechar essa porta. */
+  // true quando o sql/isap_espelho.sql ainda não rodou
+  const semEspelho=useMemo(()=>!!linhas?.length&&linhas[0].no_espelho===undefined,[linhas]);
+
+  const escondido=useMemo(()=>{
+    if(!idg)return null;
+    const f=idg.todas.filter(r=>r.no_espelho===false);
+    if(!f.length)return null;
+    const fora=f.filter(r=>r.veredito==="FORA");
+    const horas=f.reduce((s,r)=>s+(Number(r.tempo_atendimento)||0),0);
+    const pior=f.reduce((m,r)=>Math.max(m,Number(r.tempo_atendimento)||0),0);
+    return {casos:f.length,fora:fora.length,horas,pior,
+            media:Math.round(horas/f.length),lista:[...f].sort((a,b)=>b.tempo_atendimento-a.tempo_atendimento)};
+  },[idg]);
 
   /* ── a dívida da carteira ──────────────────────────────────
      Cada serviço ainda aberto, medido contra o prazo do ISAP a
@@ -5549,6 +5585,12 @@ function IdgView({sess,rawRows}){
       <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
         <span style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,fontWeight:700,minWidth:56}}>Unidade</span>
         {UNITS.map(u=><button key={u.id} onClick={()=>setUnidade(u.id)} style={btn(unidade===u.id)}>{u.label}</button>)}
+        <span style={{width:1,height:18,background:C.border,margin:"0 2px"}}/>
+        <button onClick={()=>setEspelho(true)} disabled={semEspelho} style={{...btn(espelho&&!semEspelho),opacity:semEspelho?0.4:1,cursor:semEspelho?"not-allowed":"pointer"}}
+          title={semEspelho?"falta rodar o sql/isap_espelho.sql":"Conta como a Sabesp conta — é o número que vai ser cobrado"}>Espelho da Sabesp</button>
+        <button onClick={()=>setEspelho(false)} style={btn(!espelho||semEspelho)}
+          title="Conta tudo o que saiu da carteira, inclusive o que a Sabesp não conta">Nossa conta</button>
+        {semEspelho&&<span style={{fontSize:11,color:C.amber}}>falta rodar o <code>sql/isap_espelho.sql</code></span>}
       </div>
     </div>
 
@@ -5634,6 +5676,40 @@ function IdgView({sess,rawRows}){
         </div>}
       </div>}
 
+      {/* ── o que o espelho esconde ── */}
+      {espelho&&escondido&&<div style={{background:C.card,borderRadius:12,border:`1px solid ${C.amber}44`,
+        padding:"14px 18px",marginBottom:14}}>
+        <div style={{display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap",marginBottom:6}}>
+          <span style={{fontSize:13,fontWeight:800,color:C.text}}>O que o espelho esconde</span>
+          <span style={{fontSize:26,fontWeight:800,color:C.amber,lineHeight:1}}>{escondido.casos}</span>
+          <span style={{fontSize:12,color:C.textMuted}}>
+            vazamentos resolvidos com troca de ramal — <b style={{color:C.amber}}>{escondido.fora}</b> deles fora do prazo
+          </span>
+        </div>
+        <div style={{fontSize:12,color:C.textMuted,lineHeight:1.55,marginBottom:10}}>
+          A Sabesp não conta a etapa do vazamento nesses casos: 45 de 45 conferidos em outubro.
+          E as reposições que vêm depois nascem com o relógio zerado no instante da baixa,
+          então a espera do cliente some do índice. Estes serviços estão fora da conta acima —
+          o botão <b>Nossa conta</b> traz eles de volta.
+        </div>
+        <div style={{display:"flex",gap:18,flexWrap:"wrap",marginBottom:10}}>
+          <div style={{fontSize:12,color:C.textMuted}}><b style={{color:C.text,fontSize:15}}>{escondido.media}h</b> de espera média <span style={{color:C.textDim}}>(prazo: 24h)</span></div>
+          <div style={{fontSize:12,color:C.textMuted}}><b style={{color:C.red,fontSize:15}}>{escondido.pior}h</b> a pior <span style={{color:C.textDim}}>({Math.round(escondido.pior/24)} dias)</span></div>
+          <div style={{fontSize:12,color:C.textMuted}}><b style={{color:C.text,fontSize:15}}>{Math.round(escondido.horas/24)}</b> dias de espera somados</div>
+        </div>
+        <div style={{borderTop:`1px solid ${C.border}`,paddingTop:10}}>
+          <div style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,fontWeight:700,marginBottom:6}}>as maiores esperas</div>
+          {escondido.lista.slice(0,6).map((v,i)=>
+            <div key={i} style={{display:"flex",gap:10,alignItems:"baseline",padding:"4px 0",
+              borderBottom:i<Math.min(5,escondido.lista.length-1)?`1px solid ${C.border}`:"none",fontSize:12}}>
+              <span style={{color:C.amber,fontWeight:800,minWidth:60}}>{v.tempo_atendimento}h</span>
+              <span style={{color:C.text,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.tss}</span>
+              <span style={{color:C.textDim,fontSize:11}}>{v.bairro||""}</span>
+              <span style={{color:C.textDim,fontSize:11,minWidth:90,textAlign:"right"}}>{v.numero_os}</span>
+            </div>)}
+        </div>
+      </div>}
+
       {/* ── onde está sendo perdido ── */}
       {ofensores&&(ofensores.porMotivo.length>0||ofensores.porTss.length>0)&&
       <div style={{display:"flex",gap:14,flexWrap:"wrap",marginBottom:14}}>
@@ -5667,6 +5743,11 @@ function IdgView({sess,rawRows}){
         <b style={{color:C.textMuted}}>Como ler este número.</b> A conta é a da Sabesp, decifrada da planilha ISAP:
         tempo de atendimento = fim da execução menos a data de competência, truncado no dia (DC) ou na hora (HS),
         e fora é tempo <i>maior</i> que o prazo. Conferido contra 1.259 serviços deles: 1.256 vereditos iguais.
+        <br/>
+        <b style={{color:C.textMuted}}>Espelho.</b> Com o botão em <i>Espelho da Sabesp</i>, os vazamentos resolvidos com
+        troca de ramal ficam fora da conta, porque é assim que eles contam — é o número que vai ser cobrado.
+        Em <i>Nossa conta</i> eles voltam, e o ISAPa cai cerca de 1,2 ponto. A regra está na tabela
+        <code> isap_excecao</code> e desliga com um UPDATE, sem mexer em código.
         <br/>
         <b style={{color:C.textMuted}}>O que ainda falta.</b> Dos três expurgos, calculamos só o de tempo de execução
         (início igual ao fim). Faltam o de atraso de transmissão, que precisa da <i>hora</i> da Data Inserção —
