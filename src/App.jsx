@@ -502,7 +502,7 @@ async function tokenFresco(sess){
 // A RLS de `perfis` devolve só a própria linha — daí a lista de quem
 // tem acesso não vaza nem para quem está logado.
 async function fetchPerfil(tok){
-  const res=await fetch(SUPABASE_URL+"/rest/v1/perfis?select=email,nome,pode_producao,pode_importar,pode_cadastro",{headers:authHeaders(tok)});
+  const res=await fetch(SUPABASE_URL+"/rest/v1/perfis?select=email,nome,pode_producao,pode_importar,pode_cadastro,pode_idg",{headers:authHeaders(tok)});
   if(!res.ok) return null;
   const j=await res.json().catch(()=>[]);
   return j?.[0]||null;
@@ -546,10 +546,10 @@ async function fetchIdg(tok,diaIni,diaFim){
   // coluna que não existe faz o PostgREST recusar a consulta inteira —
   // então a primeira tentativa pede, e a segunda não. Sem isso, quem
   // ainda não rodou o SQL vê a aba quebrada em vez de ver o número.
-  const puxar=async(sel)=>{
+  const puxar=async(rota,sel)=>{
     const out=[];let from=0;const ps=1000;
     for(;;){
-      const r=await fetch(SUPABASE_URL+`/rest/v1/v_idg?select=${sel}`+
+      const r=await fetch(SUPABASE_URL+`/rest/v1/${rota}?select=${sel}`+
         `&dia=gte.${diaIni}&dia=lte.${diaFim}&order=dia.asc,numero_os.asc`,
         {headers:{...H,"Range":from+"-"+(from+ps-1)}});
       if(!r.ok&&r.status!==206){const t=await r.text();throw new Error(r.status+" "+t.slice(0,160));}
@@ -561,8 +561,16 @@ async function fetchIdg(tok,diaIni,diaFim){
     }
     return out;
   };
-  try{ return await puxar(BASE+",no_espelho"); }
-  catch(e){ return await puxar(BASE); }
+  // v_idg_seguro só devolve linha para quem tem pode_idg — a trava mora
+  // no banco, porque esconder a aba na tela não protege uma view que a
+  // chave do navegador alcança. Enquanto o sql/isap_acesso.sql não rodar,
+  // cai na v_idg comum.
+  for(const rota of ["v_idg_seguro","v_idg"]){
+    for(const sel of [BASE+",no_espelho",BASE]){
+      try{ return await puxar(rota,sel); }catch(e){}
+    }
+  }
+  throw new Error("não consegui ler o IDG — falta rodar sql/isap_regua.sql e sql/isap_execucao.sql");
 }
 
 // A régua: qual frente e qual prazo de cada serviço. Serve para projetar
@@ -4848,7 +4856,7 @@ function LoginModal({onClose,onOk}){
       if(!perfil) throw new Error("Usuário sem linha em `perfis`. Rode a etapa 1 de sql/producao.sql.");
       // Duas permissões independentes: ver a Produção e importar arquivos.
       // O gerente tem a primeira sem a segunda.
-      if(!perfil.pode_producao&&!perfil.pode_importar&&!perfil.pode_cadastro)
+      if(!perfil.pode_producao&&!perfil.pode_importar&&!perfil.pode_cadastro&&!perfil.pode_idg)
         throw new Error("Este usuário existe, mas não está liberado para nada ainda.");
       onOk({access_token:s.access_token,refresh_token:s.refresh_token,expires_at:s.expires_at,perfil});
     }catch(e){setErro(e.message);}
@@ -6588,7 +6596,7 @@ export default function App(){
       s.access_token=novo.access_token;s.refresh_token=novo.refresh_token;s.expires_at=novo.expires_at;
     }
     const perfil=await fetchPerfil(tok);
-    if(!perfil?.pode_producao&&!perfil?.pode_importar&&!perfil?.pode_cadastro){saveSess(null);return;}
+    if(!perfil?.pode_producao&&!perfil?.pode_importar&&!perfil?.pode_cadastro&&!perfil?.pode_idg){saveSess(null);return;}
     const atual={...s,perfil};
     saveSess(atual);setSess(atual);
   })();},[]);
@@ -6851,7 +6859,8 @@ export default function App(){
           {/* Tabs */}
           <div style={{display:"flex",justifyContent:"center",gap:4,marginTop:14}}>
             {[{id:"pendente",label:"Pendente",icon:"📋"},{id:"carteira",label:"Carteira",icon:"📊"},{id:"etiquetas",label:"Etiquetas",icon:"🏷"},
-              ...(sess?.perfil?.pode_producao?[{id:"producao",label:"Produção",icon:"👷"},{id:"idg",label:"IDG",icon:"🎯"},{id:"itinerario",label:"Itinerário",icon:"🚚"}]:[]),
+              ...(sess?.perfil?.pode_producao?[{id:"producao",label:"Produção",icon:"👷"},{id:"itinerario",label:"Itinerário",icon:"🚚"}]:[]),
+              ...(sess?.perfil?.pode_idg?[{id:"idg",label:"IDG",icon:"🎯"}]:[]),
               ...(sess?.perfil?.pode_cadastro?[{id:"cadastro",label:"Cadastro",icon:"🚰"}]:[])].map(tab=>
               <button key={tab.id} onClick={()=>setActiveTab(tab.id)}
                 style={{padding:"8px 24px",borderRadius:8,fontSize:13,fontWeight:700,cursor:"pointer",border:activeTab===tab.id?`1px solid rgba(59,130,246,0.4)`:`1px solid ${C.border}`,
@@ -6872,7 +6881,7 @@ export default function App(){
         {activeTab==="carteira"&&<CarteiraView rawRows={rawRows} sess={sess}/>}
         {activeTab==="etiquetas"&&<EtiquetasView notas={notas} rawRows={rawRows} sess={sess}/>}
         {activeTab==="producao"&&sess?.perfil?.pode_producao&&<ProducaoView sess={sess} onLogout={sair}/>}
-        {activeTab==="idg"&&sess?.perfil?.pode_producao&&<IdgView sess={sess} rawRows={rawRows}/>}
+        {activeTab==="idg"&&sess?.perfil?.pode_idg&&<IdgView sess={sess} rawRows={rawRows}/>}
         {activeTab==="itinerario"&&sess?.perfil?.pode_producao&&<ItinerarioView rawRows={rawRows} notas={notas} sess={sess}/>}
         {activeTab==="cadastro"&&sess?.perfil?.pode_cadastro&&<CadastroView sess={sess} rawRows={rawRows}/>}
         {showLogin&&<LoginModal onClose={()=>setShowLogin(false)} onOk={entrar}/>}
