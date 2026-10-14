@@ -497,20 +497,30 @@ linhas com folga, então essas estavam errando de verdade.
 
 **Regra: `Range` sem `order` único é bug, sempre.**
 
-### b) O relatório novo só trouxe sete dias — aberto
+### b) O relatório novo só trouxe sete dias — causa desconhecida
 
 A corrida de 13/10 15:55 gravou **2.682 linhas, 01 a 07/10 e nada mais**,
 com 07/10 completo (execuções das 4h às 21h). Não foi corte no meio do dia.
 
-Os dias 08 a 13/10 na `execucao` são do robô horário antigo: importados
-14/10 07:16, com `status_os` nulo porque o robô antigo não conhece as
-colunas novas. A `v_execucao_final` exige `status_os = 'Fechada'`, então
-**esses seis dias não chegam na aba IDG**.
+**Eu atribuí isso a truncamento do export, e estava errado.** Era uma
+observação só, e eu não abri o arquivo nem li a linha de conferência do
+robô antes de afirmar.
 
-Não é o robô antigo atropelando o novo: a forma das linhas é a do antigo
-(240/205/133/103/99 por dia, só executados) contra 410 a 512 nos dias que
-o novo trouxe. O novo simplesmente não cobriu 08 a 13.
+O teste, em 14/10: uma rodada única de 01 a 14/10. A tela avisou "foram
+encontradas 5.117 ordens, serão exibidas somente as 3.000 primeiras" — e o
+arquivo trouxe **5.118 linhas, 100%**. O aviso é sobre a TELA, não sobre o
+export. E as duas formas de puxar deram resultado idêntico:
 
-A causa tem de ser achada no log do robô ou no arquivo que ele baixou — as
-datas que ele escreveu em `DATAINIZIOESITO`/`DATAFINEESITO`, e quantas
-linhas tinha o .xls. Enquanto isso, a aba IDG só é confiável de 01 a 07/10.
+| | em dois blocos | em bloco único |
+|---|---|---|
+| 01 a 12/10 | 4.665 linhas | 4.665 linhas, **dia a dia igual** |
+| 13 e 14/10 | 487 | 647 |
+
+A diferença dos dois últimos dias são as duas horas de campo entre uma
+rodada e outra, não dado perdido.
+
+Então o mês vem inteiro numa rodada só, e os blocos não são necessários.
+A causa do que houve em 13/10 continua desconhecida. Quem avisa, se voltar
+a acontecer, é a conferência do próprio robô: ele compara o que a tela
+anunciou com o que o arquivo trouxe e grita se vier abaixo de 80%. Só
+nesse caso vale quebrar em períodos menores.

@@ -97,11 +97,20 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   `RODAR_AGORA.bat` também passou a sair do config (`menu.js`).
   *(14/10/2026)*
 
-- **O relatório de execuções é puxado em blocos de uma semana.** Pedir o
-  mês inteiro de uma vez já voltou pela metade sem erro nenhum — em 13/10
-  pediu 01 a 13 e trouxe 01 a 07, com o dia 07 completo. Truncamento aqui
-  não dá erro, só faz o IDG sair errado em silêncio. O `puxar_mes.js`
-  divide e chama o robô uma vez por bloco.
+- **O export do GEOCALL NÃO trunca, e o aviso da tela engana.** A tela diz
+  "foram encontradas 5.117 ordens, serão exibidas somente as 3.000
+  primeiras" — isso vale para a TELA. Medido em 14/10/2026: o arquivo
+  trouxe 5.118 linhas para 5.117 anunciadas, 100%. O mês vem inteiro numa
+  rodada só, e as duas formas (bloco único e blocos de uma semana) deram
+  resultado idêntico linha a linha de 01 a 12/10.
+
+  Eu afirmei o contrário em 13/10, a partir de uma observação só e sem
+  abrir o arquivo: a rodada daquele dia pediu 01 a 13 e o banco ficou com
+  01 a 07. A causa continua desconhecida, e **não é truncamento**. Se
+  voltar a acontecer, quem avisa é a linha de conferência do próprio robô,
+  que compara o que a tela anunciou com o que o arquivo trouxe e grita
+  quando o arquivo vem abaixo de 80%. Só aí vale quebrar em períodos
+  menores. *(corrigido em 14/10/2026)*
 
 ## PostgREST
 
