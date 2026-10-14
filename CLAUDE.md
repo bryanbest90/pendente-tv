@@ -75,6 +75,25 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   ramal, toda frente fecha dentro de 0,3 pp. É o item a levar à Sabesp.
   Detalhe em `scratchpad/isap/sobram_01a07out.csv`.
 
+## Robôs
+
+- **O robô antigo de executados está desativado, e não volta.** Ele
+  gravava chamando `limpar_execucao(ini,fim)`, que APAGA a faixa inteira
+  e regrava com as 12 colunas antigas — destruindo `cod_tss`,
+  `status_os`, `cod_resultado`, `executado`, `pde`, `familia` e
+  `data_inicio_execucao`, e sumindo com todas as linhas de não executado.
+  Com os dois ligados, cada rodada dele derrubava a última semana do IDG:
+  foi o que deixou 08 a 13/10/2026 com `status_os` nulo e parou a aba no
+  dia 07. O `robo-execucoes` faz o trabalho dele com mais dado e grava
+  por upsert. A trava está no banco (`sql/desativar_robo_antigo.sql`):
+  `limpar_execucao()` agora levanta exceção. *(14/10/2026)*
+
+- **O relatório de execuções é puxado em blocos de uma semana.** Pedir o
+  mês inteiro de uma vez já voltou pela metade sem erro nenhum — em 13/10
+  pediu 01 a 13 e trouxe 01 a 07, com o dia 07 completo. Truncamento aqui
+  não dá erro, só faz o IDG sair errado em silêncio. O `puxar_mes.js`
+  divide e chama o robô uma vez por bloco.
+
 ## PostgREST
 
 - **`Range` sem `order` único é bug, sempre.** Sem `order` o PostgREST
