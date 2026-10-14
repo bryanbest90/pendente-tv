@@ -88,6 +88,15 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   por upsert. A trava está no banco (`sql/desativar_robo_antigo.sql`):
   `limpar_execucao()` agora levanta exceção. *(14/10/2026)*
 
+- **O orquestrador monta os jobs a partir do `config.orquestrador.json`**,
+  e nenhuma lista de robôs é escrita duas vezes. Antes a lista estava no
+  código (`CFG.executados.dir` fixo) e no config: tirar o robô do config
+  quebrou o orquestrador antes de abrir o menu, e — pior, porque era
+  silencioso — a ouvidoria estava no config havia semanas e nunca rodou,
+  porque ninguém a acrescentou à lista do código. O menu do
+  `RODAR_AGORA.bat` também passou a sair do config (`menu.js`).
+  *(14/10/2026)*
+
 - **O relatório de execuções é puxado em blocos de uma semana.** Pedir o
   mês inteiro de uma vez já voltou pela metade sem erro nenhum — em 13/10
   pediu 01 a 13 e trouxe 01 a 07, com o dia 07 completo. Truncamento aqui
