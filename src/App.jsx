@@ -5439,6 +5439,12 @@ function IdgView({sess,rawRows}){
   const [fim,setFim]=useState(fmtISO(new Date()));
   const [unidade,setUnidade]=useState("geral");
   const [frenteSel,setFrenteSel]=useState(null);
+  // Corte por hora. A planilha da Sabesp é tirada num INSTANTE, não num
+  // dia: a de 13/10 terminava em 12/10 17:11. Sem poder cortar na hora, a
+  // comparação sempre sobra um pedaço de dia e parece divergência de
+  // regra quando é só de recorte.
+  const [horaIni,setHoraIni]=useState("00:00");
+  const [horaFim,setHoraFim]=useState("23:59");
   const [aba,setAba]=useState("FORA");          // qual lista aparece ao abrir uma frente
   const [verComo,setVerComo]=useState(false);   // a explicação fica guardada
   const [verDivida,setVerDivida]=useState(false);
@@ -5467,7 +5473,18 @@ function IdgView({sess,rawRows}){
   /* ── o índice ──────────────────────────────────────────── */
   const idg=useMemo(()=>{
     if(!linhas)return null;
-    const todas=linhas.filter(r=>atcAlvo===null?true:Number(r.atc)===atcAlvo);
+    // O corte compara o TEXTO ISO, não `new Date()`. O banco guarda o
+    // horário de parede com sufixo +00:00 — "2026-10-01T09:51:00+00:00" é
+    // 09:51 na planilha da Sabesp, não 06:51. Convertendo para Date o
+    // navegador aplicaria -03:00 e deslocaria o corte em três horas.
+    // Comparar o texto ordena igual e não tem fuso para errar.
+    const de =`${ini}T${(horaIni||"00:00")}`;
+    const ate=`${fim}T${(horaFim||"23:59")}`;
+    const dentroDoCorte=r=>{
+      const q=String(r.data_execucao||"").slice(0,16);   // AAAA-MM-DDTHH:MM
+      return q>=de && q<=ate;
+    };
+    const todas=linhas.filter(r=>(atcAlvo===null?true:Number(r.atc)===atcAlvo)&&dentroDoCorte(r));
     // `no_espelho` vem do banco: é false nas linhas que a Sabesp não
     // conta. A view guarda em vez de apagar, porque o que ela esconde
     // é justamente o que precisamos medir.
@@ -5487,7 +5504,7 @@ function IdgView({sess,rawRows}){
     // vazia derrubaria o IDG por falta de dado, não por desempenho.
     const media=validas.length?validas.reduce((s,f)=>s+f.pct,0)/validas.length:null;
     return {frentes,media,completo:validas.length===3,total:L.length,linhas:L,todas};
-  },[linhas,atcAlvo,espelho]);
+  },[linhas,atcAlvo,espelho,ini,fim,horaIni,horaFim]);
 
   /* ── o que o espelho esconde ────────────────────────────────
      Quando o vazamento é resolvido com troca de ramal, a etapa do
@@ -5653,8 +5670,14 @@ function IdgView({sess,rawRows}){
         {presets.map(p=><button key={p.rot} onClick={()=>{setIni(p.ini);setFim(p.fim);}} style={btn(ini===p.ini&&fim===p.fim)}>{p.rot}</button>)}
         <span style={{width:1,height:18,background:C.border,margin:"0 2px"}}/>
         <input type="date" value={ini} max={fim} onChange={e=>setIni(e.target.value)} style={dateInputStyle}/>
+        <input type="time" value={horaIni} onChange={e=>setHoraIni(e.target.value)} style={{...dateInputStyle,width:84}} title="hora inicial do corte"/>
         <span style={{color:C.textDim,fontSize:12}}>até</span>
         <input type="date" value={fim} min={ini} onChange={e=>setFim(e.target.value)} style={dateInputStyle}/>
+        <input type="time" value={horaFim} onChange={e=>setHoraFim(e.target.value)} style={{...dateInputStyle,width:84}} title="hora final do corte — a planilha da Sabesp é tirada num instante, não num dia"/>
+        {(horaIni!=="00:00"||horaFim!=="23:59")&&
+          <button onClick={()=>{setHoraIni("00:00");setHoraFim("23:59");}}
+            style={{...btn(false),color:C.amber,borderColor:`${C.amber}55`}}
+            title="voltar ao dia inteiro">corte por hora ✕</button>}
       </div>
       <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
         <span style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:0.5,fontWeight:700,minWidth:56}}>Unidade</span>
