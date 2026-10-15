@@ -3130,13 +3130,12 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
               <td style={{padding:"8px 12px",borderBottom:nt?"none":`1px solid ${C.border}`}}>{r["Município"]}</td>
               <td style={{padding:"8px 12px",borderBottom:nt?"none":`1px solid ${C.border}`,fontWeight:600,color:tempo(r["Tempo Residual"])==="fora"?C.red:C.green}}>
                 {r["Tempo Residual"]}
-                {/* de qual régua veio o prazo. Discreto de propósito: importa
-                    quando você está conferindo, atrapalha quando não está. */}
+                {/* de qual régua veio o prazo. Só a sigla, sem tooltip:
+                    o Bryan pediu assim em 15/10 — a marca basta, a
+                    explicação em cima do mouse só atrapalhava a leitura. */}
                 {r.__regua==="IDG"
-                  ? <span title={`prazo do contrato (${r.__indicador}): ${r.__prazoIsap} a partir da competência · o GEOCALL dizia ${r["Tempo Residual GEOCALL"]}`}
-                      style={{marginLeft:5,fontSize:9,color:C.textDim,verticalAlign:"super",letterSpacing:0.3}}>IDG</span>
-                  : <span title="este serviço não entra no IDG — prazo do GEOCALL"
-                      style={{marginLeft:5,fontSize:9,color:C.textDim,opacity:.5,verticalAlign:"super"}}>G</span>}
+                  ? <span style={{marginLeft:5,fontSize:9,color:C.textDim,verticalAlign:"super",letterSpacing:0.3}}>IDG</span>
+                  : <span style={{marginLeft:5,fontSize:9,color:C.textDim,opacity:.5,verticalAlign:"super"}}>G</span>}
               </td>
               <td style={{padding:"8px 12px",borderBottom:nt?"none":`1px solid ${C.border}`}}>{r["Status da OS"]}</td>
             </tr>
