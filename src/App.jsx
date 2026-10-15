@@ -593,6 +593,90 @@ async function fetchReguaIsap(tok){
   return r.json();
 }
 
+/* ════════════════════════════════════════════════════════════
+   O PRAZO DA CARTEIRA PASSA A SER O DO CONTRATO
+
+   Até 15/10/2026 a carteira usava o "Tempo Residual" que o GEOCALL
+   calcula. Só que o prazo do GEOCALL não é o prazo pelo qual o
+   contrato é medido: em REATIVAR LIGAÇÃO DE ÁGUA, por exemplo, o
+   GEOCALL dava folga numa OS que já tinha estourado as 24 horas do
+   ISAP havia um dia inteiro. Eram 12 serviços perdendo ponto no
+   índice com a tela dizendo que estavam bem.
+
+   A regra agora: quem está na régua do ISAP é medido por ela, a
+   partir da Data de Competência. Quem não está — FRESAR/RECAPEAR,
+   HIDRÔMETRO VAZANDO, SINALIZAÇÃO VIÁRIA, VÁLVULA DE REDE — continua
+   com o prazo do GEOCALL, porque prazo do GEOCALL é melhor que prazo
+   nenhum. Em 15/10 isso cobria 797 dos 892 serviços da tela (89,3%).
+
+   POR QUE REESCREVER O CAMPO EM VEZ DE CRIAR OUTRO
+   "Tempo Residual" é lido pela tabela, pela cor, pela ordenação, pela
+   contagem por família e pelos modais. Criar um campo paralelo seria
+   a mesma regra escrita em seis lugares — e regra copiada é regra que
+   diverge, que já nos mordeu antes. Reescrevendo o campo, todos os
+   seis passam a concordar de graça.
+
+   O valor original fica em "Tempo Residual GEOCALL", para conferência.
+   ════════════════════════════════════════════════════════════ */
+let REGUA_ISAP = null;     // carregada uma vez, compartilhada
+
+async function carregarReguaIsap(){
+  if (REGUA_ISAP) return REGUA_ISAP;
+  try{
+    // a régua não é segredo: é a lista de serviços e prazos do contrato
+    const r = await fetch(SUPABASE_URL+"/rest/v1/isap_tss?select=tss,tss_busca,indicador,prazo,tipo_prazo",{headers:HEADERS});
+    if(!r.ok) return null;
+    const lista = await r.json();
+    const m = new Map();
+    for(const x of lista) m.set(x.tss_busca || norm(x.tss), x);
+    REGUA_ISAP = m;
+    return m;
+  }catch{ return null; }
+}
+
+// "-392d,21h,9m" — o mesmo formato que o GEOCALL manda, para a tela,
+// a ordenação e o robô continuarem falando a mesma língua.
+function textoResidual(min){
+  const neg = min < 0, a = Math.abs(min);
+  const d = Math.floor(a/1440), h = Math.floor((a%1440)/60), m = a%60;
+  const partes = [];
+  if(d) partes.push(d+"d");
+  if(d||h) partes.push(h+"h");
+  partes.push(m+"m");
+  return (neg?"-":"")+partes.join(",");
+}
+
+function dataBR(v){
+  const m = String(v||"").trim().match(/(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+  if(!m) return null;
+  return new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0));
+}
+
+/* Idempotente de propósito: roda no carregamento, no cache e no refresh,
+   e a linha já tratada carrega a marca. Sem isso, um segundo passe
+   recalcularia sobre o valor já recalculado. */
+function aplicarPrazoIsap(rows){
+  const regua = REGUA_ISAP;
+  if(!regua || !Array.isArray(rows)) return rows;
+  const agora = new Date();
+  for(const r of rows){
+    if(r.__regua) continue;
+    const ref = regua.get(norm(r["TSS"]||""));
+    const comp = dataBR(r["Data de Competência"]);
+    if(!ref || !comp){ r.__regua = "GEOCALL"; continue; }
+    const unidadeMin = ref.tipo_prazo === "DC" ? 1440 : 60;
+    // a mesma truncagem da v_idg: conta unidades inteiras decorridas
+    const idade = Math.floor((agora - comp)/60000/unidadeMin);
+    const restam = (Number(ref.prazo) - idade) * unidadeMin;
+    r["Tempo Residual GEOCALL"] = r["Tempo Residual"];
+    r["Tempo Residual"] = textoResidual(restam);
+    r.__regua = "IDG";
+    r.__indicador = ref.indicador;
+    r.__prazoIsap = `${ref.prazo}${ref.tipo_prazo==="DC"?" dias":"h"}`;
+  }
+  return rows;
+}
+
 // H = cabecalhos do login, igual as outras duas importacoes.
 /* CONFERIR ANTES DE SUBSTITUIR A CARTEIRA.
    O GEOCALL as vezes exporta o arquivo torto — em 06/10/2026, as 19:02,
@@ -1447,6 +1531,8 @@ function NotasModal({notas,rows,onClose,onEditar,filtroInicial}){
                   return e?<span style={{color:C.textDim}}>· {e}{b?" — "+b:""}</span>:null;
                 })()}
                 <span style={{color:tempo(linha["Tempo Residual"])==="fora"?C.red:C.green,fontWeight:600}}>{linha["Tempo Residual"]}</span>
+                {linha.__regua==="IDG"&&<span style={{marginLeft:6,fontSize:10,color:C.textDim}}>
+                  prazo do contrato: {linha.__prazoIsap} ({linha.__indicador})</span>}
                 {outraTss&&<span style={{color:C.amber,fontSize:11}}>a OS está hoje como {String(linha["TSS"]||"").trim()}</span>}
               </div>
               <div style={{display:"flex",gap:9,flexWrap:"wrap",alignItems:"center"}}>
@@ -3042,7 +3128,16 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
                  :<>{String(r["Endereço"]).trim()}, {r["Número"]}{r["Complemento"]?" - "+String(r["Complemento"]).trim():""}</>}</td>
               <td style={{padding:"8px 12px",borderBottom:nt?"none":`1px solid ${C.border}`}}>{r["Bairro"]}</td>
               <td style={{padding:"8px 12px",borderBottom:nt?"none":`1px solid ${C.border}`}}>{r["Município"]}</td>
-              <td style={{padding:"8px 12px",borderBottom:nt?"none":`1px solid ${C.border}`,fontWeight:600,color:tempo(r["Tempo Residual"])==="fora"?C.red:C.green}}>{r["Tempo Residual"]}</td>
+              <td style={{padding:"8px 12px",borderBottom:nt?"none":`1px solid ${C.border}`,fontWeight:600,color:tempo(r["Tempo Residual"])==="fora"?C.red:C.green}}>
+                {r["Tempo Residual"]}
+                {/* de qual régua veio o prazo. Discreto de propósito: importa
+                    quando você está conferindo, atrapalha quando não está. */}
+                {r.__regua==="IDG"
+                  ? <span title={`prazo do contrato (${r.__indicador}): ${r.__prazoIsap} a partir da competência · o GEOCALL dizia ${r["Tempo Residual GEOCALL"]}`}
+                      style={{marginLeft:5,fontSize:9,color:C.textDim,verticalAlign:"super",letterSpacing:0.3}}>IDG</span>
+                  : <span title="este serviço não entra no IDG — prazo do GEOCALL"
+                      style={{marginLeft:5,fontSize:9,color:C.textDim,opacity:.5,verticalAlign:"super"}}>G</span>}
+              </td>
               <td style={{padding:"8px 12px",borderBottom:nt?"none":`1px solid ${C.border}`}}>{r["Status da OS"]}</td>
             </tr>
             {/* A nota ocupa uma linha inteira, com faixa ambar na borda.
@@ -6713,8 +6808,12 @@ export default function App(){
     const local=loadLocal();
     if(local){if(local.excluded?.length>0)setExcludedTSS(new Set(local.excluded));if(local.sortBy)setSortBy(local.sortBy);if(local.activeUnit)setActiveUnit(local.activeUnit);}
     let loaded=false;
-    try{const data=await fetchRows();if(data.rows?.length>0){setRawRows(data.rows);setUpdatedAt(data.updatedAt);cacheRows(data.rows,data.updatedAt);loaded=true;}}catch(e){flash("Erro Supabase: "+e.message);}
-    if(!loaded){const cached=loadCache();if(cached?.rows?.length>0){setRawRows(cached.rows);setUpdatedAt(cached.updatedAt);flash("Usando dados em cache");}}
+    // a régua primeiro: sem ela, aplicarPrazoIsap devolve as linhas
+    // intactas e a tela mostraria o prazo do GEOCALL por um instante,
+    // piscando de verde para vermelho quando a régua chegasse
+    await carregarReguaIsap();
+    try{const data=await fetchRows();if(data.rows?.length>0){setRawRows(aplicarPrazoIsap(data.rows));setUpdatedAt(data.updatedAt);cacheRows(data.rows,data.updatedAt);loaded=true;}}catch(e){flash("Erro Supabase: "+e.message);}
+    if(!loaded){const cached=loadCache();if(cached?.rows?.length>0){setRawRows(aplicarPrazoIsap(cached.rows));setUpdatedAt(cached.updatedAt);flash("Usando dados em cache");}}
     try{const hist=await fetchHistorico();if(hist?.length>0)setHistorico(hist);}catch(e){console.warn("Historico indisponivel:",e.message);}
     try{const es=await fetchEntradaSerie();if(es?.length>0)setEntradaSerie(es);}catch{}
     // Nota indisponivel nao derruba a tela, mas tambem nao pode
@@ -6751,7 +6850,7 @@ export default function App(){
 
   const refresh=useCallback(async()=>{
     try{flash("Atualizando...");const data=await fetchRows();
-      if(data.rows?.length>0){setRawRows(data.rows);setUpdatedAt(data.updatedAt);cacheRows(data.rows,data.updatedAt);flash("Dados atualizados ✓ ("+data.rows.length+" OS)");}
+      if(data.rows?.length>0){setRawRows(aplicarPrazoIsap(data.rows));setUpdatedAt(data.updatedAt);cacheRows(data.rows,data.updatedAt);flash("Dados atualizados ✓ ("+data.rows.length+" OS)");}
       else flash("Servidor vazio — dados locais mantidos");
     }catch(e){flash("Erro: "+e.message+" — dados locais mantidos");}
     try{const hist=await fetchHistorico();if(hist?.length>0)setHistorico(hist);}catch{}
@@ -6780,7 +6879,7 @@ export default function App(){
         const v=vigia.current;
         if(pend&&v.pend&&pend!==v.pend){
           const data=await fetchRows();
-          if(vivo&&data.rows?.length>0){setRawRows(data.rows);setUpdatedAt(data.updatedAt);cacheRows(data.rows,data.updatedAt);
+          if(vivo&&data.rows?.length>0){setRawRows(aplicarPrazoIsap(data.rows));setUpdatedAt(data.updatedAt);cacheRows(data.rows,data.updatedAt);
             flash("Pendente atualizado ✓ ("+data.rows.length+" OS)");
             try{const hist=await fetchHistorico();if(vivo&&hist?.length>0)setHistorico(hist);}catch{}}
         }

@@ -75,6 +75,33 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   ramal, toda frente fecha dentro de 0,3 pp. É o item a levar à Sabesp.
   Detalhe em `scratchpad/isap/sobram_01a07out.csv`.
 
+## Prazo da carteira
+
+- **A carteira é medida pelo prazo do CONTRATO, não pelo do GEOCALL.**
+  Quem está na régua do ISAP é medido por ela, a partir da Data de
+  Competência; quem não está (FRESAR/RECAPEAR, HIDRÔMETRO VAZANDO,
+  SINALIZAÇÃO VIÁRIA, VÁLVULA DE REDE) fica com o prazo do GEOCALL,
+  porque prazo do GEOCALL é melhor que prazo nenhum. Em 15/10/2026 a
+  régua cobria 786 dos 886 serviços da tela.
+
+- **A troca é feita reescrevendo o `Tempo Residual` da linha**, no app
+  (`aplicarPrazoIsap`) e no robô (`comPrazoIsap`). Esse campo é lido pela
+  tabela, pela cor, pela ordenação, pela contagem por família e pelos
+  modais — campo paralelo seria a mesma regra em seis lugares, e regra
+  copiada é regra que diverge. O valor do GEOCALL fica em
+  `Tempo Residual GEOCALL`, para conferência.
+
+- **No robô isso roda numa CÓPIA, depois de a carteira já ter sido
+  gravada.** Reescrever antes do `enviarParaSupabase` congelaria o
+  residual no instante da rodada, e o app — que recalcula contra o agora —
+  pararia de recalcular, porque a linha já viria marcada.
+
+- **O gráfico de prazo tem um degrau em 15/10/2026, e ele é correto.** O
+  histórico anterior não pode ser recalculado: o `pendente_diario_os` não
+  guarda a Data de Competência, e a `os_entrada` perdeu a hora. Não tentar
+  "consertar" o degrau. O salto foi de cerca de +7 serviços fora do prazo.
+  *(Bryan, 15/10/2026)*
+
 ## Robôs
 
 - **O robô antigo de executados está desativado, e não volta.** Ele
