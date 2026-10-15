@@ -84,6 +84,21 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   porque prazo do GEOCALL é melhor que prazo nenhum. Em 15/10/2026 a
   régua cobria 786 dos 886 serviços da tela.
 
+- **"Prazo de 7 dias" é até o FIM do 7º dia.** A Sabesp faz
+  `tempo = floor(decorrido/unidade)` e conta como DENTRO enquanto
+  `tempo <= prazo`. Conferido na planilha deles: dos 107 serviços com
+  tempo exatamente igual ao prazo, **107 entraram como dentro**, e
+  prazo+1 é sempre fora. Por isso a contagem regressiva da carteira corre
+  para `competência + (prazo+1) unidades` — é lá que o veredito vira. O
+  `+1` no código não é engano; tirá-lo pinta de vermelho dezenas de
+  serviços que a Sabesp ainda conta como dentro do prazo (92, na carteira
+  de 15/10).
+
+- **E ela é contagem de relógio, não de unidade truncada.** A truncagem é
+  da conta do índice. Fazer `floor` aqui e multiplicar de volta enchia a
+  coluna de "0m" e "1h,0m", sem um minuto quebrado — foi assim que o bug
+  apareceu na tela. *(15/10/2026)*
+
 - **A troca é feita reescrevendo o `Tempo Residual` da linha**, no app
   (`aplicarPrazoIsap`) e no robô (`comPrazoIsap`). Esse campo é lido pela
   tabela, pela cor, pela ordenação, pela contagem por família e pelos

@@ -665,9 +665,24 @@ function aplicarPrazoIsap(rows){
     const comp = dataBR(r["Data de Competência"]);
     if(!ref || !comp){ r.__regua = "GEOCALL"; continue; }
     const unidadeMin = ref.tipo_prazo === "DC" ? 1440 : 60;
-    // a mesma truncagem da v_idg: conta unidades inteiras decorridas
-    const idade = Math.floor((agora - comp)/60000/unidadeMin);
-    const restam = (Number(ref.prazo) - idade) * unidadeMin;
+    /* QUANTO FALTA, EM TEMPO DE RELÓGIO — E O +1 NÃO É ENGANO.
+       A conta da Sabesp é: tempo = floor(decorrido/unidade), e é
+       DENTRO enquanto tempo <= prazo. Conferido na planilha deles:
+       dos 107 serviços com tempo EXATAMENTE igual ao prazo, 107
+       entraram como dentro do prazo, e prazo+1 é sempre fora.
+
+       Ou seja, "prazo de 7 dias" quer dizer até o fim do 7º dia —
+       o serviço só vira fora quando entra no 8º. Então o instante em
+       que ele estoura é competência + (prazo+1) unidades, e é para
+       lá que a contagem regressiva tem de correr.
+
+       Isso faz o zero daqui cair no mesmo instante em que o veredito
+       do índice vira FORA, e os minutos saem reais. Duas versões
+       anteriores erraram: a primeira truncava e enchia a coluna de
+       "0m" sem minuto quebrado; a segunda corria para prazo*unidade e
+       pintava de vermelho 92 serviços que a Sabesp ainda conta como
+       dentro do prazo. */
+    const restam = (Number(ref.prazo)+1)*unidadeMin - Math.floor((agora - comp)/60000);
     r["Tempo Residual GEOCALL"] = r["Tempo Residual"];
     r["Tempo Residual"] = textoResidual(restam);
     r.__regua = "IDG";
