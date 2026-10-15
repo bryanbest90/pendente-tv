@@ -88,6 +88,17 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   por upsert. A trava está no banco (`sql/desativar_robo_antigo.sql`):
   `limpar_execucao()` agora levanta exceção. *(14/10/2026)*
 
+- **Todo robô tem prazo máximo, e quem estoura é morto.** Em 14/10/2026 o
+  robô de ouvidorias ficou 16h35 parado: o Outlook abriu uma caixa de erro
+  esperando um clique, o PowerShell ficou esperando o Outlook, o robô ficou
+  esperando o PowerShell. Como a regra é um de cada vez, a carteira do site
+  parou junto — quase 17 horas de dado velho, sem nada avisando na tela. O
+  problema não foi a ouvidoria: foi um robô sem prazo, e **travado é pior
+  que falho, porque falho avisa**. Prazos no código (`LIMITE` no
+  `orquestrador.js`), sobrescritos por `limite_min` no config. No Windows o
+  encerramento usa `taskkill /T`: matar só o primeiro processo deixaria o
+  Chrome vivo, que é justamente o que costuma pendurar. *(15/10/2026)*
+
 - **O orquestrador monta os jobs a partir do `config.orquestrador.json`**,
   e nenhuma lista de robôs é escrita duas vezes. Antes a lista estava no
   código (`CFG.executados.dir` fixo) e no config: tirar o robô do config
