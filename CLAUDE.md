@@ -40,6 +40,16 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   e o veredito dentro/fora em 2.834 — 99,79%. Não refazer a análise do zero
   sem ler o `ANALISE_IDG_ISAP.md`.
 
+- **O expurgo de transmissão foi LIGADO em 16/10/2026** (`sql/transmissao.sql`,
+  seção 6), e a regra do NULL é o coração dele: **sem a hora da
+  inserção, não expurga**. Quem foi executado antes de 16/10 tem
+  `dh_insercao` nulo, e `NULL >= 4` não é verdadeiro — o passado fica
+  intocado. Por isso **outubro é um mês misturado**: até 15/10 sem o
+  expurgo, de 16/10 em diante com ele. O índice do mês fechado vai
+  cair entre o nosso número antigo e o da Sabesp, e isso não é
+  defeito. A conferência está no fim do arquivo: no período
+  01-14/10 tem de dar ZERO expurgos de transmissão.
+
 - **O expurgo nunca tira ninguém de dentro do prazo**, só resgata quem caiu
   fora, nesta ordem: suspensão formal > início igual ao fim da execução >
   transmissão de 4 horas ou mais. Conferido em 01-15/10/2026: os 75

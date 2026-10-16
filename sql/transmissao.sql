@@ -181,3 +181,96 @@ GRANT SELECT ON v_transmissao TO authenticated;
 -- EXPURGO_ATRASO_TRANSMISSAO. Isso muda o número do IDG na tela e
 -- fica para uma decisão à parte — o índice é o que o contrato cobra.
 -- ============================================================
+
+
+-- ============================================================
+-- 6. LIGAR O EXPURGO NO IDG
+--
+-- Daqui para baixo o número do índice na tela muda. O Bryan mandou
+-- ligar em 16/10/2026.
+--
+-- A REGRA DO NULL É O CORAÇÃO DISTO: sem a hora, NÃO expurga.
+--
+-- Quem foi executado antes de hoje tem `dh_insercao` nulo, porque a
+-- hora não existia no banco — e `NULL >= 4` é nulo, não é verdadeiro.
+-- Então o passado continua EXATAMENTE como está hoje, e o expurgo só
+-- começa a valer para quem for executado daqui para a frente.
+--
+-- Isso tem uma consequência que precisa estar à vista: **outubro vai
+-- ser um mês misturado.** Os serviços executados até 15/10 não têm o
+-- expurgo; os de 16/10 em diante têm. O índice do mês fechado vai
+-- ficar entre o nosso de hoje e o da Sabesp, e isso não é defeito —
+-- é o que dá para saber.
+--
+-- A ORDEM DOS EXPURGOS é a deles: suspensão > tempo de execução >
+-- transmissão. Suspensão a gente não tem campo nenhum, então o
+-- primeiro degrau não existe aqui. O tempo de execução vem antes da
+-- transmissão, como na planilha.
+--
+-- QUAL INSERÇÃO: uma OS+TSS pode ter entrado mais de uma vez (foi
+-- fechada, reabriu). Vale a última inserção ANTERIOR à execução —
+-- é a que estava valendo quando a equipe foi lá.
+-- ============================================================
+
+DROP VIEW IF EXISTS v_idg_seguro;
+
+CREATE OR REPLACE VIEW v_idg AS
+WITH b AS (
+  SELECT f.numero_os, f.cod_tss, f.tss, f.dia, f.equipe, f.resultado,
+         f.executado, f.familia, f.bairro, f.atc,
+         f.data_competencia, f.data_execucao, f.data_inicio_execucao,
+         r.indicador, r.prazo, r.tipo_prazo,
+         GREATEST(0, floor(
+           EXTRACT(EPOCH FROM (f.data_execucao - f.data_competencia))
+           / CASE WHEN r.tipo_prazo = 'DC' THEN 86400 ELSE 3600 END
+         ))::INT AS tempo_atendimento,
+         t.horas AS horas_transmissao
+    FROM v_execucao_final f
+    JOIN isap_tss r ON r.cod_tss = f.cod_tss
+    LEFT JOIN LATERAL (
+      SELECT GREATEST(0, floor(
+               EXTRACT(EPOCH FROM (o.dh_insercao - f.data_competencia)) / 3600
+             ))::INT AS horas
+        FROM os_entrada o
+       WHERE o.numero_os = f.numero_os
+         AND o.tss       = f.tss
+         AND o.dh_insercao IS NOT NULL
+         AND o.dh_insercao <= f.data_execucao
+       ORDER BY o.dh_insercao DESC
+       LIMIT 1
+    ) t ON true
+   WHERE f.data_competencia IS NOT NULL
+)
+SELECT b.*,
+       CASE
+         WHEN tempo_atendimento <= prazo THEN 'DENTRO'
+         WHEN data_inicio_execucao IS NOT NULL
+              AND data_inicio_execucao = data_execucao THEN 'EXPURGO_TEMPO_EXECUCAO'
+         -- sem hora, horas_transmissao é NULL e esta linha não casa:
+         -- o serviço cai em FORA, que é o que acontece hoje.
+         WHEN horas_transmissao >= 4 THEN 'EXPURGO_ATRASO_TRANSMISSAO'
+         ELSE 'FORA'
+       END AS veredito
+  FROM b;
+
+ALTER VIEW v_idg SET (security_invoker = on);
+
+CREATE OR REPLACE VIEW v_idg_seguro AS
+  SELECT * FROM v_idg
+   WHERE EXISTS (SELECT 1 FROM perfis p WHERE p.id = auth.uid() AND p.pode_idg);
+
+ALTER VIEW v_idg_seguro SET (security_invoker = off);
+REVOKE ALL ON v_idg_seguro FROM anon;
+GRANT SELECT ON v_idg_seguro TO authenticated;
+
+-- CONFERÊNCIA — logo depois de aplicar, o resultado TEM de ser este:
+--
+--   SELECT veredito, count(*) FROM v_idg
+--    WHERE dia BETWEEN '2026-10-01' AND '2026-10-14' GROUP BY 1;
+--
+--   DENTRO 3131 | FORA 612 | EXPURGO_TEMPO_EXECUCAO 88
+--   e NENHUM EXPURGO_ATRASO_TRANSMISSAO.
+--
+-- Zero expurgos de transmissão no passado é o certo, não um erro: a
+-- hora daquelas inserções nunca foi guardada. Se aparecer algum, a
+-- regra do NULL falhou e é para desfazer.
