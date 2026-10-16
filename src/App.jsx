@@ -348,11 +348,12 @@ async function fetchEntradaSerie(){
    Paginada e com ordenação única, pelo mesmo motivo da irmã: o
    PostgREST corta em 1.000 e não avisa, e sem `order` as páginas
    podem repetir e pular linha (CLAUDE.md, PostgREST). */
-async function fetchExecucaoSerie(){
+async function fetchExecucaoSerie(token){
+  const cab=token?authHeaders(token):HEADERS;
   const out=[];let from=0;const ps=1000;
   for(;;){
     const r=await fetch(SUPABASE_URL+"/rest/v1/v_execucao_serie?select=dia,unidade,familia,executados,nao_executados&order=dia.asc,unidade.asc,familia.asc",
-      {headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
+      {headers:{...cab,"Range":from+"-"+(from+ps-1)}});
     if(!r.ok&&r.status!==206) return null;   // view não criada: o gráfico volta ao que era
     const d=await r.json();
     if(!d?.length) break;
@@ -4329,7 +4330,7 @@ function GasAlertModal({alerts,onIgnore,onClose}){
 }
 
 /* ── Carteira View ── */
-function CarteiraView({rawRows,sess,historico,entradaSerie,execucaoSerie,activeUnit}){
+function CarteiraView({rawRows,sess}){
   // Os robôs cobrem EM RUA (08:30) e Execução (00:30) todo dia. Os botões
   // continuam existindo como reserva, mas só para quem tem pode_importar —
   // e a gravação usa o token do login, não a chave anônima do bundle.
@@ -4840,13 +4841,6 @@ function CarteiraView({rawRows,sess,historico,entradaSerie,execucaoSerie,activeU
       </div>
     </div>}
 
-    {/* O MESMO gráfico da aba Pendente, com uma coluna a mais.
-        É o mesmo componente, não uma cópia: regra copiada é regra que
-        diverge, e este projeto já pagou por isso. A coluna nova nasce
-        de `execucaoSerie` — a aba Pendente não recebe essa prop e por
-        isso continua exatamente como estava. */}
-    {historico&&historico.length>0&&<HistoricoChart historico={historico} entradaSerie={entradaSerie} execucaoSerie={execucaoSerie} activeUnit={activeUnit}/>}
-
     {loadingCarteira?<div style={{padding:40,textAlign:"center",color:C.textDim}}>Carregando dados da carteira...</div>:
     <div style={{background:C.card,borderRadius:RAIO,border:`1px solid ${C.border}`,overflow:"hidden"}}>
       <div>
@@ -5098,7 +5092,18 @@ function BarraProp({valor,max,cor}){
   </div>;
 }
 
-function ProducaoView({sess,onLogout}){
+function ProducaoView({sess,onLogout,historico,entradaSerie,activeUnit}){
+  /* A série de saídas vem da v_execucao_serie, que é de `authenticated`
+     — por isso é buscada AQUI, com o token da sessão, e não lá em cima
+     com a chave anônima do bundle. O gráfico mudou de aba a pedido:
+     por enquanto só o Bryan e o gerente veem. */
+  const [execucaoSerie,setExecucaoSerie]=useState(null);
+  useEffect(()=>{let vivo=true;
+    (async()=>{try{const xs=await fetchExecucaoSerie(sess?.access_token);
+      if(vivo&&xs?.length>0)setExecucaoSerie(xs);}catch{}})();
+    return()=>{vivo=false;};
+  },[sess?.access_token]);
+
   const primeiroDoMes=()=>{const d=new Date();return fmtISO(new Date(d.getFullYear(),d.getMonth(),1));};
   const [ini,setIni]=useState(primeiroDoMes());
   const [fim,setFim]=useState(fmtISO(new Date()));
@@ -5252,6 +5257,17 @@ function ProducaoView({sess,onLogout}){
         <button onClick={onLogout} style={btn(false)}>Sair</button>
       </div>
     </div>
+
+    {/* O MESMO componente do gráfico da aba Pendente, com uma coluna a
+        mais — não uma cópia. Regra copiada é regra que diverge, e este
+        projeto já pagou por isso mais de uma vez. A coluna nova nasce
+        da prop `execucaoSerie`, que só esta aba passa; a Pendente
+        continua exatamente como estava.
+
+        Ele traz os próprios filtros de período e família, separados
+        dos filtros de Produção logo abaixo — são duas perguntas
+        diferentes na mesma tela. */}
+    {historico&&historico.length>0&&<HistoricoChart historico={historico} entradaSerie={entradaSerie} execucaoSerie={execucaoSerie} activeUnit={activeUnit}/>}
 
     {/* filtros */}
     <div style={{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,padding:"12px 16px",marginBottom:14,display:"flex",flexDirection:"column",gap:10}}>
@@ -6808,7 +6824,6 @@ export default function App(){
   const [sideCollapsed,setSideCollapsed]=useState(false);
   const [historico,setHistorico]=useState(null);
   const [entradaSerie,setEntradaSerie]=useState(null);   // v_entrada_serie; null = view não existe
-  const [execucaoSerie,setExecucaoSerie]=useState(null); // v_execucao_serie; null = view não existe
   const [showGasModal,setShowGasModal]=useState(false);
   const [notas,setNotas]=useState([]);
   const [showNotas,setShowNotas]=useState(false);
@@ -6914,7 +6929,6 @@ export default function App(){
     if(!loaded){const cached=loadCache();if(cached?.rows?.length>0){setRawRows(aplicarPrazoIsap(cached.rows));setUpdatedAt(cached.updatedAt);flash("Usando dados em cache");}}
     try{const hist=await fetchHistorico();if(hist?.length>0)setHistorico(hist);}catch(e){console.warn("Historico indisponivel:",e.message);}
     try{const es=await fetchEntradaSerie();if(es?.length>0)setEntradaSerie(es);}catch{}
-    try{const xs=await fetchExecucaoSerie();if(xs?.length>0)setExecucaoSerie(xs);}catch{}
     // Nota indisponivel nao derruba a tela, mas tambem nao pode
     // passar por "nenhuma nota": o menu some e ninguem desconfia.
     try{setNotas(await fetchTodasNotas());}catch(e){console.warn("Notas indisponiveis:",e.message);}
@@ -7176,9 +7190,9 @@ export default function App(){
           </div>
         </div>
         {toast&&<div style={{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",zIndex:2000,padding:"10px 24px",borderRadius:10,fontSize:13,fontWeight:600,maxWidth:"90vw",wordBreak:"break-word",background:toast.includes("Erro")?"rgba(239,68,68,0.15)":"rgba(16,185,129,0.15)",color:toast.includes("Erro")?C.red:C.green,border:`1px solid ${toast.includes("Erro")?C.redBorder:C.greenBorder}`,backdropFilter:"blur(8px)",animation:"fadeIn 0.2s ease"}}>{toast}</div>}
-        {activeTab==="carteira"&&<CarteiraView rawRows={rawRows} sess={sess} historico={historico} entradaSerie={entradaSerie} execucaoSerie={execucaoSerie} activeUnit={activeUnit}/>}
+        {activeTab==="carteira"&&<CarteiraView rawRows={rawRows} sess={sess}/>}
         {activeTab==="etiquetas"&&<EtiquetasView notas={notas} rawRows={rawRows} sess={sess}/>}
-        {activeTab==="producao"&&sess?.perfil?.pode_producao&&<ProducaoView sess={sess} onLogout={sair}/>}
+        {activeTab==="producao"&&sess?.perfil?.pode_producao&&<ProducaoView sess={sess} onLogout={sair} historico={historico} entradaSerie={entradaSerie} activeUnit={activeUnit}/>}
         {activeTab==="idg"&&sess?.perfil?.pode_idg&&<IdgView sess={sess} rawRows={rawRows}/>}
         {activeTab==="itinerario"&&sess?.perfil?.pode_producao&&<ItinerarioView rawRows={rawRows} notas={notas} sess={sess}/>}
         {activeTab==="cadastro"&&sess?.perfil?.pode_cadastro&&<CadastroView sess={sess} rawRows={rawRows}/>}

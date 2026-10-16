@@ -2,70 +2,74 @@
 -- v_execucao_serie — o que SAIU da carteira, por dia
 --
 -- Irmã da v_entrada_serie: mesma forma (dia, unidade, família),
--- para o gráfico poder somar entradas e saídas com os MESMOS
--- filtros de unidade e família.
+-- para o gráfico somar entradas e saídas com os MESMOS filtros.
 --
--- Duas decisões aqui mudam o número que aparece na tela, e as duas
--- saíram de medição em 01 a 15/10/2026, não de palpite:
+-- SAI DE CIMA DA v_execucao_final, E ISSO É O PONTO.
 --
--- 1) SÓ 'Fechada' SAIU DA CARTEIRA.
---    A tabela execucao também guarda passagens com status
---    Despachada, Reprogramável e Planejada. Pelo mapa_desfecho
---    essas são PERMANECE: a equipe passou, a OS continua lá.
---    Contá-las como saída seria dar baixa no que não saiu.
+-- A primeira versão desta view reimplementava aqui a regra da última
+-- baixa, com um DISTINCT ON próprio. Funcionava, e ainda assim estava
+-- errada de princípio: a regra de qual baixa encerra a OS já existe,
+-- já foi conferida contra a planilha da Sabesp (1.796 de 1.796 pares)
+-- e mora na v_execucao_final. Regra copiada é regra que diverge — e
+-- neste projeto já houve uma análise inteira perdida por eu ter
+-- reescrito em outro lugar uma regra que já existia.
 --
--- 2) A UNIDADE É O PAR (numero_os, tss), NÃO A LINHA.
---    Em 15 dias, 716 pares aparecem em mais de um dia e 425 deles
---    têm os DOIS vereditos: a equipe passou, marcou "CONTINUA —
---    SERVIÇO NÃO CONCLUÍDO", e depois alguém executou.
+-- Herdado de lá, sem repetir nada:
 --
---      contando LINHA:  3.158 executados, 2.287 não — 42,0% não
---      contando PAR:    3.158 executados, 1.383 não — 30,5% não
+--   status_os = 'Fechada'         só OS fechada saiu da carteira
+--   cod_tss IS NOT NULL           sem o par (OS, TSS) não há serviço
+--   data_execucao IS NOT NULL     baixa sem data não encerra
+--   cod_resultado fora de         os três que NÃO matam a OS:
+--     FJL     FIM DO DIA                       (615 linhas em out/26)
+--     901200  CONTINUA - SERVIÇO NÃO CONCLUÍDO (191)
+--     902900  IMÓVEL FECHADO, REPROGRAMAR ORDEM (97)
+--   DISTINCT ON (numero_os, cod_tss)  uma linha por serviço,
+--     data_execucao DESC              a última baixa
 --
---    São 904 serviços de diferença, quase um terço do total de não
---    executados. A primeira conta põe na tela a passagem frustrada
---    de uma equipe como se fosse um serviço perdido — e ele não foi
---    perdido, foi executado depois. A régua do projeto já era essa
---    (CLAUDE.md, "a unidade do negócio é o par (numero_os, tss)").
+-- Esses três são exatamente o que o Bryan pediu para ficar de fora:
+-- a equipe passou e volta amanhã, a OS continua viva. Somam 903
+-- linhas de 01 a 15/10/2026 — e sem eles a conta fica:
 --
---    Desempate: EXECUÇÃO VENCE. Quem foi executado alguma vez conta
---    como executado, no dia em que foi — é a mesma regra que o
---    mapa_desfecho usa para a OS que duas equipes tocaram no mesmo
---    dia (ver sql/desfecho.sql).
+--   dia            exec    não    saiu    % não
+--   2026-10-13      286     95     381    24,9%
+--   2026-10-14      292    112     404    27,7%
+--   2026-10-15      330    147     477    30,8%
+--   TOTAL 01-15   3.158  1.375   4.533    30,3%
+--
+-- executado IS NOT FALSE, não "= true": as linhas antigas vieram do
+-- relatório velho, que só trazia execução, e por isso têm NULL. É a
+-- mesma convenção das outras views deste arquivo.
+--
+-- GRANT só para authenticated: o gráfico vive na aba Produção, que é
+-- restrita, e a v_execucao_final também é só de authenticated.
 -- ============================================================
 
 CREATE OR REPLACE VIEW v_execucao_serie AS
-WITH veredito AS (
-  SELECT DISTINCT ON (numero_os, tss)
-         numero_os, tss, dia, executado, atc, familia
-    FROM execucao
-   WHERE status_os = 'Fechada'
-     AND executado IS NOT NULL
-     AND atc IS NOT NULL
-   -- executado DESC: execução vence a passagem não concluída
-   -- dia DESC: entre execuções, vale a última
-   ORDER BY numero_os, tss, executado DESC, dia DESC
-)
-SELECT dia,
-       CASE atc WHEN 923 THEN 'Interlagos'
-                WHEN 929 THEN 'Grajau'
-                WHEN 299 THEN 'Embu-Guacu' END        AS unidade,
-       familia,
-       count(*) FILTER (WHERE executado)::int         AS executados,
-       count(*) FILTER (WHERE NOT executado)::int     AS nao_executados
-  FROM veredito
- WHERE familia IS NOT NULL
+SELECT f.dia,
+       CASE f.atc WHEN 923 THEN 'Interlagos'
+                  WHEN 929 THEN 'Grajau'
+                  WHEN 299 THEN 'Embu-Guacu' END            AS unidade,
+       f.familia,
+       count(*) FILTER (WHERE f.executado IS NOT FALSE)::int AS executados,
+       count(*) FILTER (WHERE f.executado IS FALSE)::int     AS nao_executados
+  FROM v_execucao_final f
+ WHERE f.familia IS NOT NULL
+   AND f.atc IS NOT NULL
  GROUP BY 1, 2, 3;
 
 ALTER VIEW v_execucao_serie SET (security_invoker = on);
-GRANT SELECT ON v_execucao_serie TO anon, authenticated;
+GRANT SELECT ON v_execucao_serie TO authenticated;
 
--- Conferência rápida depois de aplicar — tem que bater com o bloco
--- de números do comentário acima:
+-- Conferência depois de aplicar — tem que bater com o bloco acima:
 --
---   SELECT dia, sum(executados) ex, sum(nao_executados) ne
+--   SELECT sum(executados) AS exec, sum(nao_executados) AS nao
+--     FROM v_execucao_serie
+--    WHERE dia BETWEEN '2026-10-01' AND '2026-10-15';
+--   -- esperado: 3158 | 1375
+--
+-- E para ver dia a dia:
+--
+--   SELECT dia, sum(executados) exec, sum(nao_executados) nao
 --     FROM v_execucao_serie
 --    WHERE dia BETWEEN '2026-10-01' AND '2026-10-15'
 --    GROUP BY 1 ORDER BY 1;
---
---   total esperado no período: 3.158 executados, 1.383 não.

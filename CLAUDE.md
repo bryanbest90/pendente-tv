@@ -82,17 +82,26 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   sabia separar executado de não executado e deixava o primeiro dia da
   série sem valor. A nova vem da `v_execucao_serie`, serviço a serviço.
 
-- **Conta o par (numero_os, tss), nunca a linha.** Em 01 a 15/10/2026,
-  716 pares aparecem em mais de um dia e **425 têm os dois vereditos**:
-  a equipe passou, marcou "CONTINUA — SERVIÇO NÃO CONCLUÍDO", e depois
-  alguém executou. Contando linha dá 42,0% de não executados; contando
-  par dá **30,5%**. São 904 serviços de diferença — a primeira conta
-  põe na tela a passagem frustrada de uma equipe como serviço perdido.
-  Desempate: **execução vence**, no dia em que aconteceu.
+- **A `v_execucao_serie` sai de cima da `v_execucao_final`, e isso é o
+  ponto.** A primeira versão reimplementava a regra da última baixa com
+  um `DISTINCT ON` próprio. Funcionava — e estava errada de princípio:
+  essa regra já existe, já foi conferida contra a planilha da Sabesp
+  (1.796 de 1.796 pares) e mora na `v_execucao_final`. Herda de lá o
+  `status_os='Fechada'`, o `cod_tss`, a `data_execucao` e a exclusão
+  dos códigos.
 
-- **Só `status_os = 'Fechada'` saiu da carteira.** A `execucao` também
-  guarda passagens Despachada, Reprogramável e Planejada; pelo
-  `mapa_desfecho` essas são PERMANECE.
+- **Só entra na barra o que MATA a OS.** Três códigos não matam, e
+  ficam de fora: `FJL` (FIM DO DIA), `901200` (CONTINUA — SERVIÇO NÃO
+  CONCLUÍDO) e `902900` (IMÓVEL FECHADO, REPROGRAMAR ORDEM). São 903
+  linhas de 5.445 em 01 a 15/10/2026. A equipe passou e volta amanhã:
+  a OS continua viva, não saiu da carteira. Com eles fora: **3.158
+  executados, 1.375 não — 30,3%**. *(Bryan, 16/10/2026)*
+
+- **O gráfico vive na aba Produção**, que é restrita, e a view é
+  `GRANT` só para `authenticated`. Por isso a série é buscada dentro
+  da própria aba, com o token da sessão, e não lá em cima com a chave
+  anônima do bundle. *(Bryan, 16/10/2026 — "só eu e o gerente poderemos
+  ver por hora")*
 
 - **O `v_desfecho_dia` parou em 01/10/2026.** É ele que classifica o
   não executado em Improdutiva / Cancelada / Erro de base / Nada
