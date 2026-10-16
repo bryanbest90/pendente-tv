@@ -80,6 +80,26 @@ COMMENT ON COLUMN os_entrada.dh_insercao IS
 
 
 -- ---------- 2. A leitura passa a trazer a hora ----------
+/* O DROP É OBRIGATÓRIO, e eu tinha esquecido dele.
+
+   A função ganha uma coluna no retorno (dh_insercao), e o Postgres
+   recusa `CREATE OR REPLACE` quando o formato do retorno muda:
+
+     ERROR 42P13: cannot change return type of existing function
+
+   Apagar é seguro aqui. Quem a chama é a `os_entrada_registrar()`,
+   que é plpgsql e resolve o nome só na hora de rodar — não existe
+   dependência registrada que o DROP precise derrubar junto. Por isso
+   NÃO leva CASCADE: se um dia o banco reclamar de dependência, é
+   sinal de que alguma coisa nova passou a usar a função, e aí é para
+   olhar o que é, não para apagar junto.
+
+   Entre o DROP e o CREATE a função não existe. São milissegundos, e
+   o único risco seria o robô do pendente subir exatamente nesse
+   instante. Se isso acontecer, ele falha, você roda de novo e nada
+   se perde — o gatilho não grava pela metade. */
+DROP FUNCTION IF EXISTS os_entrada_do_jsonb(JSONB);
+
 CREATE OR REPLACE FUNCTION os_entrada_do_jsonb(d JSONB)
 RETURNS TABLE (numero_os TEXT, tss TEXT, data_insercao DATE, dh_insercao TIMESTAMP,
                familia TEXT, atc INT, unidade TEXT, endereco TEXT, bairro TEXT) AS $$
