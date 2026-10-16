@@ -261,7 +261,23 @@ WITH b AS (
     ) t ON true
    WHERE f.data_competencia IS NOT NULL
 )
-SELECT b.*,
+/* A COLUNA NOVA VAI NO FIM, DEPOIS DO `veredito`.
+
+   Com `SELECT b.*` a `horas_transmissao` entrava ANTES do veredito,
+   e o Postgres recusa:
+
+     ERROR 42P16: cannot change name of view column "veredito"
+                  to "horas_transmissao"
+
+   `CREATE OR REPLACE VIEW` só aceita ACRESCENTAR coluna no fim; não
+   deixa trocar nome nem posição das que já existem. Listando as
+   colunas na mão, as 18 antigas ficam onde estavam e a nova entra
+   como 19ª — e aí não precisa de DROP VIEW nenhum, que seria o
+   outro caminho e arriscaria derrubar quem depende da view. */
+SELECT numero_os, cod_tss, tss, dia, equipe, resultado,
+       executado, familia, bairro, atc,
+       data_competencia, data_execucao, data_inicio_execucao,
+       indicador, prazo, tipo_prazo, tempo_atendimento,
        CASE
          WHEN tempo_atendimento <= prazo THEN 'DENTRO'
          WHEN data_inicio_execucao IS NOT NULL
@@ -270,7 +286,8 @@ SELECT b.*,
          -- o serviço cai em FORA, que é o que acontece hoje.
          WHEN horas_transmissao >= 4 THEN 'EXPURGO_ATRASO_TRANSMISSAO'
          ELSE 'FORA'
-       END AS veredito
+       END AS veredito,
+       horas_transmissao
   FROM b;
 
 ALTER VIEW v_idg SET (security_invoker = on);
