@@ -55,6 +55,16 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   88,9% transmitem em menos de uma hora; a cauda de 6,8% com 4h ou mais
   é o que gera o expurgo.
 
+- **A nossa Data Inserção É a `DATA_CRIA_CONECTA_SERVICOS` deles — na
+  DATA.** Medido em 16/10/2026 nos 3.097 pares da planilha que existem
+  na `os_entrada`: a data bate em **99,2%** (3.072), contra 97,2% para
+  o `DH_CRIACAO_SISTEMA`. As 25 que não batem erram por 1 ou 2 dias.
+  **A HORA continua sem prova**, e é ela que decide o corte de 4h: uma
+  inserção às 23:50 com competência às 20:00 dá 3h50 ou 4h10 conforme
+  o minuto, e a data bate nos dois casos. Só dá para provar depois de
+  aplicar o `transmissao.sql` e receber uma planilha nova que contenha
+  OS cuja hora a gente capturou. É o teste a fazer na próxima.
+
 - **A hora da Data Inserção NUNCA se perdeu — está no `pendente_os.dados`.**
   Isto corrige o que estava escrito aqui antes. O export do GEOCALL
   sempre mandou `'Data Inserção' = '27/08/2025 11:44'`; quem a joga fora
