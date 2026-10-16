@@ -40,6 +40,16 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   e o veredito dentro/fora em 2.834 — 99,79%. Não refazer a análise do zero
   sem ler o `ANALISE_IDG_ISAP.md`.
 
+- **A `v_idg` viva é a do `sql/isap_espelho.sql`, não a do
+  `sql/isap_execucao.sql`.** Dois arquivos criam uma view com esse
+  nome e quem rodou por último manda. A do espelho tem 19 colunas — a
+  19ª é `no_espelho`, a regra da troca de ramal. Em 16/10 eu usei a
+  de 18 como modelo e ia apagar o `no_espelho` sem avisar; quem
+  impediu foi o erro 42P16 do Postgres reclamando da posição da
+  coluna, não uma conferência minha. **Antes de recriar qualquer view
+  deste projeto, olhar as colunas que ela realmente tem** — é um
+  SELECT.
+
 - **O expurgo de transmissão foi LIGADO em 16/10/2026** (`sql/transmissao.sql`,
   seção 6), e a regra do NULL é o coração dele: **sem a hora da
   inserção, não expurga**. Quem foi executado antes de 16/10 tem

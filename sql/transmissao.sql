@@ -232,6 +232,23 @@ GRANT SELECT ON v_transmissao TO authenticated;
 -- é a que estava valendo quando a equipe foi lá.
 -- ============================================================
 
+/* ATENÇÃO: A v_idg VIVA É A DO isap_espelho.sql, NÃO A DO
+   isap_execucao.sql.
+
+   Dois arquivos criam uma view com esse nome, e quem rodou por
+   último manda. A que está no banco tem DEZENOVE colunas — a 19ª é
+   `no_espelho`, a regra da troca de ramal, que levou dias para ficar
+   de pé. A versão do isap_execucao.sql tem 18 e não a conhece.
+
+   Eu copiei a de 18 como modelo e, na primeira tentativa, ia apagar
+   o `no_espelho` sem avisar ninguém. Quem impediu foi o erro 42P16
+   do Postgres, reclamando da posição da coluna — não a minha
+   conferência, que não existiu. Olhar as colunas que a view REALMENTE
+   tem, antes de recriá-la, é barato: um SELECT.
+
+   Daqui em diante esta é a definição completa: as 19 colunas na
+   ordem exata, e a `horas_transmissao` entrando como 20ª. */
+
 DROP VIEW IF EXISTS v_idg_seguro;
 
 CREATE OR REPLACE VIEW v_idg AS
@@ -261,19 +278,6 @@ WITH b AS (
     ) t ON true
    WHERE f.data_competencia IS NOT NULL
 )
-/* A COLUNA NOVA VAI NO FIM, DEPOIS DO `veredito`.
-
-   Com `SELECT b.*` a `horas_transmissao` entrava ANTES do veredito,
-   e o Postgres recusa:
-
-     ERROR 42P16: cannot change name of view column "veredito"
-                  to "horas_transmissao"
-
-   `CREATE OR REPLACE VIEW` só aceita ACRESCENTAR coluna no fim; não
-   deixa trocar nome nem posição das que já existem. Listando as
-   colunas na mão, as 18 antigas ficam onde estavam e a nova entra
-   como 19ª — e aí não precisa de DROP VIEW nenhum, que seria o
-   outro caminho e arriscaria derrubar quem depende da view. */
 SELECT numero_os, cod_tss, tss, dia, equipe, resultado,
        executado, familia, bairro, atc,
        data_competencia, data_execucao, data_inicio_execucao,
@@ -287,6 +291,12 @@ SELECT numero_os, cod_tss, tss, dia, equipe, resultado,
          WHEN horas_transmissao >= 4 THEN 'EXPURGO_ATRASO_TRANSMISSAO'
          ELSE 'FORA'
        END AS veredito,
+       NOT EXISTS (
+         SELECT 1 FROM isap_excecao e
+          WHERE e.ativo
+            AND (e.cod_tss   IS NULL OR e.cod_tss   = b.cod_tss)
+            AND (e.resultado IS NULL OR e.resultado = b.resultado)
+       ) AS no_espelho,
        horas_transmissao
   FROM b;
 
