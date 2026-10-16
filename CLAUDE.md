@@ -145,6 +145,29 @@ foto diária e no histórico, que é o que alimenta o gráfico.
 
 ## Saídas da carteira
 
+- **A conta `carteira − saíram + entraram` NÃO fecha, e não é defeito:
+  as três linhas medem universos diferentes.** Medido em 01/10/2026
+  (Bryan perguntou por quê, e estava certo em estranhar):
+
+  | | |
+  |---|---|
+  | barra de saídas | 319 |
+  | …que estavam na carteira do dia anterior e saíram | **190** |
+  | …que NUNCA estiveram em foto nenhuma | **126** |
+  | …que estavam e continuaram (reabriram) | 3 |
+  | saíram da carteira de verdade | 220 |
+  | …destes, por cancelamento ou mudança de status, fora da barra | **30** |
+
+  A barra conta **tudo que foi encerrado no dia**, inclusive o serviço
+  que nasceu e morreu entre duas fotos — 40% dela, em 01/10. A
+  carteira só conhece quem apareceu numa foto. E 30 serviços saíram
+  sem passar pela barra.
+
+- **A foto do dia D já reflete as baixas de D.** Os serviços
+  executados em 01/10 aparecem nas fotos até 30/09 e somem na de
+  01/10. Então nem a identidade deslocada um dia fecha — testada de
+  30/09 a 08/10, erra de −80 a +98.
+
 - **A coluna "Saíram" é MEDIDA, não deduzida.** A antiga saía da
   identidade do estoque (saíram = entraram − variação do saldo), não
   sabia separar executado de não executado e deixava o primeiro dia da
