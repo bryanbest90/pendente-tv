@@ -341,6 +341,27 @@ async function fetchEntradaSerie(){
   }
   return out;
 }
+/* Série de SAÍDAS por dia/família/unidade, da v_execucao_serie.
+   Mesma forma da v_entrada_serie de propósito — as duas passam pelo
+   mesmo filtro de unidade e família do gráfico.
+
+   Paginada e com ordenação única, pelo mesmo motivo da irmã: o
+   PostgREST corta em 1.000 e não avisa, e sem `order` as páginas
+   podem repetir e pular linha (CLAUDE.md, PostgREST). */
+async function fetchExecucaoSerie(){
+  const out=[];let from=0;const ps=1000;
+  for(;;){
+    const r=await fetch(SUPABASE_URL+"/rest/v1/v_execucao_serie?select=dia,unidade,familia,executados,nao_executados&order=dia.asc,unidade.asc,familia.asc",
+      {headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
+    if(!r.ok&&r.status!==206) return null;   // view não criada: o gráfico volta ao que era
+    const d=await r.json();
+    if(!d?.length) break;
+    out.push(...d);
+    if(d.length<ps) break;
+    from+=ps;
+  }
+  return out;
+}
 async function fetchHistorico(){
   const allRows=[];let from=0;const ps=1000;
   while(true){
@@ -3339,6 +3360,17 @@ function CustomTooltip({active,payload,label}){
     {/* value nulo acontece no primeiro dia da série, onde "saíram" não
         tem dia anterior com que comparar. Sem a guarda, o toLocaleString
         derrubava o tooltip inteiro. */}
+    {/* "Saíram" é a soma das duas partes da barra empilhada. A
+        primeira pergunta diante da coluna é quanto saiu da carteira
+        naquele dia; a divisão entre executado e não executado é a
+        segunda. O gráfico mostra a altura, o tooltip dá o número. */}
+    {(()=>{const e=payload.find(p=>p.dataKey==="executados")?.value,
+                n=payload.find(p=>p.dataKey==="nao_executados")?.value;
+           if(e==null&&n==null) return null;
+           return <div style={{display:"flex",alignItems:"center",gap:8,padding:"2px 0",borderBottom:`1px solid ${C.border}`,marginBottom:4,paddingBottom:5}}>
+             <span style={{width:8,height:8,borderRadius:2,background:C.textMuted,flexShrink:0}}/><span style={{color:C.textMuted}}>Saíram:</span>
+             <span style={{fontWeight:700,color:C.text,fontVariantNumeric:"tabular-nums"}}>{((e||0)+(n||0)).toLocaleString("pt-BR")}</span>
+           </div>;})()}
     {payload.filter(p=>p.value!=null).map((p,i)=>(<div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"2px 0"}}>
       <span style={{width:8,height:8,borderRadius:"50%",background:p.color,flexShrink:0}}/><span style={{color:C.textMuted}}>{p.name}:</span>
       <span style={{fontWeight:700,color:p.color,fontVariantNumeric:"tabular-nums"}}>{Number(p.value).toLocaleString("pt-BR")}</span>
@@ -3448,7 +3480,7 @@ function OSExitModal({diaA,diaB,activeUnit,familyFilter,onClose}){
   </div>;
 }
 
-function HistoricoChart({historico,entradaSerie,activeUnit}){
+function HistoricoChart({historico,entradaSerie,execucaoSerie,activeUnit}){
   const [showChart,setShowChart]=useState(true);
   const [diffModal,setDiffModal]=useState(null);
   const [exitModal,setExitModal]=useState(null);
@@ -3525,10 +3557,35 @@ function HistoricoChart({historico,entradaSerie,activeUnit}){
       data=data.map(d=>({...d,entraram:ent[d.dia]??null}));
     }
 
+    /* SAÍDAS — a coluna nova, e a diferença para a antiga é o método.
+       A coluna "saíram" que existia aqui era DEDUZIDA pela identidade
+       do estoque (saíram = entraram − variação do saldo) e por isso
+       não sabia dizer o que tinha sido executado e o que tinha só
+       saído. Esta é MEDIDA, serviço a serviço, e vem partida em dois.
+
+       Mesmo filtro de unidade, família e cobertura das entradas: sem
+       isso a barra contaria família que não tem linha com que
+       conversar. */
+    if(execucaoSerie?.length){
+      const sai={};
+      execucaoSerie.forEach(r=>{
+        if(unidadeFilter!==null && r.unidade!==unidadeFilter) return;
+        if(familyFilter.size>0 && !familyFilter.has(r.familia)) return;
+        if(!allFamilies.includes(r.familia)) return;
+        const d=String(r.dia).slice(0,10);
+        if(!sai[d]) sai[d]={ex:0,ne:0};
+        sai[d].ex+=r.executados||0;
+        sai[d].ne+=r.nao_executados||0;
+      });
+      data=data.map(d=>sai[d.dia]
+        ?{...d,executados:sai[d.dia].ex,nao_executados:sai[d.dia].ne}
+        :{...d,executados:null,nao_executados:null});
+    }
+
     if(dateFrom) data = data.filter(d => d.dia >= dateFrom);
     if(dateTo) data = data.filter(d => d.dia <= dateTo);
     return data.map(d=>({...d,label:fmtDiaShort(d.dia)}));
-  },[historico,entradaSerie,allFamilies,unidadeFilter,familyFilter,dateFrom,dateTo]);
+  },[historico,entradaSerie,execucaoSerie,allFamilies,unidadeFilter,familyFilter,dateFrom,dateTo]);
 
   const handleChartClick = useCallback((e)=>{
     if(!e?.activePayload?.length) return;
@@ -3549,6 +3606,9 @@ function HistoricoChart({historico,entradaSerie,activeUnit}){
   // vazias ao longo de todo o período.
   const temMovimento = chartData.some(d=>d.entraram!=null);
   const somaEnt = chartData.reduce((a,d)=>a+(d.entraram||0),0);
+  const temSaida = chartData.some(d=>d.executados!=null||d.nao_executados!=null);
+  const somaExec = chartData.reduce((a,d)=>a+(d.executados||0),0);
+  const somaNE   = chartData.reduce((a,d)=>a+(d.nao_executados||0),0);
 
   return <div style={{background:C.card,borderRadius:RAIO,border:`1px solid ${C.border}`,marginBottom:16,overflow:"hidden"}}>
     <div onClick={()=>setShowChart(!showChart)} style={{padding:"14px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",borderBottom:showChart?`1px solid ${C.border}`:"none"}}
@@ -3561,6 +3621,9 @@ function HistoricoChart({historico,entradaSerie,activeUnit}){
       {chartData.length>=2&&<div style={{display:"flex",gap:12,fontSize:12,alignItems:"baseline",flexWrap:"wrap"}}>
         {temMovimento&&<span style={{fontSize:11,color:C.textDim}}>
           <b style={{color:C.accent}}>{somaEnt}</b> entraram
+        </span>}
+        {temSaida&&<span style={{fontSize:11,color:C.textDim}}>
+          <b style={{color:C.green}}>{somaExec}</b> executados · <b style={{color:C.amber}}>{somaNE}</b> não
         </span>}
         <span style={{color:varTotal>0?C.red:varTotal<0?C.green:C.textDim,fontWeight:600}}>{varTotal>0?"+":""}{varTotal} OS</span>
         <span style={{color:varFora>0?C.red:varFora<0?C.green:C.textDim,fontWeight:600}}>{varFora>0?"+":""}{varFora} fora</span>
@@ -3611,7 +3674,19 @@ function HistoricoChart({historico,entradaSerie,activeUnit}){
             <YAxis yAxisId="saldo" tick={{fill:C.textDim,fontSize:11}} tickLine={false} axisLine={false} width={45}/>
             <YAxis yAxisId="mov" orientation="right" tick={{fill:C.textDim,fontSize:11}} tickLine={false} axisLine={false} width={40}/>
             <Tooltip content={<CustomTooltip/>}/>
+            {/* Entraram e Saíram, lado a lado no eixo da direita. As
+                duas saídas dividem o mesmo stackId: é uma barra só,
+                partida em duas cores — foi o pedido, e é a leitura
+                certa, porque o que importa primeiro é quanto saiu da
+                carteira; a divisão entre executado e não executado é
+                a segunda pergunta, não a primeira.
+
+                O executado vem embaixo do empilhamento de propósito:
+                fica encostado no eixo, com a mesma base todo dia, e é
+                a parte que se compara de um dia para o outro. */}
             {temMovimento&&<RBar yAxisId="mov" dataKey="entraram" name="Entraram" fill={C.accent} fillOpacity={0.5} radius={[2,2,0,0]} maxBarSize={14}/>}
+            {temSaida&&<RBar yAxisId="mov" stackId="saiu" dataKey="executados" name="Executados" fill={C.green} fillOpacity={0.55} maxBarSize={14}/>}
+            {temSaida&&<RBar yAxisId="mov" stackId="saiu" dataKey="nao_executados" name="Não executados" fill={C.amber} fillOpacity={0.55} radius={[2,2,0,0]} maxBarSize={14}/>}
             <Area yAxisId="saldo" type="monotone" dataKey="total" name="Carteira" stroke={C.accent} fill="url(#gradTotal)" strokeWidth={2.4} dot={false} activeDot={{r:6,stroke:C.accent,strokeWidth:2,fill:C.card}}/>
             <RLine yAxisId="saldo" type="monotone" dataKey="no_prazo" name="No Prazo" stroke={C.green} strokeWidth={2} dot={false} activeDot={{r:5,stroke:C.green,strokeWidth:2,fill:C.card}}/>
             <RLine yAxisId="saldo" type="monotone" dataKey="fora_prazo" name="Fora do Prazo" stroke={C.red} strokeWidth={2} dot={false} activeDot={{r:5,stroke:C.red,strokeWidth:2,fill:C.card}}/>
@@ -3619,7 +3694,8 @@ function HistoricoChart({historico,entradaSerie,activeUnit}){
         </ResponsiveContainer>
         <div style={{display:"flex",justifyContent:"center",gap:18,padding:"4px 0 2px",flexWrap:"wrap"}}>
           {[{label:"Carteira",color:C.accent,barra:false},{label:"No Prazo",color:C.green,barra:false},{label:"Fora do Prazo",color:C.red,barra:false},
-            ...(temMovimento?[{label:"Entraram",color:C.accent,barra:true}]:[])].map(l=>
+            ...(temMovimento?[{label:"Entraram",color:C.accent,barra:true}]:[]),
+            ...(temSaida?[{label:"Executados",color:C.green,barra:true},{label:"Não executados",color:C.amber,barra:true}]:[])].map(l=>
             <div key={l.label} style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:C.textMuted}}>
               <span style={{width:l.barra?8:10,height:l.barra?9:3,borderRadius:2,background:l.color,opacity:l.barra?0.5:1}}/>{l.label}
             </div>
@@ -4253,7 +4329,7 @@ function GasAlertModal({alerts,onIgnore,onClose}){
 }
 
 /* ── Carteira View ── */
-function CarteiraView({rawRows,sess}){
+function CarteiraView({rawRows,sess,historico,entradaSerie,execucaoSerie,activeUnit}){
   // Os robôs cobrem EM RUA (08:30) e Execução (00:30) todo dia. Os botões
   // continuam existindo como reserva, mas só para quem tem pode_importar —
   // e a gravação usa o token do login, não a chave anônima do bundle.
@@ -4763,6 +4839,13 @@ function CarteiraView({rawRows,sess}){
         </div>
       </div>
     </div>}
+
+    {/* O MESMO gráfico da aba Pendente, com uma coluna a mais.
+        É o mesmo componente, não uma cópia: regra copiada é regra que
+        diverge, e este projeto já pagou por isso. A coluna nova nasce
+        de `execucaoSerie` — a aba Pendente não recebe essa prop e por
+        isso continua exatamente como estava. */}
+    {historico&&historico.length>0&&<HistoricoChart historico={historico} entradaSerie={entradaSerie} execucaoSerie={execucaoSerie} activeUnit={activeUnit}/>}
 
     {loadingCarteira?<div style={{padding:40,textAlign:"center",color:C.textDim}}>Carregando dados da carteira...</div>:
     <div style={{background:C.card,borderRadius:RAIO,border:`1px solid ${C.border}`,overflow:"hidden"}}>
@@ -6725,6 +6808,7 @@ export default function App(){
   const [sideCollapsed,setSideCollapsed]=useState(false);
   const [historico,setHistorico]=useState(null);
   const [entradaSerie,setEntradaSerie]=useState(null);   // v_entrada_serie; null = view não existe
+  const [execucaoSerie,setExecucaoSerie]=useState(null); // v_execucao_serie; null = view não existe
   const [showGasModal,setShowGasModal]=useState(false);
   const [notas,setNotas]=useState([]);
   const [showNotas,setShowNotas]=useState(false);
@@ -6830,6 +6914,7 @@ export default function App(){
     if(!loaded){const cached=loadCache();if(cached?.rows?.length>0){setRawRows(aplicarPrazoIsap(cached.rows));setUpdatedAt(cached.updatedAt);flash("Usando dados em cache");}}
     try{const hist=await fetchHistorico();if(hist?.length>0)setHistorico(hist);}catch(e){console.warn("Historico indisponivel:",e.message);}
     try{const es=await fetchEntradaSerie();if(es?.length>0)setEntradaSerie(es);}catch{}
+    try{const xs=await fetchExecucaoSerie();if(xs?.length>0)setExecucaoSerie(xs);}catch{}
     // Nota indisponivel nao derruba a tela, mas tambem nao pode
     // passar por "nenhuma nota": o menu some e ninguem desconfia.
     try{setNotas(await fetchTodasNotas());}catch(e){console.warn("Notas indisponiveis:",e.message);}
@@ -7091,7 +7176,7 @@ export default function App(){
           </div>
         </div>
         {toast&&<div style={{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",zIndex:2000,padding:"10px 24px",borderRadius:10,fontSize:13,fontWeight:600,maxWidth:"90vw",wordBreak:"break-word",background:toast.includes("Erro")?"rgba(239,68,68,0.15)":"rgba(16,185,129,0.15)",color:toast.includes("Erro")?C.red:C.green,border:`1px solid ${toast.includes("Erro")?C.redBorder:C.greenBorder}`,backdropFilter:"blur(8px)",animation:"fadeIn 0.2s ease"}}>{toast}</div>}
-        {activeTab==="carteira"&&<CarteiraView rawRows={rawRows} sess={sess}/>}
+        {activeTab==="carteira"&&<CarteiraView rawRows={rawRows} sess={sess} historico={historico} entradaSerie={entradaSerie} execucaoSerie={execucaoSerie} activeUnit={activeUnit}/>}
         {activeTab==="etiquetas"&&<EtiquetasView notas={notas} rawRows={rawRows} sess={sess}/>}
         {activeTab==="producao"&&sess?.perfil?.pode_producao&&<ProducaoView sess={sess} onLogout={sair}/>}
         {activeTab==="idg"&&sess?.perfil?.pode_idg&&<IdgView sess={sess} rawRows={rawRows}/>}

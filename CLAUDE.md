@@ -75,6 +75,30 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   ramal, toda frente fecha dentro de 0,3 pp. É o item a levar à Sabesp.
   Detalhe em `scratchpad/isap/sobram_01a07out.csv`.
 
+## Saídas da carteira
+
+- **A coluna "Saíram" é MEDIDA, não deduzida.** A antiga saía da
+  identidade do estoque (saíram = entraram − variação do saldo), não
+  sabia separar executado de não executado e deixava o primeiro dia da
+  série sem valor. A nova vem da `v_execucao_serie`, serviço a serviço.
+
+- **Conta o par (numero_os, tss), nunca a linha.** Em 01 a 15/10/2026,
+  716 pares aparecem em mais de um dia e **425 têm os dois vereditos**:
+  a equipe passou, marcou "CONTINUA — SERVIÇO NÃO CONCLUÍDO", e depois
+  alguém executou. Contando linha dá 42,0% de não executados; contando
+  par dá **30,5%**. São 904 serviços de diferença — a primeira conta
+  põe na tela a passagem frustrada de uma equipe como serviço perdido.
+  Desempate: **execução vence**, no dia em que aconteceu.
+
+- **Só `status_os = 'Fechada'` saiu da carteira.** A `execucao` também
+  guarda passagens Despachada, Reprogramável e Planejada; pelo
+  `mapa_desfecho` essas são PERMANECE.
+
+- **O `v_desfecho_dia` parou em 01/10/2026.** É ele que classifica o
+  não executado em Improdutiva / Cancelada / Erro de base / Nada
+  consta. Enquanto a `os_desfecho` não voltar a ser alimentada, a barra
+  fica em duas cores; quatro exigiria reviver esse caminho.
+
 ## Prazo da carteira
 
 - **A carteira é medida pelo prazo do CONTRATO, não pelo do GEOCALL.**
@@ -149,6 +173,63 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   porque ninguém a acrescentou à lista do código. O menu do
   `RODAR_AGORA.bat` também passou a sair do config (`menu.js`).
   *(14/10/2026)*
+
+- **Tela nova do GEOCALL se lê, não se adivinha — e quem navega é o
+  Bryan.** Foram quatro rodadas gastas na tela de materiais porque eu
+  programava a navegação antes de entender a tela, e cada tentativa
+  custava uma OS. O `CHROME_ESPIAO.bat` + `ESPIAR.bat` inverteram isso:
+  ele abre o Chrome com `--remote-debugging-port`, navega na mão pelo
+  caminho que já funciona, e o robô conecta por `puppeteer.connect` e
+  só **lê**. Custo zero por tentativa, e serve para qualquer tela.
+  *(15/10/2026)*
+
+- **O material entra por arrasto NATIVO do HTML, e só o CDP o produz.**
+  A linha é `<tr draggable="true" ondragstart="ddstart(...)">`, e o
+  `<img class="icon_dnd">` da primeira coluna é a **alça**, não um
+  botão. Mouse sintético do Puppeteer nunca ia funcionar: o Chrome não
+  gera `dragstart` a partir de `Input.dispatchMouseEvent`. O que
+  funciona é `setDragInterception` + `mouse.drag/dragOver/drop` — popup
+  em 1 segundo. O destino é o único elemento da tela que declara
+  `ondrop`/`ondragover` (`<div id="AFRAME_…" class="tv">`); procurá-lo
+  pelo cabeçalho não achava nada, porque a grade tem cabeçalho vazio no
+  DOM. E o `mouse.drag` deixa o botão preso: soltar antes de qualquer
+  clique seguinte. *(15/10/2026)*
+
+- **Nome de campo do GEOCALL eu confiro, nunca invento.** Três vezes no
+  mesmo robô: os campos do login, o campo da OS, e o da quantidade —
+  que não é "Quantidade", é **"Qtde consumida"**, na janela "Inserção
+  Novo Material". Essa última fez o robô inserir o material e reportar
+  fracasso. Os rótulos dessa tela já mentiram três vezes (o rotulado
+  "TSS" é o Tipo Resultado); o robô escreve por `name`, e o `name` sai
+  de um despejo da tela. *(15/10/2026)*
+
+- **O `robo-baixa-os` fechou o ciclo em 15/10/2026, 23h54:** lote de 4
+  OS, 4 sem problema, 3min23 por OS. Fora do orquestrador, roda à mão.
+  O que faltou: o `campos.icone_sucesso` continua vazio, então toda OS
+  sai como "sim; sem confirmacao" — ele fez o trabalho mas não sabe
+  provar. Conferência é por amostragem, no GEOCALL.
+
+- **Espera no robô é pergunta, não relógio.** A primeira rodada boa do
+  `robo-baixa-os` levou 6min24, e cerca de metade disso era `sleep` de
+  tempo fixo meu. Tempo fixo erra dos dois lados: atrasa quando a tela
+  já respondeu e desiste cedo quando ela demora mais que o chute — foi
+  assim que as datas se perderam (600ms) e que o robô ficou lento (7s,
+  8s, 10s espalhados). A regra: depois de cada clique, perguntar a cada
+  400ms se a próxima tela chegou (`ate()`), e seguir no instante em que
+  chega. O log imprime `⏱` com o tempo real de cada passo, que é o que
+  permite melhorar o resto. O que sobra de espera é servidor de
+  verdade: o popup do material leva ~17s, medidos. *(15/10/2026)*
+
+- **Robô que GRAVA confere a tela antes de salvar.** Em 15/10/2026 o
+  `robo-baixa-os` salvou uma OS sem nenhuma das quatro datas e horas, e
+  o log tinha dado ✓ em todas: ele escrevia, dormia 600ms e seguia. O ✓
+  era do `el.value` lido logo depois da atribuição — sempre verdadeiro,
+  e sempre inútil, porque o GEOCALL redesenha a tela e joga o valor
+  fora. A regra passa a ser: escrever, **ler de volta**, repetir até
+  fixar, e no fim conferir a tela inteira campo a campo contra o
+  esperado. Faltando um, não salva. Os outros robôs só leem — se erram,
+  a gente puxa de novo. Este deixa OS errada no sistema da Sabesp, e
+  desfazer é na mão. *(15/10/2026)*
 
 - **O export do GEOCALL NÃO trunca, e o aviso da tela engana.** A tela diz
   "foram encontradas 5.117 ordens, serão exibidas somente as 3.000
