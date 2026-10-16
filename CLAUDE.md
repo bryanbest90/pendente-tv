@@ -42,7 +42,28 @@ foto diária e no histórico, que é o que alimenta o gráfico.
 
 - **O expurgo nunca tira ninguém de dentro do prazo**, só resgata quem caiu
   fora, nesta ordem: suspensão formal > início igual ao fim da execução >
-  transmissão de 4 horas ou mais.
+  transmissão de 4 horas ou mais. Conferido em 01-15/10/2026: os 75
+  expurgos de transmissão têm todos `PRE_EXPUGOS = FORA_DO_PRAZO`, e as
+  158 linhas com 4h+ que já estavam DENTRO não foram tocadas.
+
+- **Tempo de transmissão = Data Inserção − Data de Competência**, em
+  horas inteiras. É quanto a OS levou do acatamento na Sabesp até
+  aparecer no Conecta/GEOCALL, onde a equipe consegue vê-la. Decifrado
+  em 16/10/2026 contra a planilha deles: `DATA_CRIA_CONECTA_SERVICOS −
+  DH_ACATAMENTO` reproduz o `TEMPO_TRASMITIR` em **3.534 de 3.534
+  linhas**; as outras cinco combinações de datas ficaram abaixo de 93%.
+  88,9% transmitem em menos de uma hora; a cauda de 6,8% com 4h ou mais
+  é o que gera o expurgo.
+
+- **A hora da Data Inserção NUNCA se perdeu — está no `pendente_os.dados`.**
+  Isto corrige o que estava escrito aqui antes. O export do GEOCALL
+  sempre mandou `'Data Inserção' = '27/08/2025 11:44'`; quem a joga fora
+  é a `os_entrada_do_jsonb`, com um `substring(... for 10)` para uma
+  coluna DATE — e a prova estava no comentário do próprio
+  `sql/os_entrada.sql`. O `sql/transmissao.sql` passa a guardá-la. Só
+  vale do dia em que rodar em diante, mais as OS abertas naquele
+  momento: o `pendente_os` guarda a carteira de agora, não o histórico.
+  *(16/10/2026)*
 
 - **Vazamento resolvido com TROCA DE RAMAL some do ISAP da Sabesp.** 45 de
   45 casos conferidos em outubro; nenhum dos 45 imóveis tem OS de TROCAR
