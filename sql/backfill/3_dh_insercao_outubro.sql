@@ -1,32 +1,24 @@
 -- ============================================================
 -- BACKFILL da hora da Data Inserção — OS criadas em OUTUBRO/2026
+-- Arquivo 3 de 3. Rodar na ordem: agosto, setembro, outubro.
 --
--- Origem: export da tela "Lista OS" do GEOCALL, filtrado por data de
--- criação em outubro, trazido pelo Bryan em 16/10/2026.
+-- Origem: export da tela "Lista OS" do GEOCALL, por data de criação.
+-- Essa tela traz a `Data Inserção` COM HORA, inclusive para OS já
+-- Fechada. O relatório de EXECUÇÕES (37 colunas) não tem essa coluna.
 --
--- Essa tela traz 32 colunas, e entre elas a `Data Inserção` COM HORA,
--- inclusive para OS já Fechada — que era a dúvida que faltava. O
--- relatório de EXECUÇÕES (37 colunas) NÃO tem essa coluna; conferi
--- uma por uma. É a Lista OS que serve.
+-- 4.650 de 5.983 casam (77,7%). A taxa sobe mês a mês porque quanto mais recente, mais chance de a OS ter passado por uma rodada do pendente.
+-- O que não casa são OS que nunca passaram pelo pendente. Este
+-- arquivo NÃO cria entrada nova — só completa a hora de quem já está
+-- registrado. Criar entrada aqui mexeria na contagem de Entradas,
+-- que é outra conta.
 --
--- O arquivo trouxe 29.735 linhas de toda a unidade; nos nossos ATC
--- (923, 929, 299) são 5.983, todas com as duas datas completas.
--- Destas, 4658 casam EXATO com uma linha da os_entrada em
--- (numero_os, tss, data_insercao). As outras 1.325 não existem na
--- os_entrada — são OS que nunca passaram pelo pendente (fechadas
--- antes de alguma rodada capturá-las, ou de família que o robô não
--- traz). Essas ficam de fora: este arquivo NÃO cria entrada nova,
--- só completa a hora de quem já está registrado. Criar entrada aqui
--- mexeria na contagem de Entradas, que é outra conta.
+-- IDEMPOTENTE: só escreve onde `dh_insercao` está NULL.
+-- PRÉ-REQUISITO: `sql/transmissao.sql` aplicado.
 --
--- IDEMPOTENTE: só escreve onde `dh_insercao` está NULL. Rodar duas
--- vezes não faz diferença, e não sobrescreve hora que já exista.
---
--- PRÉ-REQUISITO: `sql/transmissao.sql` já aplicado (é ele que cria a
--- coluna dh_insercao).
+-- 4650 linhas.
 -- ============================================================
 
--- lote 1 (1500 linhas)
+-- lote 1
 UPDATE os_entrada o
    SET dh_insercao = v.dh
   FROM (VALUES
@@ -1455,7 +1447,6 @@ UPDATE os_entrada o
     ('26106993375','CAVALETE VAZANDO','2026-10-06 13:44'::timestamp),
     ('2640067576','REATIVAR LIGAÇÃO DE ÁGUA S/V','2026-10-06 13:46'::timestamp),
     ('26106769102','REPOR PASSEIO ADJACENTE ESPECIAL','2026-10-06 13:46'::timestamp),
-    ('26106769102','COMPACTAR E SELAR BASE','2026-10-06 13:46'::timestamp),
     ('26106769102','REPOR CAPA ASFALTICA','2026-10-06 13:46'::timestamp),
     ('2640067813','TROCAR CAVALETE (KIT)','2026-10-06 13:47'::timestamp),
     ('26106993589','FALTA DE ÁGUA LOCAL','2026-10-06 13:48'::timestamp),
@@ -1529,18 +1520,18 @@ UPDATE os_entrada o
     ('2640127930','RECONSTRUIR POÇO DE INSPEÇÃO','2026-10-06 15:59'::timestamp),
     ('2640128416','HIDRÔMETRO QUEBRADO','2026-10-06 16:06'::timestamp),
     ('26107000241','FALTA DE ÁGUA LOCAL','2026-10-06 16:08'::timestamp),
-    ('2640128809','HIDRÔMETRO INVERTIDO','2026-10-06 16:08'::timestamp)
+    ('2640128809','HIDRÔMETRO INVERTIDO','2026-10-06 16:08'::timestamp),
+    ('2640129131','REATIVAR LIGAÇÃO DE ÁGUA S/V','2026-10-06 16:11'::timestamp)
   ) AS v(os, tss, dh)
  WHERE o.numero_os = v.os
    AND o.tss = v.tss
    AND o.data_insercao = v.dh::date
    AND o.dh_insercao IS NULL;
 
--- lote 2 (1500 linhas)
+-- lote 2
 UPDATE os_entrada o
    SET dh_insercao = v.dh
   FROM (VALUES
-    ('2640129131','REATIVAR LIGAÇÃO DE ÁGUA S/V','2026-10-06 16:11'::timestamp),
     ('2640129274','VISTORIA DE SINISTRO','2026-10-06 16:13'::timestamp),
     ('2640129307','LIGAÇÃO DE ÁGUA S/V','2026-10-06 16:13'::timestamp),
     ('2640129341','RELIGAR AGUA MUDANÇA TITULARIDADE','2026-10-06 16:14'::timestamp),
@@ -2024,10 +2015,6 @@ UPDATE os_entrada o
     ('2640359137','LIGAÇÃO DE ÁGUA S/V','2026-10-08 01:01'::timestamp),
     ('2640355542','LIGAÇÃO DE ESGOTO S/V','2026-10-08 01:01'::timestamp),
     ('2640355417','VISTORIA DE IDENTIFICAR RESPONSABILIDADE','2026-10-08 01:01'::timestamp),
-    ('2640359137','LIGAÇÃO DE ÁGUA S/V','2026-10-08 01:01'::timestamp),
-    ('2640359137','LIGAÇÃO DE ÁGUA S/V','2026-10-08 01:01'::timestamp),
-    ('2640360403','VISTORIA DE IDENTIFICAR RESPONSABILIDADE','2026-10-08 01:01'::timestamp),
-    ('2640360403','VISTORIA DE IDENTIFICAR RESPONSABILIDADE','2026-10-08 01:01'::timestamp),
     ('2640360403','VISTORIA DE IDENTIFICAR RESPONSABILIDADE','2026-10-08 01:01'::timestamp),
     ('26107316455','FALTA DE ÁGUA LOCAL','2026-10-08 04:15'::timestamp),
     ('26107317296','HIDROMETRO VAZANDO','2026-10-08 05:21'::timestamp),
@@ -2881,9 +2868,7 @@ UPDATE os_entrada o
     ('26107706847','SUPRIMIR LIGAÇÃO DE AGUA POR IMOVEL VAGO','2026-10-09 23:53'::timestamp),
     ('2640912063','REGISTRO DO CAVALETE VAZANDO','2026-10-09 23:55'::timestamp),
     ('2640902360','LIGAÇÃO DE ÁGUA S/V','2026-10-10 01:00'::timestamp),
-    ('2640902360','LIGAÇÃO DE ÁGUA S/V','2026-10-10 01:00'::timestamp),
     ('2640897961','RELIGAR AGUA MUDANÇA TITULARIDADE','2026-10-10 01:01'::timestamp),
-    ('2640902360','LIGAÇÃO DE ÁGUA S/V','2026-10-10 01:01'::timestamp),
     ('26107658041','HIDROMETRO VAZANDO','2026-10-10 01:01'::timestamp),
     ('26107710393','HIDROMETRO VAZANDO','2026-10-10 06:36'::timestamp),
     ('2640976080','REATIVAR LIGAÇÃO DE ÁGUA S/V','2026-10-10 07:47'::timestamp),
@@ -3039,24 +3024,24 @@ UPDATE os_entrada o
     ('2640982732','REPOR CAPA ASFALTICA','2026-10-10 16:05'::timestamp),
     ('2640988040','RELIGAR AGUA MUDANÇA TITULARIDADE','2026-10-10 16:08'::timestamp),
     ('2640988043','REPOR PISO INTERNO ESPECIAL','2026-10-10 16:09'::timestamp),
-    ('2640988121','REPOR PISO INTERNO ESPECIAL','2026-10-10 16:12'::timestamp)
-  ) AS v(os, tss, dh)
- WHERE o.numero_os = v.os
-   AND o.tss = v.tss
-   AND o.data_insercao = v.dh::date
-   AND o.dh_insercao IS NULL;
-
--- lote 3 (1500 linhas)
-UPDATE os_entrada o
-   SET dh_insercao = v.dh
-  FROM (VALUES
+    ('2640988121','REPOR PISO INTERNO ESPECIAL','2026-10-10 16:12'::timestamp),
     ('2640988143','REPOR PASSEIO ADJACENTE ESPECIAL','2026-10-10 16:15'::timestamp),
     ('2640988200','REPOR PISO INTERNO ESPECIAL','2026-10-10 16:20'::timestamp),
     ('2640988231','REPOR PISO INTERNO ESPECIAL','2026-10-10 16:21'::timestamp),
     ('2640988273','REPOR PASSEIO ADJACENTE ESPECIAL','2026-10-10 16:26'::timestamp),
     ('2640988305','REPOR PASSEIO ADJACENTE ESPECIAL','2026-10-10 16:29'::timestamp),
     ('2640988308','REPOR PISO INTERNO ESPECIAL','2026-10-10 16:29'::timestamp),
-    ('2640885056','TRANSFORMAÇÃO LIG EXIST COM APROV RAMAL','2026-10-10 16:45'::timestamp),
+    ('2640885056','TRANSFORMAÇÃO LIG EXIST COM APROV RAMAL','2026-10-10 16:45'::timestamp)
+  ) AS v(os, tss, dh)
+ WHERE o.numero_os = v.os
+   AND o.tss = v.tss
+   AND o.data_insercao = v.dh::date
+   AND o.dh_insercao IS NULL;
+
+-- lote 3
+UPDATE os_entrada o
+   SET dh_insercao = v.dh
+  FROM (VALUES
     ('2640885138','TRANSFORMAÇÃO LIG NOVA COM APROV RAMAL','2026-10-10 16:48'::timestamp),
     ('2640988535','DESOBSTRUIR REDE DE ESGOTO','2026-10-10 16:49'::timestamp),
     ('2640885141','TRANSFORMAÇÃO LIG NOVA COM APROV RAMAL','2026-10-10 16:51'::timestamp),
@@ -4452,7 +4437,6 @@ UPDATE os_entrada o
     ('2641550350','REPOR ASFALTO','2026-10-15 16:02'::timestamp),
     ('2641525328','COMPACTAR E SELAR BASE','2026-10-15 16:02'::timestamp),
     ('2641701335','REGISTRO DO CAVALETE QUEBRADO','2026-10-15 16:04'::timestamp),
-    ('2641525328','COMPACTAR E SELAR BASE','2026-10-15 16:04'::timestamp),
     ('2641701585','VAZAMENTO DE ÁGUA NO PASSEIO','2026-10-15 16:06'::timestamp),
     ('2641701648','REATIVAR LIGAÇÃO DE ÁGUA S/V','2026-10-15 16:07'::timestamp),
     ('26108325778','REGISTRO DO CAVALETE VAZANDO','2026-10-15 16:08'::timestamp),
@@ -4549,17 +4533,7 @@ UPDATE os_entrada o
     ('2640856351','REPOR CONCRETO INV','2026-10-16 07:18'::timestamp),
     ('2641770805','RELIGAR AGUA MUDANÇA TITULARIDADE','2026-10-16 07:32'::timestamp),
     ('2641770836','REPOR CONCRETO INV','2026-10-16 07:36'::timestamp),
-    ('26107337225','REPOR ASFALTO','2026-10-16 07:41'::timestamp)
-  ) AS v(os, tss, dh)
- WHERE o.numero_os = v.os
-   AND o.tss = v.tss
-   AND o.data_insercao = v.dh::date
-   AND o.dh_insercao IS NULL;
-
--- lote 4 (158 linhas)
-UPDATE os_entrada o
-   SET dh_insercao = v.dh
-  FROM (VALUES
+    ('26107337225','REPOR ASFALTO','2026-10-16 07:41'::timestamp),
     ('26107337225','REPOR PISO INTERNO ESPECIAL','2026-10-16 07:41'::timestamp),
     ('2641771112','LAVAR REDE DE ESGOTO PREVENTIVA','2026-10-16 07:46'::timestamp),
     ('2641771184','FALTA DE ÁGUA LOCAL','2026-10-16 07:49'::timestamp),
@@ -4567,7 +4541,17 @@ UPDATE os_entrada o
     ('2641770974','COMPACTAR E SELAR BASE','2026-10-16 07:51'::timestamp),
     ('2641771264','SUPRIMIR LIGAÇÃO DE AGUA POR IMOVEL VAGO','2026-10-16 07:51'::timestamp),
     ('2641770974','REPOR ASFALTO INV','2026-10-16 07:51'::timestamp),
-    ('2641770974','TESTE DE COMPACTAÇÃO INV','2026-10-16 07:51'::timestamp),
+    ('2641770974','TESTE DE COMPACTAÇÃO INV','2026-10-16 07:51'::timestamp)
+  ) AS v(os, tss, dh)
+ WHERE o.numero_os = v.os
+   AND o.tss = v.tss
+   AND o.data_insercao = v.dh::date
+   AND o.dh_insercao IS NULL;
+
+-- lote 4
+UPDATE os_entrada o
+   SET dh_insercao = v.dh
+  FROM (VALUES
     ('2641771199','TROCAR RAMAL DE ÁGUA PREVENTIVA','2026-10-16 07:52'::timestamp),
     ('2641770974','REPOR PASSEIO ADJACENTE CIMENTADO','2026-10-16 07:52'::timestamp),
     ('2641771298','RELIGAR AGUA MUDANÇA TITULARIDADE','2026-10-16 07:52'::timestamp),
@@ -4724,13 +4708,3 @@ UPDATE os_entrada o
    AND o.data_insercao = v.dh::date
    AND o.dh_insercao IS NULL;
 
--- CONFERÊNCIA
---   SELECT count(*) FILTER (WHERE dh_insercao IS NOT NULL) AS com_hora,
---          count(*) AS total FROM os_entrada;
---
--- E o efeito no índice, medido aqui antes de gerar o arquivo:
---   dos 612 serviços FORA do prazo em 01-14/10, 42 passam a ter 4h ou
---   mais de transmissão e viram expurgo. O IDG do período sai de
---   84,03% para 85,12%. (Sabesp: 87,33%.)
---   Os 224 que continuam sem hora foram criados em setembro — é o
---   arquivo de setembro que fecha essa conta.
