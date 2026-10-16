@@ -363,6 +363,31 @@ async function fetchExecucaoSerie(token){
   }
   return out;
 }
+/* O MOVIMENTO DA CARTEIRA — entradas e saídas medidas entre duas
+   fotos, pela v_carteira_movimento.
+
+   Existe porque a conta não fechava: o Bryan somou carteira − saíram
+   + entraram e deu 83 de diferença. Os três números vinham de três
+   fontes com universos diferentes. Aqui entrada e saída saem da MESMA
+   fonte que o saldo — as fotos —, e a identidade fecha por
+   construção. (sql/carteira_movimento.sql explica a conta inteira.)
+
+   De `authenticated`, como a irmã: a aba Produção é restrita. */
+async function fetchMovimento(token){
+  const cab=token?authHeaders(token):HEADERS;
+  const out=[];let from=0;const ps=1000;
+  for(;;){
+    const r=await fetch(SUPABASE_URL+"/rest/v1/v_carteira_movimento?select=dia,unidade,familia,entraram,sairam,saiu_executado,saiu_nao_executado,saiu_outro_motivo&order=dia.asc,unidade.asc,familia.asc",
+      {headers:{...cab,"Range":from+"-"+(from+ps-1)}});
+    if(!r.ok&&r.status!==206) return null;
+    const d=await r.json();
+    if(!d?.length) break;
+    out.push(...d);
+    if(d.length<ps) break;
+    from+=ps;
+  }
+  return out;
+}
 async function fetchHistorico(){
   const allRows=[];let from=0;const ps=1000;
   while(true){
@@ -3365,12 +3390,12 @@ function CustomTooltip({active,payload,label}){
         primeira pergunta diante da coluna é quanto saiu da carteira
         naquele dia; a divisão entre executado e não executado é a
         segunda. O gráfico mostra a altura, o tooltip dá o número. */}
-    {(()=>{const e=payload.find(p=>p.dataKey==="executados")?.value,
-                n=payload.find(p=>p.dataKey==="nao_executados")?.value;
-           if(e==null&&n==null) return null;
+    {(()=>{const v=k=>payload.find(p=>p.dataKey===k)?.value;
+           const e=v("executados"), n=v("nao_executados"), o=v("outro_motivo");
+           if(e==null&&n==null&&o==null) return null;
            return <div style={{display:"flex",alignItems:"center",gap:8,padding:"2px 0",borderBottom:`1px solid ${C.border}`,marginBottom:4,paddingBottom:5}}>
              <span style={{width:8,height:8,borderRadius:2,background:C.textMuted,flexShrink:0}}/><span style={{color:C.textMuted}}>Saíram:</span>
-             <span style={{fontWeight:700,color:C.text,fontVariantNumeric:"tabular-nums"}}>{((e||0)+(n||0)).toLocaleString("pt-BR")}</span>
+             <span style={{fontWeight:700,color:C.text,fontVariantNumeric:"tabular-nums"}}>{((e||0)+(n||0)+(o||0)).toLocaleString("pt-BR")}</span>
            </div>;})()}
     {payload.filter(p=>p.value!=null).map((p,i)=>(<div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"2px 0"}}>
       <span style={{width:8,height:8,borderRadius:"50%",background:p.color,flexShrink:0}}/><span style={{color:C.textMuted}}>{p.name}:</span>
@@ -3481,7 +3506,7 @@ function OSExitModal({diaA,diaB,activeUnit,familyFilter,onClose}){
   </div>;
 }
 
-function HistoricoChart({historico,entradaSerie,execucaoSerie,activeUnit}){
+function HistoricoChart({historico,entradaSerie,execucaoSerie,movimentoSerie,activeUnit}){
   const [showChart,setShowChart]=useState(true);
   const [diffModal,setDiffModal]=useState(null);
   const [exitModal,setExitModal]=useState(null);
@@ -3558,6 +3583,40 @@ function HistoricoChart({historico,entradaSerie,execucaoSerie,activeUnit}){
       data=data.map(d=>({...d,entraram:ent[d.dia]??null}));
     }
 
+    /* MOVIMENTO — quando a série existe, ela manda nas DUAS colunas.
+
+       Entrada e saída passam a sair das fotos, a mesma fonte do
+       saldo, e aí `carteira(ontem) − saíram + entraram` fecha na
+       tela. Enquanto vinham de fontes diferentes não fechava, e
+       qualquer um que fizesse a conta de cabeça encontrava um buraco
+       de 80 serviços — foi o que aconteceu.
+
+       Repare que isto SUBSTITUI o `entraram` das entradas quando
+       está presente: são perguntas diferentes. "Entraram na carteira"
+       (aqui) não é "foram solicitados" (v_entrada_serie), que
+       continua sendo o número da coluna Entradas da aba Carteira. */
+    if(movimentoSerie?.length){
+      const mv={};
+      movimentoSerie.forEach(r=>{
+        if(unidadeFilter!==null && r.unidade!==unidadeFilter) return;
+        if(familyFilter.size>0 && !familyFilter.has(r.familia)) return;
+        if(!allFamilies.includes(r.familia)) return;
+        const d=String(r.dia).slice(0,10);
+        if(!mv[d]) mv[d]={ent:0,ex:0,ne:0,ou:0};
+        mv[d].ent+=r.entraram||0;
+        mv[d].ex +=r.saiu_executado||0;
+        mv[d].ne +=r.saiu_nao_executado||0;
+        mv[d].ou +=r.saiu_outro_motivo||0;
+      });
+      data=data.map(d=>mv[d.dia]
+        ?{...d,entraram:mv[d.dia].ent,executados:mv[d.dia].ex,
+               nao_executados:mv[d.dia].ne,outro_motivo:mv[d.dia].ou}
+        :{...d,entraram:null,executados:null,nao_executados:null,outro_motivo:null});
+      if(dateFrom) data=data.filter(d=>d.dia>=dateFrom);
+      if(dateTo)   data=data.filter(d=>d.dia<=dateTo);
+      return data.map(d=>({...d,label:fmtDiaShort(d.dia)}));
+    }
+
     /* SAÍDAS — a coluna nova, e a diferença para a antiga é o método.
        A coluna "saíram" que existia aqui era DEDUZIDA pela identidade
        do estoque (saíram = entraram − variação do saldo) e por isso
@@ -3586,7 +3645,7 @@ function HistoricoChart({historico,entradaSerie,execucaoSerie,activeUnit}){
     if(dateFrom) data = data.filter(d => d.dia >= dateFrom);
     if(dateTo) data = data.filter(d => d.dia <= dateTo);
     return data.map(d=>({...d,label:fmtDiaShort(d.dia)}));
-  },[historico,entradaSerie,execucaoSerie,allFamilies,unidadeFilter,familyFilter,dateFrom,dateTo]);
+  },[historico,entradaSerie,execucaoSerie,movimentoSerie,allFamilies,unidadeFilter,familyFilter,dateFrom,dateTo]);
 
   const handleChartClick = useCallback((e)=>{
     if(!e?.activePayload?.length) return;
@@ -3610,6 +3669,8 @@ function HistoricoChart({historico,entradaSerie,execucaoSerie,activeUnit}){
   const temSaida = chartData.some(d=>d.executados!=null||d.nao_executados!=null);
   const somaExec = chartData.reduce((a,d)=>a+(d.executados||0),0);
   const somaNE   = chartData.reduce((a,d)=>a+(d.nao_executados||0),0);
+  const temOutro = chartData.some(d=>d.outro_motivo!=null);
+  const somaOU   = chartData.reduce((a,d)=>a+(d.outro_motivo||0),0);
 
   return <div style={{background:C.card,borderRadius:RAIO,border:`1px solid ${C.border}`,marginBottom:16,overflow:"hidden"}}>
     <div onClick={()=>setShowChart(!showChart)} style={{padding:"14px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",borderBottom:showChart?`1px solid ${C.border}`:"none"}}
@@ -3625,6 +3686,7 @@ function HistoricoChart({historico,entradaSerie,execucaoSerie,activeUnit}){
         </span>}
         {temSaida&&<span style={{fontSize:11,color:C.textDim}}>
           <b style={{color:C.green}}>{somaExec}</b> executados · <b style={{color:C.amber}}>{somaNE}</b> não
+          {temOutro&&somaOU>0&&<> · <b style={{color:C.textMuted}}>{somaOU}</b> outro motivo</>}
         </span>}
         <span style={{color:varTotal>0?C.red:varTotal<0?C.green:C.textDim,fontWeight:600}}>{varTotal>0?"+":""}{varTotal} OS</span>
         <span style={{color:varFora>0?C.red:varFora<0?C.green:C.textDim,fontWeight:600}}>{varFora>0?"+":""}{varFora} fora</span>
@@ -3687,7 +3749,13 @@ function HistoricoChart({historico,entradaSerie,execucaoSerie,activeUnit}){
                 a parte que se compara de um dia para o outro. */}
             {temMovimento&&<RBar yAxisId="mov" dataKey="entraram" name="Entraram" fill={C.accent} fillOpacity={0.5} radius={[2,2,0,0]} maxBarSize={14}/>}
             {temSaida&&<RBar yAxisId="mov" stackId="saiu" dataKey="executados" name="Executados" fill={C.green} fillOpacity={0.55} maxBarSize={14}/>}
-            {temSaida&&<RBar yAxisId="mov" stackId="saiu" dataKey="nao_executados" name="Não executados" fill={C.amber} fillOpacity={0.55} radius={[2,2,0,0]} maxBarSize={14}/>}
+            {temSaida&&<RBar yAxisId="mov" stackId="saiu" dataKey="nao_executados" name="Não executados" fill={C.amber} fillOpacity={0.55} radius={temOutro?undefined:[2,2,0,0]} maxBarSize={14}/>}
+            {/* Terceira faixa: saiu da carteira SEM baixa — cancelada
+                ou mudança de status. Cinza porque não é produção nem
+                falha de produção; é a OS deixando de existir. Só
+                aparece quando a série de movimento está ligada, que é
+                a única que sabe distinguir isso. */}
+            {temOutro&&<RBar yAxisId="mov" stackId="saiu" dataKey="outro_motivo" name="Outro motivo" fill={C.textDim} fillOpacity={0.55} radius={[2,2,0,0]} maxBarSize={14}/>}
             <Area yAxisId="saldo" type="monotone" dataKey="total" name="Carteira" stroke={C.accent} fill="url(#gradTotal)" strokeWidth={2.4} dot={false} activeDot={{r:6,stroke:C.accent,strokeWidth:2,fill:C.card}}/>
             <RLine yAxisId="saldo" type="monotone" dataKey="no_prazo" name="No Prazo" stroke={C.green} strokeWidth={2} dot={false} activeDot={{r:5,stroke:C.green,strokeWidth:2,fill:C.card}}/>
             <RLine yAxisId="saldo" type="monotone" dataKey="fora_prazo" name="Fora do Prazo" stroke={C.red} strokeWidth={2} dot={false} activeDot={{r:5,stroke:C.red,strokeWidth:2,fill:C.card}}/>
@@ -3696,7 +3764,8 @@ function HistoricoChart({historico,entradaSerie,execucaoSerie,activeUnit}){
         <div style={{display:"flex",justifyContent:"center",gap:18,padding:"4px 0 2px",flexWrap:"wrap"}}>
           {[{label:"Carteira",color:C.accent,barra:false},{label:"No Prazo",color:C.green,barra:false},{label:"Fora do Prazo",color:C.red,barra:false},
             ...(temMovimento?[{label:"Entraram",color:C.accent,barra:true}]:[]),
-            ...(temSaida?[{label:"Executados",color:C.green,barra:true},{label:"Não executados",color:C.amber,barra:true}]:[])].map(l=>
+            ...(temSaida?[{label:"Executados",color:C.green,barra:true},{label:"Não executados",color:C.amber,barra:true}]:[]),
+            ...(temOutro?[{label:"Outro motivo",color:C.textDim,barra:true}]:[])].map(l=>
             <div key={l.label} style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:C.textMuted}}>
               <span style={{width:l.barra?8:10,height:l.barra?9:3,borderRadius:2,background:l.color,opacity:l.barra?0.5:1}}/>{l.label}
             </div>
@@ -5098,9 +5167,14 @@ function ProducaoView({sess,onLogout,historico,entradaSerie,activeUnit}){
      com a chave anônima do bundle. O gráfico mudou de aba a pedido:
      por enquanto só o Bryan e o gerente veem. */
   const [execucaoSerie,setExecucaoSerie]=useState(null);
+  const [movimentoSerie,setMovimentoSerie]=useState(null);
   useEffect(()=>{let vivo=true;
-    (async()=>{try{const xs=await fetchExecucaoSerie(sess?.access_token);
-      if(vivo&&xs?.length>0)setExecucaoSerie(xs);}catch{}})();
+    (async()=>{
+      try{const xs=await fetchExecucaoSerie(sess?.access_token);
+        if(vivo&&xs?.length>0)setExecucaoSerie(xs);}catch{}
+      try{const mv=await fetchMovimento(sess?.access_token);
+        if(vivo&&mv?.length>0)setMovimentoSerie(mv);}catch{}
+    })();
     return()=>{vivo=false;};
   },[sess?.access_token]);
 
@@ -5267,7 +5341,7 @@ function ProducaoView({sess,onLogout,historico,entradaSerie,activeUnit}){
         Ele traz os próprios filtros de período e família, separados
         dos filtros de Produção logo abaixo — são duas perguntas
         diferentes na mesma tela. */}
-    {historico&&historico.length>0&&<HistoricoChart historico={historico} entradaSerie={entradaSerie} execucaoSerie={execucaoSerie} activeUnit={activeUnit}/>}
+    {historico&&historico.length>0&&<HistoricoChart historico={historico} entradaSerie={entradaSerie} execucaoSerie={execucaoSerie} movimentoSerie={movimentoSerie} activeUnit={activeUnit}/>}
 
     {/* filtros */}
     <div style={{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,padding:"12px 16px",marginBottom:14,display:"flex",flexDirection:"column",gap:10}}>

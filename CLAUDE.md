@@ -145,7 +145,24 @@ foto diária e no histórico, que é o que alimenta o gráfico.
 
 ## Saídas da carteira
 
-- **A conta `carteira − saíram + entraram` NÃO fecha, e não é defeito:
+- **A conta passou a FECHAR, pela `v_carteira_movimento`** (16/10,
+  depois que o Bryan pediu o número certo). Entrada e saída passam a
+  ser medidas comparando cada foto com a anterior, par a par — a
+  mesma fonte do saldo —, e a identidade `carteira(ontem) − saíram +
+  entraram = carteira(hoje)` vale **por construção**. Conferida em 15
+  transições de 26/09 a 15/10: fecha em todas. As saídas vêm partidas
+  em executado / não executado / **outro motivo** (saiu sem baixa:
+  cancelamento, mudança de status — 26 em 01/10).
+
+  O que ficou de fora de propósito: os serviços que nascem e morrem
+  entre duas fotos (126 em 01/10, 40% das baixas). São produção, não
+  movimento de carteira. Merecem número próprio, noutro lugar da tela.
+
+  Só a aba Produção usa isso; a Pendente continua com a série de
+  entradas antiga, que responde outra pergunta ("quantos foram
+  solicitados", não "quantos entraram na carteira").
+
+- **Antes disso, a conta NÃO fechava, e não era defeito:
   as três linhas medem universos diferentes.** Medido em 01/10/2026
   (Bryan perguntou por quê, e estava certo em estranhar):
 
