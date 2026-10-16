@@ -388,6 +388,36 @@ async function fetchMovimento(token){
   }
   return out;
 }
+/* O SALDO CONTADO DA MESMA FOTO que o movimento, pela v_carteira_foto.
+
+   Existe porque, com o movimento já no ar, a conta ainda errava por
+   pouco: 743 − 206 + 238 dava 775 e a tela mostrava 772. A entrada e a
+   saída estavam certas; a linha azul é que vinha da pendente_historico,
+   que conta SERVIÇOS, enquanto o movimento conta OS — a foto diária
+   guarda uma linha por OS e perde o segundo serviço da mesma OS. O
+   buraco varia de 5 a 24 por dia, e o erro na tela era a variação dele.
+   (sql/carteira_foto.sql tem a medição inteira.)
+
+   Mesma forma da pendente_historico, de propósito: o gráfico só troca
+   a fonte. Devolve null se a view não existir — e aí a aba volta a ser
+   o que era, com a conta errando de novo, em vez de ficar sem gráfico.
+
+   De `authenticated`, como as irmãs: a aba Produção é restrita. */
+async function fetchCarteiraFoto(token){
+  const cab=token?authHeaders(token):HEADERS;
+  const out=[];let from=0;const ps=1000;
+  for(;;){
+    const r=await fetch(SUPABASE_URL+"/rest/v1/v_carteira_foto?select=dia,unidade,familia,no_prazo,fora_prazo,total&order=dia.asc,unidade.asc,familia.asc",
+      {headers:{...cab,"Range":from+"-"+(from+ps-1)}});
+    if(!r.ok&&r.status!==206) return null;
+    const d=await r.json();
+    if(!d?.length) break;
+    out.push(...d);
+    if(d.length<ps) break;
+    from+=ps;
+  }
+  return out;
+}
 async function fetchHistorico(){
   const allRows=[];let from=0;const ps=1000;
   while(true){
@@ -5168,15 +5198,23 @@ function ProducaoView({sess,onLogout,historico,entradaSerie,activeUnit}){
      por enquanto só o Bryan e o gerente veem. */
   const [execucaoSerie,setExecucaoSerie]=useState(null);
   const [movimentoSerie,setMovimentoSerie]=useState(null);
+  /* O saldo desta aba sai da v_carteira_foto, não da pendente_historico:
+     é a mesma foto de onde saem a entrada e a saída, e só assim a conta
+     fecha na tela. Enquanto a view não existir no banco, fica null e a
+     aba usa o histórico de sempre. */
+  const [fotoSerie,setFotoSerie]=useState(null);
   useEffect(()=>{let vivo=true;
     (async()=>{
       try{const xs=await fetchExecucaoSerie(sess?.access_token);
         if(vivo&&xs?.length>0)setExecucaoSerie(xs);}catch{}
       try{const mv=await fetchMovimento(sess?.access_token);
         if(vivo&&mv?.length>0)setMovimentoSerie(mv);}catch{}
+      try{const ft=await fetchCarteiraFoto(sess?.access_token);
+        if(vivo&&ft?.length>0)setFotoSerie(ft);}catch{}
     })();
     return()=>{vivo=false;};
   },[sess?.access_token]);
+  const saldoSerie = fotoSerie?.length ? fotoSerie : historico;
 
   const primeiroDoMes=()=>{const d=new Date();return fmtISO(new Date(d.getFullYear(),d.getMonth(),1));};
   const [ini,setIni]=useState(primeiroDoMes());
@@ -5341,7 +5379,7 @@ function ProducaoView({sess,onLogout,historico,entradaSerie,activeUnit}){
         Ele traz os próprios filtros de período e família, separados
         dos filtros de Produção logo abaixo — são duas perguntas
         diferentes na mesma tela. */}
-    {historico&&historico.length>0&&<HistoricoChart historico={historico} entradaSerie={entradaSerie} execucaoSerie={execucaoSerie} movimentoSerie={movimentoSerie} activeUnit={activeUnit}/>}
+    {saldoSerie&&saldoSerie.length>0&&<HistoricoChart historico={saldoSerie} entradaSerie={entradaSerie} execucaoSerie={execucaoSerie} movimentoSerie={movimentoSerie} activeUnit={activeUnit}/>}
 
     {/* filtros */}
     <div style={{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,padding:"12px 16px",marginBottom:14,display:"flex",flexDirection:"column",gap:10}}>

@@ -26,6 +26,21 @@ foto diária e no histórico, que é o que alimenta o gráfico.
 - **A unidade do negócio é o par (numero_os, tss)**, não a OS. Uma OS que
   gera duas etapas conta duas vezes — é assim que a equipe é medida.
 
+- **…e a `pendente_diario_os` desobedece a isso: ela guarda UMA LINHA
+  POR OS.** Medido em 16/10/2026 em todos os dias testados — o número
+  de linhas é exatamente igual ao de OS distintas, nunca sobra uma.
+  Quando a OS carrega dois serviços, o segundo não é gravado: no export
+  cru de 16/10, 937 linhas para 917 OS, 17 OS com mais de um serviço,
+  quase todas de REPOSIÇÃO. Por isso a `pendente_historico` (serviços)
+  fica de 5 a 24 acima da foto (OS), **sem padrão**, e foi essa
+  variação — não o buraco — que fazia a conta da tela errar por 3 num
+  dia e 83 noutro. A aba Produção passou a contar o saldo da própria
+  foto (`v_carteira_foto`) para a conta fechar; a Pendente continua na
+  `pendente_historico`, que é o número do contrato. **O conserto de
+  verdade é no robô**, gravando por par (numero_os, tss) — e só vale
+  daí em diante: as linhas que nunca foram gravadas não existem em
+  lugar nenhum. *(16/10/2026, Bryan conferindo o gráfico)*
+
 - **"Saiu da carteira" não é "executada".** Pode ter sido cancelada ou
   encerrada sem execução. O porquê está na aba Etiquetas.
 
