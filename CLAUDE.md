@@ -50,6 +50,23 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   deste projeto, olhar as colunas que ela realmente tem** — é um
   SELECT.
 
+- **APLICADO em 16/10/2026, 13h56, e CONFERIDO contra a Sabesp.** As
+  13.486 horas do backfill (agosto, setembro, outubro, da tela Lista
+  OS) mais as 984 da carteira aberta deixaram 13.572 de 15.076 linhas
+  da `os_entrada` com hora — 90%. Resultado medido:
+
+  | | antes | depois | Sabesp |
+  |---|---|---|---|
+  | veredito igual ao deles | 97,53% | **98,69%** | — |
+  | IDG 01-14/10 | 85,20% | **86,36%** | 87,33% |
+  | setembro | 78,63% | **81,08%** | — |
+
+  Diferença caiu de 2,13 pp para **0,97 pp**, e o ISAPe passou a dar
+  +0,39 — ficamos ligeiramente ACIMA deles numa frente. O que ainda
+  diverge: 34 expurgos de transmissão (OS que nunca passaram pelo
+  pendente, logo sem hora), 3 de suspensão (não temos o campo) e 9
+  divergências reais.
+
 - **O expurgo de transmissão foi LIGADO em 16/10/2026** (`sql/transmissao.sql`,
   seção 6), e a regra do NULL é o coração dele: **sem a hora da
   inserção, não expurga**. Quem foi executado antes de 16/10 tem
