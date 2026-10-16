@@ -58,7 +58,35 @@ SELECT f.dia,
  GROUP BY 1, 2, 3;
 
 ALTER VIEW v_execucao_serie SET (security_invoker = on);
+
+/* O REVOKE NÃO É ENFEITE — SEM ELE A VIEW NASCE ABERTA.
+
+   Em 16/10/2026, logo depois de aplicar a primeira versão deste
+   arquivo, a chave anônima do navegador leu a view normalmente. O
+   GRANT para authenticated não fecha nada: o Supabase tem DEFAULT
+   PRIVILEGES no schema public que já concedem SELECT a anon em todo
+   objeto novo. Conceder a um papel não tira de outro.
+
+   É a mesma lição que já está no sql/isap_acesso.sql e no CLAUDE.md
+   — esconder a aba na tela não protege uma view que a chave do
+   navegador alcança — e eu repeti o erro mesmo com ela escrita. */
+REVOKE ALL ON v_execucao_serie FROM anon;
 GRANT SELECT ON v_execucao_serie TO authenticated;
+
+-- Conferir que fechou (tem que devolver 0 linhas para anon):
+--   SELECT grantee, privilege_type FROM information_schema.role_table_grants
+--    WHERE table_name = 'v_execucao_serie';
+
+-- ATENÇÃO, O BURACO MAIOR CONTINUA ABERTO:
+-- a própria tabela `execucao` tem política de RLS liberando SELECT
+-- para anon (sql/execucao.sql, linha 147). Fechar esta view impede
+-- que alguém leia a série pronta, mas quem tiver a chave do bundle
+-- ainda lê a tabela e refaz a conta. Fechar de verdade exige a
+-- etapa 2 do sql/producao.sql — criar a v_execucao_publica (só
+-- numero_os, tss, dia, que é o que a aba Carteira usa) e tirar o
+-- anon da `execucao`. Essa etapa nunca foi rodada: hoje o
+-- fetchExecucao do app cai no fallback e lê a tabela direto.
+
 
 -- Conferência depois de aplicar — tem que bater com o bloco acima:
 --
