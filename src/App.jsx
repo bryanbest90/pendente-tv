@@ -3431,6 +3431,23 @@ function CustomTooltip({active,payload,label}){
       <span style={{width:8,height:8,borderRadius:"50%",background:p.color,flexShrink:0}}/><span style={{color:C.textMuted}}>{p.name}:</span>
       <span style={{fontWeight:700,color:p.color,fontVariantNumeric:"tabular-nums"}}>{Number(p.value).toLocaleString("pt-BR")}</span>
     </div>))}
+    {/* A CONTA ESCRITA. Sem ela, quem lê o tooltip de um dia só compara
+        a carteira DELE com o movimento DELE e encontra um buraco que
+        não existe — a barra do dia D é o que entrou e saiu de D−1 para
+        D. Escrever `ontem − saíram + entraram = hoje` encerra a dúvida
+        sem precisar de explicação ao lado. */}
+    {(()=>{const row=payload[0]?.payload;
+           if(row?.ontem==null||row?.entraram==null) return null;
+           const v=k=>payload.find(p=>p.dataKey===k)?.value;
+           const e=v("executados"), n=v("nao_executados"), o=v("outro_motivo");
+           if(e==null&&n==null&&o==null) return null;
+           const sai=(e||0)+(n||0)+(o||0), ent=row.entraram;
+           return <div style={{fontSize:10,color:C.textDim,marginTop:5,borderTop:`1px solid ${C.border}`,paddingTop:5,lineHeight:1.5}}>
+             <div style={{fontVariantNumeric:"tabular-nums",color:C.textMuted}}>
+               {row.ontem.toLocaleString("pt-BR")} − {sai.toLocaleString("pt-BR")} + {ent.toLocaleString("pt-BR")} = <strong style={{color:C.text}}>{(row.ontem-sai+ent).toLocaleString("pt-BR")}</strong>
+             </div>
+             <div>carteira de {fmtDiaShort(row.diaAnt)}, movimento até {label}</div>
+           </div>;})()}
     <div style={{fontSize:10,color:C.textDim,marginTop:4,borderTop:`1px solid ${C.border}`,paddingTop:4}}>Clique para ver variação</div>
   </div>;
 }
@@ -3642,6 +3659,22 @@ function HistoricoChart({historico,entradaSerie,execucaoSerie,movimentoSerie,act
         ?{...d,entraram:mv[d.dia].ent,executados:mv[d.dia].ex,
                nao_executados:mv[d.dia].ne,outro_motivo:mv[d.dia].ou}
         :{...d,entraram:null,executados:null,nao_executados:null,outro_motivo:null});
+      /* O saldo do dia ANTERIOR viaja junto com o ponto, para o tooltip
+         poder escrever a conta inteira.
+
+         Isto existe porque a conta fecha e mesmo assim não parecia
+         fechar: a barra do dia D é o movimento que aconteceu de D−1
+         para D, então ela se compara com a carteira de ONTEM. Lendo o
+         tooltip de um dia só — 730 − 220 + 242 — dá 752, e parece
+         erro. É a mesma leitura deslocada que já custou duas voltas
+         nesta conversa, e a correção é escrever a conta na tela em vez
+         de esperar que quem olha adivinhe de qual dia é cada número.
+
+         Calculado ANTES do filtro de data de propósito: senão o
+         primeiro dia visível ficava sem "ontem" só porque o dia
+         anterior está fora da janela escolhida. */
+      const serie=data;
+      data=serie.map((d,i)=>i>0?{...d,ontem:serie[i-1].total,diaAnt:serie[i-1].dia}:{...d});
       if(dateFrom) data=data.filter(d=>d.dia>=dateFrom);
       if(dateTo)   data=data.filter(d=>d.dia<=dateTo);
       return data.map(d=>({...d,label:fmtDiaShort(d.dia)}));
