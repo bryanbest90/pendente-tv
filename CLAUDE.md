@@ -382,9 +382,33 @@ foto diária e no histórico, que é o que alimenta o gráfico.
 
 - **A contagem por setor sai do campo SF, NUNCA dos pinos.** O SF vem
   preenchido em todas as linhas; o pino depende de a rua existir na
-  `coord_rua`, e hoje 150 dos 772 serviços não têm ponto — quase todos
-  em avenidas e estradas. Contar `pontos.length` faria o mapa mentir
-  por 20%. *(16/11/2026)*
+  `coord_rua`. Hoje são 10 serviços sem ponto, em 7 ruas que a
+  biblioteca realmente não tem — mas já foram 150, e podem voltar a
+  ser se a biblioteca ficar para trás. Contar `pontos.length` é
+  contar outra coisa. *(17/11/2026)*
+
+- **A rua casa pelo MIOLO do nome, sem a palavra do tipo.** O
+  pendente escreve "AVENIDA PAULO GUILGUER REIMBERG" e a coord_rua
+  escreve "AV PAULO GUILGUER REIMBERG": com `=` entre os dois, 132
+  dos 665 serviços ficavam sem pino. Eu olhei para a lista de
+  avenidas e concluí que a biblioteca não tinha avenida — a
+  biblioteca tinha, o rótulo é que não batia. Tirar o tipo junta 345
+  pares de ruas que só diferem nele (VIELA CANARIOS e RUA CANARIOS),
+  e tudo bem, porque quem desempata é o setor: dos 122 que passaram a
+  ter pino, 121 acharam ponto do próprio setor. *(17/11/2026)*
+
+- **Casamento por semelhança de nome está DESCARTADO.** Sobram 7
+  ruas, e duas cheiram a digitação ("AGOSTINO" por "AGOSTINHO
+  STEFFANI"). Adivinhar a rua a partir de um nome parecido põe o
+  serviço na quadra errada, e pino errado é pior que pino nenhum.
+
+- **Serviço que divide coordenada com outro é aberto num anel.** Dois
+  serviços do mesmo imóvel recebem a MESMA coordenada da biblioteca e
+  viravam uma bolinha só: no setor 259, 11 vazamentos desenhavam 8
+  pontos, e a conta da lista não batia com o que se via. O
+  afastamento é feito em pixels de tela, na câmera — em unidades do
+  mapa ele sumiria justamente quando o mapa está todo na tela, que é
+  quando mais se empilha. *(Bryan, 17/11/2026)*
 
 - **O desempate de endereço é o SETOR, e ele já está na biblioteca.**
   A mesma rua existe em vários lugares: cinco "RUA PARANÁ", três "RUA
@@ -395,10 +419,13 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   setor. Testei também o centro do setor (erra 37) e o polígono (bom,
   mas é geometria no banco para ganhar nada).
 
-- **A conta roda no banco, na `v_pendente_mapa`.** No navegador seria
-  baixar os 239.743 pontos a cada abertura, uns 12 MB. A view foi
-  conferida contra a mesma regra escrita em Python, na carteira
-  inteira: 620 pares, 620 iguais, zero diferença.
+- **A conta roda no banco, na `v_pendente_mapa`, e o
+  `sql/mapa_ocorrencias.sql` é o ÚNICO arquivo que a cria.** No
+  navegador seria baixar os 239.743 pontos a cada abertura, uns 12
+  MB. A view foi conferida contra a mesma regra escrita em Python, na
+  mesma foto da carteira: 758 pares, 758 iguais, zero diferença.
+  Conferir contra a carteira ao vivo dá diferença de duas ou três
+  linhas e não é defeito — é o robô tendo rodado no meio.
 
 - **A aba recebe o `filteredRows`, não busca linha nenhuma.** Mesma
   unidade, mesmo `familiaTssVisivel`, mesmo `excludedTSS` da Pendente.

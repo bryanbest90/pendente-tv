@@ -7102,7 +7102,14 @@ function MapaView({rows,excludedTSS}){
     const s=Math.max(1e-6,c.k*c.esc0);
     svg.querySelectorAll("circle[data-os]").forEach(el=>{
       el.setAttribute("r",((el.dataset.fora==="1"?6.1:4.1)/s).toFixed(2));
-      el.setAttribute("stroke-width",(1.2/s).toFixed(2));});
+      el.setAttribute("stroke-width",(1.2/s).toFixed(2));
+      const gn=+el.dataset.gn;
+      if(gn>1){                      // abre o anel de quem divide o ponto
+        const gi=+el.dataset.gi, ang=2*Math.PI*gi/gn-Math.PI/2;
+        const raio=(gn<=2?9:gn<=5?11:14)/s;
+        el.setAttribute("cx",(+el.dataset.bx+Math.cos(ang)*raio).toFixed(2));
+        el.setAttribute("cy",(+el.dataset.by+Math.sin(ang)*raio).toFixed(2));
+      }});
     svg.querySelectorAll("polygon[data-setor]").forEach(el=>
       el.setAttribute("stroke-width",((el.dataset.sel==="1"?2.4:0.9)/s).toFixed(2)));
     svg.querySelectorAll("text[data-setor]").forEach(el=>{
@@ -7115,21 +7122,29 @@ function MapaView({rows,excludedTSS}){
       el.style.display=(el.dataset.sel==="1"||cabe)?"":"none";});
   },[BB,caixas]);
 
-  const enquadrar=useCallback(pontos=>{
+  /* `folga` é a sobra em volta do que se quer ver. Ao abrir um setor
+     ela é pequena (0,06): a ideia é justamente encostar nele. Ao
+     mostrar uma família inteira ela é maior, porque ali os pontos são
+     o assunto e o contorno em volta é o que situa. */
+  const enquadrar=useCallback((pontos,folga=0.16)=>{
     const c=camRef.current;
     if(!pontos||pontos.length<2){c.k=1;c.cx=BB.x0+BB.w/2;c.cy=BB.y0+BB.h/2;aplicarCamera();return;}
     let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
     for(const p of pontos){if(p[0]<x0)x0=p[0];if(p[0]>x1)x1=p[0];if(p[1]<y0)y0=p[1];if(p[1]>y1)y1=p[1];}
-    const mg=Math.max(x1-x0,y1-y0)*0.16+14;
+    const mg=Math.max(x1-x0,y1-y0)*folga+8;
     x0-=mg;x1+=mg;y0-=mg;y1+=mg;
-    c.k=Math.max(1,Math.min(16,Math.min(BB.w/(x1-x0),BB.h/(y1-y0))));
+    c.k=Math.max(1,Math.min(24,Math.min(BB.w/(x1-x0),BB.h/(y1-y0))));
     c.cx=(x0+x1)/2;c.cy=(y0+y1)/2;aplicarCamera();
   },[BB,aplicarCamera]);
 
   const enquadrarFamilia=useCallback(()=>{
+    // sem família escolhida o assunto é a região inteira, e aí o
+    // enquadramento é o mapa todo e não o retângulo dos pontos — que
+    // deixava uma borda do desenho cortada para fora da tela
+    if(!famSel){enquadrar(null);return;}
     const p=visiveis.filter(o=>o.la!==undefined).map(o=>proj(o.la,o.lo));
     enquadrar(p.length>2?p:null);
-  },[visiveis,proj,enquadrar]);
+  },[famSel,visiveis,proj,enquadrar]);
 
   const aproximar=useCallback((telaX,telaY,novoK)=>{
     const c=camRef.current,vp=vpRef.current;if(!vp)return;
@@ -7183,11 +7198,20 @@ function MapaView({rows,excludedTSS}){
   useEffect(()=>{aplicarCamera();},[visiveis,setorSel,aplicarCamera]);
   useEffect(()=>{if(coords)enquadrar(null);},[coords,enquadrar]);
 
+  const voltarAoMapa=useCallback(()=>{setSetorSel(null);enquadrarFamilia();},[enquadrarFamilia]);
   const escolherSetor=sf=>{
     const novo=setorSel===sf?null:sf;setSetorSel(novo);
-    if(novo){const s=MAPA_SETORES.setores.find(x=>x.setor===novo);enquadrar(s?s.pontos:null);}
+    if(novo){const s=MAPA_SETORES.setores.find(x=>x.setor===novo);enquadrar(s?s.pontos:null,0.06);}
     else enquadrarFamilia();
   };
+  // Esc sai do foco: a tela fica num recorte de um setor só, e toda
+  // tela que prende precisa de uma saída que não exija mirar num botão
+  useEffect(()=>{
+    if(!setorSel) return;
+    const tecla=e=>{if(e.key==="Escape")voltarAoMapa();};
+    window.addEventListener("keydown",tecla);
+    return()=>window.removeEventListener("keydown",tecla);
+  },[setorSel,voltarAoMapa]);
   const escolherFamilia=f=>{
     setFamSel(famSel===f?null:f);setSetorSel(null);
     setTimeout(()=>{const alvo=(famSel===f?base:base.filter(o=>o.fam===f))
@@ -7195,9 +7219,29 @@ function MapaView({rows,excludedTSS}){
       enquadrar(alvo.length>2?alvo:null);},0);
   };
 
-  const pontos=useMemo(()=>visiveis
-    .filter(o=>o.la!==undefined&&(!setorSel||o.sf===setorSel))
-    .sort((a,b)=>(a.fora?1:0)-(b.fora?1:0)),[visiveis,setorSel]);
+  /* Serviços no MESMO ponto viram uma bolinha só, e a conta do setor
+     deixa de bater com o que se vê: no setor 259, 11 vazamentos
+     desenhavam 8 bolinhas. Acontece porque a biblioteca de endereços
+     dá a mesma coordenada para dois serviços do mesmo imóvel, ou do
+     mesmo número.
+
+     Então quem divide ponto é aberto num anel — `gi` é a posição no
+     anel e `gn` quantos são. O afastamento é aplicado na câmera, em
+     pixels de TELA: em unidades do mapa ele sumiria quando o mapa
+     está inteiro na tela, que é justamente quando mais se empilha. */
+  const pontos=useMemo(()=>{
+    const lista=visiveis
+      .filter(o=>o.la!==undefined&&(!setorSel||o.sf===setorSel))
+      .sort((a,b)=>(a.fora?1:0)-(b.fora?1:0));
+    const grupo=new Map();
+    lista.forEach(o=>{const k=o.la+","+o.lo;grupo.set(k,(grupo.get(k)||0)+1);});
+    const visto=new Map();
+    return lista.map(o=>{
+      const k=o.la+","+o.lo, i=visto.get(k)||0;
+      visto.set(k,i+1);
+      return {...o,gi:i,gn:grupo.get(k)};
+    });
+  },[visiveis,setorSel]);
 
   const detalhe=useMemo(()=>{
     if(!setorSel)return null;
@@ -7262,37 +7306,57 @@ function MapaView({rows,excludedTSS}){
         <div style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap",marginBottom:8}}>
           <button onClick={()=>{camRef.current.k=Math.min(16,camRef.current.k*1.4);aplicarCamera();}} style={btnTiny}>＋</button>
           <button onClick={()=>{camRef.current.k=Math.max(1,camRef.current.k*0.71);aplicarCamera();}} style={btnTiny}>－</button>
-          <button onClick={()=>{setSetorSel(null);enquadrarFamilia();}} style={btnTiny}>Reenquadrar</button>
+          {/* Com um setor aberto, o botão deixa de ser "reenquadrar" e
+              passa a ser a saída — em destaque, porque a tela está num
+              recorte e precisa dizer como se volta dele. Esc faz o
+              mesmo. */}
+          {setorSel
+            ?<button onClick={voltarAoMapa}
+               style={{...btnTiny,background:C.accentBg,borderColor:"rgba(59,130,246,0.45)",color:C.accent,fontWeight:700}}>
+               ← Voltar ao mapa todo</button>
+            :<button onClick={()=>enquadrarFamilia()} style={btnTiny}>Reenquadrar</button>}
           <label style={{display:"inline-flex",alignItems:"center",gap:6,fontSize:12.5,color:C.textMuted,
             cursor:"pointer",userSelect:"none",padding:"4px 10px",border:`1px solid ${C.border}`,borderRadius:7}}>
             <input type="checkbox" checked={soFora} onChange={e=>{setSoFora(e.target.checked);setSetorSel(null);}}/>
             só fora do prazo
           </label>
-          <span style={{marginLeft:"auto",fontSize:11.5,color:C.textDim}}>arraste para mover · roda do mouse ou pinça para aproximar</span>
+          <span style={{marginLeft:"auto",fontSize:11.5,color:C.textDim}}>
+            {setorSel?`setor ${setorSel} em foco · Esc ou clique fora para sair`:"arraste para mover · roda do mouse ou pinça para aproximar"}</span>
         </div>
+        {/* userSelect:"none" porque arrastar o mapa é arrastar o mouse
+            com o botão preso, e o navegador entende isso como seleção
+            de texto: os rótulos dos setores saíam grifados de azul. */}
         <div ref={vpRef} onPointerLeave={()=>setDica(null)}
           style={{position:"relative",overflow:"hidden",borderRadius:10,background:C.bg,
-            height:"min(72vh,820px)",touchAction:"none",cursor:"grab"}}>
-          <svg ref={svgRef} preserveAspectRatio="xMidYMid meet" style={{display:"block",width:"100%",height:"100%"}}>
+            height:"min(72vh,820px)",touchAction:"none",cursor:"grab",
+            userSelect:"none",WebkitUserSelect:"none",MozUserSelect:"none"}}>
+          <svg ref={svgRef} preserveAspectRatio="xMidYMid meet" style={{display:"block",width:"100%",height:"100%"}}
+            onClick={e=>{if(e.target===e.currentTarget&&!camRef.current.mexeu&&setorSel)voltarAoMapa();}}>
             {MAPA_SETORES.setores.map(s=>{
               const v=porSetor.get(s.setor),q=v?v.n:0,sel=setorSel===s.setor;
               return <polygon key={s.setor} data-setor={s.setor} data-sel={sel?"1":"0"}
                 points={s.pontos.map(p=>p[0]+","+p[1]).join(" ")}
                 fill={faixa(q)} stroke={sel?C.accent:MAPA_TRACO}
-                opacity={setorSel&&!sel?0.45:1} style={{cursor:"pointer"}}
+                opacity={setorSel&&!sel?0.2:1} style={{cursor:"pointer"}}
                 onClick={()=>{if(!camRef.current.mexeu)escolherSetor(s.setor);}}
                 onPointerEnter={e=>mostrarDica(e,{tipo:"setor",setor:s.setor,v})}
                 onPointerLeave={()=>setDica(null)}/>;
             })}
-            {pontos.map((o,i)=><circle key={i} data-os="1" data-fora={o.fora?"1":"0"}
-              cx={proj(o.la,o.lo)[0].toFixed(1)} cy={proj(o.la,o.lo)[1].toFixed(1)}
-              fill={o.fora?C.red:C.green} stroke={C.bg}
-              onPointerEnter={e=>mostrarDica(e,{tipo:"os",os:o})}
-              onPointerLeave={()=>setDica(null)}/>)}
+            {pontos.map((o,i)=>{
+              const [bx,by]=proj(o.la,o.lo);
+              return <circle key={i} data-os="1" data-fora={o.fora?"1":"0"}
+                data-bx={bx.toFixed(2)} data-by={by.toFixed(2)} data-gi={o.gi} data-gn={o.gn}
+                cx={bx.toFixed(2)} cy={by.toFixed(2)}
+                fill={o.fora?C.red:C.green} stroke={C.bg}
+                onPointerEnter={e=>mostrarDica(e,{tipo:"os",os:o})}
+                onPointerLeave={()=>setDica(null)}/>;
+            })}
             {MAPA_SETORES.setores.map(s=>{
               const v=porSetor.get(s.setor),q=v?v.n:0;
-              return <text key={s.setor} data-setor={s.setor} data-cheio={q?"1":"0"} data-sel={setorSel===s.setor?"1":"0"}
-                x={s.cx} y={s.cy} textAnchor="middle" fill={C.textMuted} fontWeight={700}
+              const sel=setorSel===s.setor;
+              return <text key={s.setor} data-setor={s.setor} data-cheio={q?"1":"0"} data-sel={sel?"1":"0"}
+                x={s.cx} y={s.cy} textAnchor="middle" fontWeight={700}
+                fill={sel?C.accent:C.textMuted} opacity={setorSel&&!sel?0.35:1}
                 stroke={C.bg} strokeLinejoin="round" paintOrder="stroke" style={{pointerEvents:"none"}}>
                 {q?s.setor+" · "+q:s.setor}</text>;
             })}
@@ -7365,7 +7429,9 @@ function MapaView({rows,excludedTSS}){
            <span style={{display:"block",color:C.textDim}}>{dica.html.os.bairro} · setor {dica.html.os.sf}</span>
            <span style={{display:"inline-block",marginTop:4,padding:"1px 8px",borderRadius:99,fontSize:11,
              fontWeight:700,color:"#fff",background:dica.html.os.fora?C.red:C.green}}>
-             {dica.html.os.residual||(dica.html.os.fora?"fora do prazo":"dentro do prazo")}</span></>}
+             {dica.html.os.residual||(dica.html.os.fora?"fora do prazo":"dentro do prazo")}</span>
+           {dica.html.os.gn>1&&<span style={{display:"block",marginTop:4,color:C.textDim}}>
+             um de {dica.html.os.gn} serviços neste mesmo ponto</span>}</>}
     </div>}
   </div>;
 }
