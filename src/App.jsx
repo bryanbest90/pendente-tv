@@ -7142,7 +7142,12 @@ function MapaView({rows,excludedTSS}){
     c.k=n;aplicarCamera();
   },[BB,aplicarCamera]);
 
-  /* arrastar, roda do mouse e pinça */
+  /* Arrastar, roda do mouse e pinça.
+     `coords` está nas dependências porque enquanto ele é null a tela
+     mostra "Carregando…" e o viewport NÃO EXISTE — o efeito rodava
+     uma vez, achava vpRef vazio e desistia, e quando o mapa aparecia
+     ninguém mais prendia os eventos. O mapa nascia morto: clique
+     funcionava (é prop do React), arrastar e zoom não. */
   useEffect(()=>{
     const vp=vpRef.current;if(!vp)return;
     const dedos=new Map();let px=0,py=0,ux=0,uy=0,dist0=1,k0=1;
@@ -7171,7 +7176,7 @@ function MapaView({rows,excludedTSS}){
     return()=>{vp.removeEventListener("pointerdown",down);vp.removeEventListener("pointermove",move);
       vp.removeEventListener("pointerup",up);vp.removeEventListener("pointercancel",up);
       vp.removeEventListener("wheel",roda);window.removeEventListener("resize",aoRedimensionar);};
-  },[aproximar,aplicarCamera]);
+  },[coords,aproximar,aplicarCamera]);
 
   // a cada repintura o React refaz os <circle>, e eles nascem sem o
   // raio em pixels de tela — quem devolve é a câmera
