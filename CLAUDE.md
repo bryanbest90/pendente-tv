@@ -378,6 +378,49 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   quando o arquivo vem abaixo de 80%. Só aí vale quebrar em períodos
   menores. *(corrigido em 14/10/2026)*
 
+## Mapa de ocorrências
+
+- **A contagem por setor sai do campo SF, NUNCA dos pinos.** O SF vem
+  preenchido em todas as linhas; o pino depende de a rua existir na
+  `coord_rua`, e hoje 150 dos 772 serviços não têm ponto — quase todos
+  em avenidas e estradas. Contar `pontos.length` faria o mapa mentir
+  por 20%. *(16/11/2026)*
+
+- **O desempate de endereço é o SETOR, e ele já está na biblioteca.**
+  A mesma rua existe em vários lugares: cinco "RUA PARANÁ", três "RUA
+  SEIS". Procurar só pelo nome punha a OS a quilômetros — "RUA PARANA,
+  28" do setor 260 caía 5,6 km fora. A `coord_rua` guarda o setor de
+  cada ponto na oitava posição da lista (80,3% dos 239.743 pontos têm
+  o campo). Com ele: 619 dos 622 serviços acham ponto do próprio
+  setor. Testei também o centro do setor (erra 37) e o polígono (bom,
+  mas é geometria no banco para ganhar nada).
+
+- **A conta roda no banco, na `v_pendente_mapa`.** No navegador seria
+  baixar os 239.743 pontos a cada abertura, uns 12 MB. A view foi
+  conferida contra a mesma regra escrita em Python, na carteira
+  inteira: 620 pares, 620 iguais, zero diferença.
+
+- **A aba recebe o `filteredRows`, não busca linha nenhuma.** Mesma
+  unidade, mesmo `familiaTssVisivel`, mesmo `excludedTSS` da Pendente.
+  Não existe lista de exclusão própria aqui, e não deve passar a
+  existir: regra copiada é regra que diverge.
+
+- **O `src/data/mapaSetores.js` é CÓPIA do controle-reposicao.** Se um
+  setor mudar de contorno lá, aqui não muda. O conserto é trazer o
+  arquivo de novo, não redesenhar.
+
+- **O `PROJ` do mesmo arquivo saiu de um ajuste, e ele se prova
+  sozinho:** `PROJ.K` ficou em 0,91496, que é cos(23,66°), a latitude
+  daqui. Não foi escolhido — foi o que o ajuste encontrou, e é a prova
+  de que a projeção é equiretangular. Com ele, 584 dos 622 pontos caem
+  dentro do desenho do próprio setor; dos 38 restantes a mediana está
+  a 20 m da divisa.
+
+- **Fora do prazo é ponto MAIOR, além de vermelho.** Verde e vermelho
+  são as cores do resto do site e ficam, mas são justamente o par que
+  quem tem daltonismo não separa — e num mapa não há legenda ao lado
+  de cada ponto. O tamanho é o segundo canal.
+
 ## PostgREST
 
 - **`Range` sem `order` único é bug, sempre.** Sem `order` o PostgREST

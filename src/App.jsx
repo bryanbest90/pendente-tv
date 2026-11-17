@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useRef, useMemo, useEffect } from "react";
 import * as XLSX from "xlsx";
+import { MAPA_SETORES, PROJ } from "./data/mapaSetores";
 import { XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Area, AreaChart, ComposedChart, Bar as RBar, Line as RLine } from "recharts";
 
 // ━━━ SUPABASE ━━━
@@ -6956,6 +6957,415 @@ function EtiquetasView({notas,rawRows,sess}){
   </div>;
 }
 
+/* ━━━ MAPA DE OCORRÊNCIAS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   A carteira no desenho dos setores: escolha a família à esquerda,
+   o mapa mostra onde estão os serviços e quantos há em cada setor.
+
+   DE ONDE VEM CADA COISA
+
+   O desenho dos 51 setores é o `src/data/mapaSetores.js`, cópia do
+   que o controle-reposicao já usava. A coordenada de cada serviço
+   vem da `v_pendente_mapa` (sql/mapa_ocorrencias.sql), que resolve o
+   endereço dentro do banco — fazer isso aqui exigiria baixar os
+   239.743 pontos da biblioteca a cada abertura da página, uns 12 MB.
+
+   AS CONTAS SÃO COMPLETAS; O PINO NÃO
+
+   O número de cada setor sai do campo SF, que vem preenchido em
+   todas as linhas. Já o pino depende de a rua existir na biblioteca,
+   e hoje 150 dos 772 serviços não têm ponto — quase todos em
+   avenidas e estradas. Por isso a contagem do setor NUNCA é contada
+   a partir dos pinos: é contada sobre as linhas. Se um dia alguém
+   trocar isso por `pontos.length`, o mapa passa a mentir por 20%.
+
+   AS LINHAS SÃO AS MESMAS DA ABA PENDENTE
+
+   Esta aba recebe o `filteredRows` já pronto — mesma unidade, mesmo
+   `familiaTssVisivel`, mesmo filtro de data. Não existe aqui nenhuma
+   lista de exclusão própria, de propósito: regra copiada é regra que
+   diverge na primeira mudança.
+
+   FORA DO PRAZO É PONTO MAIOR, NÃO SÓ VERMELHO
+
+   Verde e vermelho são as cores do resto do site e ficam. Mas elas
+   são justamente o par que quem tem daltonismo não separa, e num
+   mapa não há legenda ao lado de cada ponto. Por isso o fora do
+   prazo é também MAIOR que o dentro — quem não vê a cor vê o
+   tamanho. (16/11/2026) */
+
+/* Cinco tons para a quantidade por setor. Eles sobem bem acima do
+   fundo da página (#0a0f1a) de propósito: no primeiro teste a rampa
+   começava em #131c2e e os setores vazios sumiam no fundo — o mapa
+   aparecia como um recorte solto, sem a região em volta. */
+const MAPA_FUNDO = ["#1a2437","#243048","#30405e","#3f5375","#51688d"];
+const MAPA_TRACO = "#475569";
+
+async function fetchCoordenadas(){
+  const fora=[];let de=0;const passo=1000;
+  while(true){
+    // ordem única (numero_os, tss): paginar sem ela repete e omite linhas
+    const res=await fetch(SUPABASE_URL+"/rest/v1/v_pendente_mapa?select=numero_os,tss,la,lo&order=numero_os.asc,tss.asc",
+      {headers:{...HEADERS,"Range":de+"-"+(de+passo-1)}});
+    if(!res.ok&&res.status!==206) throw new Error("Erro "+res.status);
+    const d=await res.json();
+    if(!d?.length) break;
+    fora.push(...d);
+    if(d.length<passo) break;
+    de+=passo;
+  }
+  const m=new Map();
+  fora.forEach(r=>m.set(String(r.numero_os)+"\u0000"+String(r.tss||"").trim(),[Number(r.la),Number(r.lo)]));
+  return m;
+}
+
+function MapaView({rows,excludedTSS}){
+  const [coords,setCoords]=useState(null);
+  const [erro,setErro]=useState("");
+  const [famSel,setFamSel]=useState(null);
+  const [setorSel,setSetorSel]=useState(null);
+  const [soFora,setSoFora]=useState(false);
+  const [dica,setDica]=useState(null);       // {x,y,html}
+  const vpRef=useRef(null), svgRef=useRef(null);
+  const camRef=useRef({k:1,cx:0,cy:0,esc0:1,mexeu:false});
+
+  useEffect(()=>{let vivo=true;
+    (async()=>{try{const m=await fetchCoordenadas();if(vivo)setCoords(m);}
+      catch(e){if(vivo)setErro(e.message);}})();
+    return()=>{vivo=false;};},[]);
+
+  /* ── os serviços desta tela ── */
+  const base=useMemo(()=>{
+    const ativas=(rows||[]).filter(r=>!excludedTSS.has(String(r["TSS"]||"").trim()));
+    return ativas.map(r=>{
+      const tss=String(r["TSS"]||"").trim();
+      const c=coords?.get(String(r["Número OS"])+"\u0000"+tss);
+      return {fam:String(r["Família"]||"—").trim(),tss,
+        sf:String(r["SF"]||"").trim()||"—",
+        bairro:r["Bairro"]||"—",
+        end:[r["Endereço"],r["Número"]].filter(Boolean).join(", ").trim(),
+        residual:r["Tempo Residual"],
+        fora:tempo(r["Tempo Residual"])==="fora",
+        la:c?.[0],lo:c?.[1]};
+    });
+  },[rows,excludedTSS,coords]);
+
+  const visiveis=useMemo(()=>{
+    let v=soFora?base.filter(o=>o.fora):base;
+    return famSel?v.filter(o=>o.fam===famSel):v;
+  },[base,soFora,famSel]);
+
+  const familias=useMemo(()=>{
+    const uni=soFora?base.filter(o=>o.fora):base, m=new Map();
+    base.forEach(o=>{if(!m.has(o.fam))m.set(o.fam,{n:0,fora:0});});
+    uni.forEach(o=>{const v=m.get(o.fam);v.n++;if(o.fora)v.fora++;});
+    return [...m.entries()].map(([nome,v])=>({nome,...v}))
+      .sort((a,b)=>b.n-a.n||a.nome.localeCompare(b.nome,"pt"));
+  },[base,soFora]);
+
+  const porSetor=useMemo(()=>{
+    const m=new Map();
+    visiveis.forEach(o=>{const v=m.get(o.sf)||{n:0,fora:0,semPino:0};
+      v.n++;if(o.fora)v.fora++;if(o.la===undefined)v.semPino++;m.set(o.sf,v);});
+    return m;
+  },[visiveis]);
+  const maxSetor=useMemo(()=>Math.max(1,...[...porSetor.values()].map(v=>v.n)),[porSetor]);
+  const faixa=n=>n?MAPA_FUNDO[Math.min(4,1+Math.floor((n-1)/maxSetor*3.999))]:MAPA_FUNDO[0];
+
+  const comPino=useMemo(()=>base.filter(o=>o.la!==undefined).length,[base]);
+  const proj=useCallback((la,lo)=>[PROJ.s*PROJ.K*(lo-PROJ.lonA),-PROJ.s*(la-PROJ.latA)],[]);
+
+  /* ── a moldura: o retângulo que o desenho realmente ocupa, não o
+       viewBox de 1000x1348 que vem com sobra dos dois lados ── */
+  const BB=useMemo(()=>{
+    let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+    MAPA_SETORES.setores.forEach(s=>s.pontos.forEach(p=>{
+      if(p[0]<x0)x0=p[0];if(p[0]>x1)x1=p[0];if(p[1]<y0)y0=p[1];if(p[1]>y1)y1=p[1];}));
+    return {x0:x0-8,y0:y0-8,w:x1-x0+16,h:y1-y0+16};
+  },[]);
+  const caixas=useMemo(()=>{
+    const m={};
+    MAPA_SETORES.setores.forEach(s=>{
+      const xs=s.pontos.map(p=>p[0]),ys=s.pontos.map(p=>p[1]);
+      m[s.setor]={w:Math.max(...xs)-Math.min(...xs),h:Math.max(...ys)-Math.min(...ys)};});
+    return m;
+  },[]);
+
+  /* ── câmera: mexe no viewBox, não numa transform. Assim o traço e
+       o raio dos pontos continuam sendo decididos por nós, em pixels
+       de tela, e não esticam junto com o zoom ── */
+  const aplicarCamera=useCallback(()=>{
+    const svg=svgRef.current,vp=vpRef.current;if(!svg||!vp)return;
+    const c=camRef.current,r=vp.getBoundingClientRect();
+    c.esc0=Math.min(r.width/BB.w,r.height/BB.h)||1;
+    const w=BB.w/c.k,h=BB.h/c.k;
+    svg.setAttribute("viewBox",`${(c.cx-w/2).toFixed(2)} ${(c.cy-h/2).toFixed(2)} ${w.toFixed(2)} ${h.toFixed(2)}`);
+    const s=Math.max(1e-6,c.k*c.esc0);
+    svg.querySelectorAll("circle[data-os]").forEach(el=>{
+      el.setAttribute("r",((el.dataset.fora==="1"?6.1:4.1)/s).toFixed(2));
+      el.setAttribute("stroke-width",(1.2/s).toFixed(2));});
+    svg.querySelectorAll("polygon[data-setor]").forEach(el=>
+      el.setAttribute("stroke-width",((el.dataset.sel==="1"?2.4:0.9)/s).toFixed(2)));
+    svg.querySelectorAll("text[data-setor]").forEach(el=>{
+      const cheio=el.dataset.cheio==="1",px=cheio?13.5:11.5,cx=caixas[el.dataset.setor];
+      el.setAttribute("font-size",(px/s).toFixed(2));
+      el.setAttribute("stroke-width",(2.6/s).toFixed(2));
+      // o rótulo só aparece quando cabe dentro do setor na tela: sem
+      // isto o norte, que é onde quase tudo acontece, vira um borrão
+      const cabe=cx&&cx.w*s>el.textContent.length*px*0.58*1.08&&cx.h*s>px*2.1;
+      el.style.display=(el.dataset.sel==="1"||cabe)?"":"none";});
+  },[BB,caixas]);
+
+  const enquadrar=useCallback(pontos=>{
+    const c=camRef.current;
+    if(!pontos||pontos.length<2){c.k=1;c.cx=BB.x0+BB.w/2;c.cy=BB.y0+BB.h/2;aplicarCamera();return;}
+    let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+    for(const p of pontos){if(p[0]<x0)x0=p[0];if(p[0]>x1)x1=p[0];if(p[1]<y0)y0=p[1];if(p[1]>y1)y1=p[1];}
+    const mg=Math.max(x1-x0,y1-y0)*0.16+14;
+    x0-=mg;x1+=mg;y0-=mg;y1+=mg;
+    c.k=Math.max(1,Math.min(16,Math.min(BB.w/(x1-x0),BB.h/(y1-y0))));
+    c.cx=(x0+x1)/2;c.cy=(y0+y1)/2;aplicarCamera();
+  },[BB,aplicarCamera]);
+
+  const enquadrarFamilia=useCallback(()=>{
+    const p=visiveis.filter(o=>o.la!==undefined).map(o=>proj(o.la,o.lo));
+    enquadrar(p.length>2?p:null);
+  },[visiveis,proj,enquadrar]);
+
+  const aproximar=useCallback((telaX,telaY,novoK)=>{
+    const c=camRef.current,vp=vpRef.current;if(!vp)return;
+    const n=Math.max(1,Math.min(16,novoK)),r=vp.getBoundingClientRect(),s=c.k*c.esc0;
+    const ox=(r.width-BB.w*c.esc0)/2,oy=(r.height-BB.h*c.esc0)/2;
+    const ux=(telaX-r.left-ox)/s+(c.cx-BB.w/2/c.k);
+    const uy=(telaY-r.top-oy)/s+(c.cy-BB.h/2/c.k);
+    c.cx=ux-(telaX-r.left-ox)/(n*c.esc0)+BB.w/2/n;
+    c.cy=uy-(telaY-r.top-oy)/(n*c.esc0)+BB.h/2/n;
+    c.k=n;aplicarCamera();
+  },[BB,aplicarCamera]);
+
+  /* arrastar, roda do mouse e pinça */
+  useEffect(()=>{
+    const vp=vpRef.current;if(!vp)return;
+    const dedos=new Map();let px=0,py=0,ux=0,uy=0,dist0=1,k0=1;
+    const down=e=>{dedos.set(e.pointerId,e);vp.setPointerCapture(e.pointerId);
+      const c=camRef.current;
+      if(dedos.size===1){c.mexeu=false;px=e.clientX;py=e.clientY;ux=c.cx;uy=c.cy;}
+      if(dedos.size===2){const[a,b]=[...dedos.values()];
+        dist0=Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY)||1;k0=c.k;c.mexeu=true;}};
+    const move=e=>{if(!dedos.has(e.pointerId))return;dedos.set(e.pointerId,e);
+      const c=camRef.current;
+      if(dedos.size>=2){const[a,b]=[...dedos.values()];
+        const d=Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY)||1;
+        aproximar((a.clientX+b.clientX)/2,(a.clientY+b.clientY)/2,k0*(d/dist0));return;}
+      const dx=e.clientX-px,dy=e.clientY-py;
+      if(Math.abs(dx)>3||Math.abs(dy)>3)c.mexeu=true;
+      const s=c.k*c.esc0;c.cx=ux-dx/s;c.cy=uy-dy/s;aplicarCamera();};
+    const up=e=>{dedos.delete(e.pointerId);
+      if(dedos.size===1){const a=[...dedos.values()][0];const c=camRef.current;
+        px=a.clientX;py=a.clientY;ux=c.cx;uy=c.cy;}};
+    const roda=e=>{e.preventDefault();aproximar(e.clientX,e.clientY,camRef.current.k*(e.deltaY<0?1.2:0.83));};
+    vp.addEventListener("pointerdown",down);vp.addEventListener("pointermove",move);
+    vp.addEventListener("pointerup",up);vp.addEventListener("pointercancel",up);
+    vp.addEventListener("wheel",roda,{passive:false});
+    const aoRedimensionar=()=>aplicarCamera();
+    window.addEventListener("resize",aoRedimensionar);
+    return()=>{vp.removeEventListener("pointerdown",down);vp.removeEventListener("pointermove",move);
+      vp.removeEventListener("pointerup",up);vp.removeEventListener("pointercancel",up);
+      vp.removeEventListener("wheel",roda);window.removeEventListener("resize",aoRedimensionar);};
+  },[aproximar,aplicarCamera]);
+
+  // a cada repintura o React refaz os <circle>, e eles nascem sem o
+  // raio em pixels de tela — quem devolve é a câmera
+  useEffect(()=>{aplicarCamera();},[visiveis,setorSel,aplicarCamera]);
+  useEffect(()=>{if(coords)enquadrar(null);},[coords,enquadrar]);
+
+  const escolherSetor=sf=>{
+    const novo=setorSel===sf?null:sf;setSetorSel(novo);
+    if(novo){const s=MAPA_SETORES.setores.find(x=>x.setor===novo);enquadrar(s?s.pontos:null);}
+    else enquadrarFamilia();
+  };
+  const escolherFamilia=f=>{
+    setFamSel(famSel===f?null:f);setSetorSel(null);
+    setTimeout(()=>{const alvo=(famSel===f?base:base.filter(o=>o.fam===f))
+      .filter(o=>o.la!==undefined).map(o=>proj(o.la,o.lo));
+      enquadrar(alvo.length>2?alvo:null);},0);
+  };
+
+  const pontos=useMemo(()=>visiveis
+    .filter(o=>o.la!==undefined&&(!setorSel||o.sf===setorSel))
+    .sort((a,b)=>(a.fora?1:0)-(b.fora?1:0)),[visiveis,setorSel]);
+
+  const detalhe=useMemo(()=>{
+    if(!setorSel)return null;
+    const lista=visiveis.filter(o=>o.sf===setorSel),m=new Map();
+    lista.forEach(o=>{const v=m.get(o.tss)||{n:0,fora:0};v.n++;if(o.fora)v.fora++;m.set(o.tss,v);});
+    return {lista,servicos:[...m.entries()].map(([tss,v])=>({tss,...v})).sort((a,b)=>b.n-a.n)};
+  },[visiveis,setorSel]);
+
+  const mostrarDica=(ev,html)=>setDica({x:ev.clientX,y:ev.clientY,html});
+
+  if(erro) return <div style={{padding:40,textAlign:"center",color:C.red}}>
+    Não consegui buscar as coordenadas: {erro}
+    <div style={{color:C.textDim,fontSize:12.5,marginTop:8}}>
+      Se a mensagem fala em <code>v_pendente_mapa</code>, é o <code>sql/mapa_ocorrencias.sql</code> que ainda não rodou.
+    </div></div>;
+  if(!coords) return <div style={{padding:60,textAlign:"center",color:C.textDim}}>Carregando o mapa…</div>;
+
+  const totalFora=base.filter(o=>o.fora).length;
+  const cabecalho=(t)=><div style={{fontSize:11,fontWeight:800,letterSpacing:"0.08em",textTransform:"uppercase",
+    color:C.textDim,padding:"11px 13px 9px",borderBottom:`1px solid ${C.border}`}}>{t}</div>;
+  const painel={background:C.card,border:`1px solid ${C.border}`,borderRadius:12,overflow:"hidden"};
+  const item=(ativo)=>({display:"flex",alignItems:"flex-start",gap:8,width:"100%",textAlign:"left",
+    padding:"7px 13px",border:"none",borderBottom:`1px solid ${C.border}`,cursor:"pointer",
+    font:"inherit",fontSize:12.5,lineHeight:1.3,background:ativo?C.sideActive:"transparent",
+    color:ativo?C.accent:C.text,fontWeight:ativo?700:400});
+
+  return <div>
+    {/* números do topo */}
+    <div style={{display:"flex",gap:26,flexWrap:"wrap",padding:"10px 2px 14px",marginBottom:16,
+      borderTop:`1px solid ${C.border}`,borderBottom:`1px solid ${C.border}`}}>
+      {[["serviços na carteira",base.length,C.text],
+        ["fora do prazo",totalFora,C.red],
+        ["setores com serviço",new Set(base.map(o=>o.sf)).size,C.text],
+        ["famílias",familias.filter(f=>f.n).length,C.text],
+        ["com ponto no mapa",comPino,C.text]].map(([rot,v,cor])=>
+        <div key={rot}><div style={{fontSize:21,fontWeight:800,lineHeight:1.1,color:cor,fontFamily:FONTE_NUM}}>{v}</div>
+          <div style={{fontSize:11.5,color:C.textMuted}}>{rot}</div></div>)}
+    </div>
+
+    <div style={{display:"grid",gridTemplateColumns:"250px minmax(0,1fr) 220px",gap:14,alignItems:"start"}}>
+      {/* famílias */}
+      <div style={painel}>
+        {cabecalho("Famílias")}
+        <div style={{maxHeight:"68vh",overflow:"auto"}}>
+          <button onClick={()=>{setFamSel(null);setSetorSel(null);setTimeout(()=>enquadrar(null),0);}}
+            style={item(!famSel)}>
+            <span style={{flex:1}}>Todas as famílias</span>
+            <span style={{fontWeight:700,fontFamily:FONTE_NUM}}>{soFora?totalFora:base.length}</span>
+            <span style={{minWidth:26,textAlign:"right",color:C.red,fontSize:11.5,fontFamily:FONTE_NUM}}>{soFora?"":(totalFora||"")}</span>
+          </button>
+          {familias.map(f=><button key={f.nome} onClick={()=>f.n&&escolherFamilia(f.nome)}
+            style={{...item(famSel===f.nome),opacity:f.n?1:0.4,cursor:f.n?"pointer":"default"}}>
+            <span style={{flex:1,overflowWrap:"anywhere"}}>{f.nome}</span>
+            <span style={{fontWeight:700,fontFamily:FONTE_NUM}}>{f.n}</span>
+            <span style={{minWidth:26,textAlign:"right",color:C.red,fontSize:11.5,fontFamily:FONTE_NUM}}>{soFora?"":(f.fora||"")}</span>
+          </button>)}
+        </div>
+      </div>
+
+      {/* mapa */}
+      <div style={{...painel,padding:10}}>
+        <div style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap",marginBottom:8}}>
+          <button onClick={()=>{camRef.current.k=Math.min(16,camRef.current.k*1.4);aplicarCamera();}} style={btnTiny}>＋</button>
+          <button onClick={()=>{camRef.current.k=Math.max(1,camRef.current.k*0.71);aplicarCamera();}} style={btnTiny}>－</button>
+          <button onClick={()=>{setSetorSel(null);enquadrarFamilia();}} style={btnTiny}>Reenquadrar</button>
+          <label style={{display:"inline-flex",alignItems:"center",gap:6,fontSize:12.5,color:C.textMuted,
+            cursor:"pointer",userSelect:"none",padding:"4px 10px",border:`1px solid ${C.border}`,borderRadius:7}}>
+            <input type="checkbox" checked={soFora} onChange={e=>{setSoFora(e.target.checked);setSetorSel(null);}}/>
+            só fora do prazo
+          </label>
+          <span style={{marginLeft:"auto",fontSize:11.5,color:C.textDim}}>arraste para mover · roda do mouse ou pinça para aproximar</span>
+        </div>
+        <div ref={vpRef} onPointerLeave={()=>setDica(null)}
+          style={{position:"relative",overflow:"hidden",borderRadius:10,background:C.bg,
+            height:"min(72vh,820px)",touchAction:"none",cursor:"grab"}}>
+          <svg ref={svgRef} preserveAspectRatio="xMidYMid meet" style={{display:"block",width:"100%",height:"100%"}}>
+            {MAPA_SETORES.setores.map(s=>{
+              const v=porSetor.get(s.setor),q=v?v.n:0,sel=setorSel===s.setor;
+              return <polygon key={s.setor} data-setor={s.setor} data-sel={sel?"1":"0"}
+                points={s.pontos.map(p=>p[0]+","+p[1]).join(" ")}
+                fill={faixa(q)} stroke={sel?C.accent:MAPA_TRACO}
+                opacity={setorSel&&!sel?0.45:1} style={{cursor:"pointer"}}
+                onClick={()=>{if(!camRef.current.mexeu)escolherSetor(s.setor);}}
+                onPointerEnter={e=>mostrarDica(e,{tipo:"setor",setor:s.setor,v})}
+                onPointerLeave={()=>setDica(null)}/>;
+            })}
+            {pontos.map((o,i)=><circle key={i} data-os="1" data-fora={o.fora?"1":"0"}
+              cx={proj(o.la,o.lo)[0].toFixed(1)} cy={proj(o.la,o.lo)[1].toFixed(1)}
+              fill={o.fora?C.red:C.green} stroke={C.bg}
+              onPointerEnter={e=>mostrarDica(e,{tipo:"os",os:o})}
+              onPointerLeave={()=>setDica(null)}/>)}
+            {MAPA_SETORES.setores.map(s=>{
+              const v=porSetor.get(s.setor),q=v?v.n:0;
+              return <text key={s.setor} data-setor={s.setor} data-cheio={q?"1":"0"} data-sel={setorSel===s.setor?"1":"0"}
+                x={s.cx} y={s.cy} textAnchor="middle" fill={C.textMuted} fontWeight={700}
+                stroke={C.bg} strokeLinejoin="round" paintOrder="stroke" style={{pointerEvents:"none"}}>
+                {q?s.setor+" · "+q:s.setor}</text>;
+            })}
+          </svg>
+        </div>
+        <div style={{display:"flex",gap:16,flexWrap:"wrap",marginTop:9,fontSize:11.5,color:C.textMuted}}>
+          <span><i style={{display:"inline-block",width:9,height:9,borderRadius:"50%",background:C.green,marginRight:5}}/>dentro do prazo</span>
+          <span><i style={{display:"inline-block",width:13,height:13,borderRadius:"50%",background:C.red,marginRight:5,verticalAlign:-2}}/>fora do prazo (ponto maior)</span>
+          <span style={{display:"inline-flex",alignItems:"center",gap:4}}>quantidade por setor
+            {MAPA_FUNDO.map(c=><u key={c} style={{width:17,height:10,display:"inline-block",background:c,border:`1px solid ${MAPA_TRACO}`,textDecoration:"none"}}/>)}
+          </span>
+        </div>
+      </div>
+
+      {/* setores */}
+      <div style={painel}>
+        {cabecalho("Setores")}
+        <div style={{maxHeight:"68vh",overflow:"auto"}}>
+          {[...porSetor.entries()].sort((a,b)=>b[1].n-a[1].n||a[0].localeCompare(b[0])).map(([sf,v])=>
+            <button key={sf} onClick={()=>escolherSetor(sf)} style={item(setorSel===sf)}>
+              <span style={{width:10,height:10,borderRadius:2,flex:"none",marginTop:3,background:faixa(v.n),border:`1px solid ${MAPA_TRACO}`}}/>
+              <span style={{flex:1}}>Setor {sf}</span>
+              <span style={{fontWeight:700,fontFamily:FONTE_NUM}}>{v.n}</span>
+              <span style={{minWidth:24,textAlign:"right",color:C.red,fontSize:11.5,fontFamily:FONTE_NUM}}>{v.fora||""}</span>
+            </button>)}
+          {!porSetor.size&&<div style={{padding:"12px 13px",color:C.textDim,fontSize:12.5}}>Nenhum serviço nesse filtro.</div>}
+        </div>
+      </div>
+    </div>
+
+    {/* o setor aberto: quantos de cada serviço */}
+    {detalhe&&<div style={{...painel,marginTop:16}}>
+      <div style={{display:"flex",alignItems:"baseline",gap:10,padding:"11px 14px",borderBottom:`1px solid ${C.border}`}}>
+        <b style={{fontSize:14.5}}>Setor {setorSel}</b>
+        <span style={{color:C.textMuted,fontSize:12.5}}>
+          {detalhe.lista.length} serviço{detalhe.lista.length===1?"":"s"}
+          {famSel?` · ${famSel}`:" · todas as famílias"}
+          {detalhe.lista.filter(o=>o.la===undefined).length?` · ${detalhe.lista.filter(o=>o.la===undefined).length} sem ponto no mapa`:""}
+        </span>
+        <button onClick={()=>{setSetorSel(null);enquadrarFamilia();}} style={{...btnTiny,marginLeft:"auto"}}>Fechar</button>
+      </div>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12.5}}>
+        <thead><tr>
+          <th style={{textAlign:"left",padding:"8px 14px",color:C.textDim,fontSize:11,letterSpacing:"0.05em",textTransform:"uppercase",borderBottom:`1px solid ${C.border}`}}>Serviço</th>
+          <th style={{textAlign:"right",padding:"8px 14px",color:C.textDim,fontSize:11,letterSpacing:"0.05em",textTransform:"uppercase",borderBottom:`1px solid ${C.border}`}}>Total</th>
+          <th style={{textAlign:"right",padding:"8px 14px",color:C.textDim,fontSize:11,letterSpacing:"0.05em",textTransform:"uppercase",borderBottom:`1px solid ${C.border}`}}>Fora</th>
+        </tr></thead>
+        <tbody>{detalhe.servicos.map(s=><tr key={s.tss}>
+          <td style={{padding:"7px 14px",borderBottom:`1px solid ${C.border}`}}>{s.tss}</td>
+          <td style={{padding:"7px 14px",textAlign:"right",fontFamily:FONTE_NUM,borderBottom:`1px solid ${C.border}`}}>{s.n}</td>
+          <td style={{padding:"7px 14px",textAlign:"right",fontFamily:FONTE_NUM,color:s.fora?C.red:C.textDim,borderBottom:`1px solid ${C.border}`}}>{s.fora||"—"}</td>
+        </tr>)}</tbody>
+      </table>
+    </div>}
+
+    {dica&&<div style={{position:"fixed",zIndex:1500,pointerEvents:"none",maxWidth:300,
+      left:Math.min(dica.x+16,(typeof window!=="undefined"?window.innerWidth:1200)-312),
+      top:Math.min(dica.y+16,(typeof window!=="undefined"?window.innerHeight:800)-170),
+      background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"9px 11px",
+      fontSize:12.5,lineHeight:1.45,boxShadow:"0 8px 28px rgba(0,0,0,0.5)"}}>
+      {dica.html.tipo==="setor"
+        ?<><b style={{display:"block"}}>Setor {dica.html.setor}</b>
+           {famSel&&<span style={{display:"block",color:C.textDim}}>{famSel}</span>}
+           {(dica.html.v?.n)||0} serviço{(dica.html.v?.n)===1?"":"s"}
+           {dica.html.v?.fora?<span style={{color:C.red}}> · {dica.html.v.fora} fora do prazo</span>:null}
+           <span style={{display:"block",color:C.textDim}}>clique para abrir a lista</span></>
+        :<><b style={{display:"block"}}>{dica.html.os.tss}</b>
+           <span style={{display:"block",color:C.textDim}}>{dica.html.os.fam}</span>
+           {dica.html.os.end}
+           <span style={{display:"block",color:C.textDim}}>{dica.html.os.bairro} · setor {dica.html.os.sf}</span>
+           <span style={{display:"inline-block",marginTop:4,padding:"1px 8px",borderRadius:99,fontSize:11,
+             fontWeight:700,color:"#fff",background:dica.html.os.fora?C.red:C.green}}>
+             {dica.html.os.residual||(dica.html.os.fora?"fora do prazo":"dentro do prazo")}</span></>}
+    </div>}
+  </div>;
+}
+
+
 export default function App(){
   const [rawRows,setRawRows]=useState(null);
   const [excludedTSS,setExcludedTSS]=useState(new Set());
@@ -7308,14 +7718,14 @@ export default function App(){
 
         <div style={{marginBottom:24,textAlign:"center"}}>
           <h1 style={{fontSize:17,fontWeight:500,margin:0,letterSpacing:"0.2em",textTransform:"uppercase",color:C.text,fontFamily:FONTE_NUM}}>
-            {activeTab==="pendente"?"Controle de Prazos — OS Pendentes":activeTab==="carteira"?"Acompanhamento de Carteira":activeTab==="etiquetas"?"Etiquetas — o que fechou":activeTab==="itinerario"?"Itinerário das Equipes":activeTab==="cadastro"?"Cadastro — quem é o imóvel":activeTab==="idg"?"IDG — Índice de Demandas Global":"Produção por Equipes"}
+            {activeTab==="pendente"?"Controle de Prazos — OS Pendentes":activeTab==="carteira"?"Acompanhamento de Carteira":activeTab==="etiquetas"?"Etiquetas — o que fechou":activeTab==="mapa"?"Mapa de Ocorrências":activeTab==="itinerario"?"Itinerário das Equipes":activeTab==="cadastro"?"Cadastro — quem é o imóvel":activeTab==="idg"?"IDG — Índice de Demandas Global":"Produção por Equipes"}
           </h1>
           <p style={{color:C.textDim,margin:"6px 0 0",fontSize:13}}>
-            {activeTab==="pendente"?"Análise por família de serviço":activeTab==="carteira"?"Carteira diária por frente de serviço":activeTab==="etiquetas"?"Executadas e encerradas sem execução, por etiqueta, no período":activeTab==="itinerario"?"O dia de cada equipe — sugerido pelo sistema, fechado por você":activeTab==="cadastro"?"RGI, fornecimento e hidrômetro do endereço e dos vizinhos":activeTab==="idg"?"Água, esgoto e reposição — a conta da Sabesp, antes de a Sabesp enviar":"Execuções confirmadas por equipe e tipo de serviço"}
+            {activeTab==="pendente"?"Análise por família de serviço":activeTab==="carteira"?"Carteira diária por frente de serviço":activeTab==="etiquetas"?"Executadas e encerradas sem execução, por etiqueta, no período":activeTab==="mapa"?"Onde estão os serviços da carteira, por família e por setor":activeTab==="itinerario"?"O dia de cada equipe — sugerido pelo sistema, fechado por você":activeTab==="cadastro"?"RGI, fornecimento e hidrômetro do endereço e dos vizinhos":activeTab==="idg"?"Água, esgoto e reposição — a conta da Sabesp, antes de a Sabesp enviar":"Execuções confirmadas por equipe e tipo de serviço"}
           </p>
           {/* Tabs */}
           <div style={{display:"flex",justifyContent:"center",gap:4,marginTop:14}}>
-            {[{id:"pendente",label:"Pendente",icon:"📋"},{id:"carteira",label:"Carteira",icon:"📊"},{id:"etiquetas",label:"Etiquetas",icon:"🏷"},
+            {[{id:"pendente",label:"Pendente",icon:"📋"},{id:"carteira",label:"Carteira",icon:"📊"},{id:"etiquetas",label:"Etiquetas",icon:"🏷"},{id:"mapa",label:"Mapa",icon:"🗺"},
               ...(sess?.perfil?.pode_producao?[{id:"producao",label:"Produção",icon:"👷"},{id:"itinerario",label:"Itinerário",icon:"🚚"}]:[]),
               ...(sess?.perfil?.pode_idg?[{id:"idg",label:"IDG",icon:"🎯"}]:[]),
               ...(sess?.perfil?.pode_cadastro?[{id:"cadastro",label:"Cadastro",icon:"🚰"}]:[])].map(tab=>
@@ -7337,6 +7747,7 @@ export default function App(){
         {toast&&<div style={{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",zIndex:2000,padding:"10px 24px",borderRadius:10,fontSize:13,fontWeight:600,maxWidth:"90vw",wordBreak:"break-word",background:toast.includes("Erro")?"rgba(239,68,68,0.15)":"rgba(16,185,129,0.15)",color:toast.includes("Erro")?C.red:C.green,border:`1px solid ${toast.includes("Erro")?C.redBorder:C.greenBorder}`,backdropFilter:"blur(8px)",animation:"fadeIn 0.2s ease"}}>{toast}</div>}
         {activeTab==="carteira"&&<CarteiraView rawRows={rawRows} sess={sess}/>}
         {activeTab==="etiquetas"&&<EtiquetasView notas={notas} rawRows={rawRows} sess={sess}/>}
+        {activeTab==="mapa"&&<MapaView rows={filteredRows} excludedTSS={excludedTSS}/>}
         {activeTab==="producao"&&sess?.perfil?.pode_producao&&<ProducaoView sess={sess} onLogout={sair} historico={historico} entradaSerie={entradaSerie} activeUnit={activeUnit}/>}
         {activeTab==="idg"&&sess?.perfil?.pode_idg&&<IdgView sess={sess} rawRows={rawRows}/>}
         {activeTab==="itinerario"&&sess?.perfil?.pode_producao&&<ItinerarioView rawRows={rawRows} notas={notas} sess={sess}/>}
