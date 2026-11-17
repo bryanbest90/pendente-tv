@@ -7162,11 +7162,17 @@ function MapaView({rows,excludedTSS}){
      mostra "Carregando…" e o viewport NÃO EXISTE — o efeito rodava
      uma vez, achava vpRef vazio e desistia, e quando o mapa aparecia
      ninguém mais prendia os eventos. O mapa nascia morto: clique
-     funcionava (é prop do React), arrastar e zoom não. */
+     funcionava (é prop do React), arrastar e zoom não.
+
+     E NÃO use setPointerCapture aqui. Capturar o ponteiro na moldura
+     faz o navegador entregar A ELA o clique que viria depois — então
+     o onClick do polígono nunca disparava e clicar num setor no mapa
+     não fazia nada. O arrasto ouve na janela: funciona igual mesmo
+     com o mouse saindo do mapa, e deixa o clique chegar onde deve. */
   useEffect(()=>{
     const vp=vpRef.current;if(!vp)return;
     const dedos=new Map();let px=0,py=0,ux=0,uy=0,dist0=1,k0=1;
-    const down=e=>{dedos.set(e.pointerId,e);vp.setPointerCapture(e.pointerId);
+    const down=e=>{dedos.set(e.pointerId,e);
       const c=camRef.current;
       if(dedos.size===1){c.mexeu=false;px=e.clientX;py=e.clientY;ux=c.cx;uy=c.cy;}
       if(dedos.size===2){const[a,b]=[...dedos.values()];
@@ -7183,13 +7189,13 @@ function MapaView({rows,excludedTSS}){
       if(dedos.size===1){const a=[...dedos.values()][0];const c=camRef.current;
         px=a.clientX;py=a.clientY;ux=c.cx;uy=c.cy;}};
     const roda=e=>{e.preventDefault();aproximar(e.clientX,e.clientY,camRef.current.k*(e.deltaY<0?1.2:0.83));};
-    vp.addEventListener("pointerdown",down);vp.addEventListener("pointermove",move);
-    vp.addEventListener("pointerup",up);vp.addEventListener("pointercancel",up);
+    vp.addEventListener("pointerdown",down);window.addEventListener("pointermove",move);
+    window.addEventListener("pointerup",up);window.addEventListener("pointercancel",up);
     vp.addEventListener("wheel",roda,{passive:false});
     const aoRedimensionar=()=>aplicarCamera();
     window.addEventListener("resize",aoRedimensionar);
-    return()=>{vp.removeEventListener("pointerdown",down);vp.removeEventListener("pointermove",move);
-      vp.removeEventListener("pointerup",up);vp.removeEventListener("pointercancel",up);
+    return()=>{vp.removeEventListener("pointerdown",down);window.removeEventListener("pointermove",move);
+      window.removeEventListener("pointerup",up);window.removeEventListener("pointercancel",up);
       vp.removeEventListener("wheel",roda);window.removeEventListener("resize",aoRedimensionar);};
   },[coords,aproximar,aplicarCamera]);
 
@@ -7347,7 +7353,8 @@ function MapaView({rows,excludedTSS}){
               return <circle key={i} data-os="1" data-fora={o.fora?"1":"0"}
                 data-bx={bx.toFixed(2)} data-by={by.toFixed(2)} data-gi={o.gi} data-gn={o.gn}
                 cx={bx.toFixed(2)} cy={by.toFixed(2)}
-                fill={o.fora?C.red:C.green} stroke={C.bg}
+                fill={o.fora?C.red:C.green} stroke={C.bg} style={{cursor:"pointer"}}
+                onClick={()=>{if(!camRef.current.mexeu)escolherSetor(o.sf);}}
                 onPointerEnter={e=>mostrarDica(e,{tipo:"os",os:o})}
                 onPointerLeave={()=>setDica(null)}/>;
             })}

@@ -443,6 +443,14 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   dentro do desenho do próprio setor; dos 38 restantes a mediana está
   a 20 m da divisa.
 
+- **Nada de `setPointerCapture` no mapa.** Capturar o ponteiro na
+  moldura faz o navegador entregar A ELA o clique seguinte, e o
+  `onClick` do polígono nunca dispara: clicar num setor no mapa não
+  fazia nada, enquanto clicar na lista ao lado funcionava. O arrasto
+  ouve `pointermove` na janela, que resolve o mesmo problema (seguir
+  o mouse para fora do mapa) sem roubar o clique. Conferido com e sem
+  a captura, no mesmo teste. *(17/11/2026)*
+
 - **Fora do prazo é ponto MAIOR, além de vermelho.** Verde e vermelho
   são as cores do resto do site e ficam, mas são justamente o par que
   quem tem daltonismo não separa — e num mapa não há legenda ao lado
