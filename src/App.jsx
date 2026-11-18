@@ -105,7 +105,10 @@ const numStyle  = {fontFamily:FONTE_NUM,fontVariantNumeric:"tabular-nums",letter
 const RAIO      = 2;
 
 // GARANTIA entrou em 06/10/2026: e servico de verificacao de garantia,
-// nao faz parte da carteira que a gente mede.
+// nao faz parte da carteira que a gente mede. Continua aqui — mas veja
+// TSS_LIBERADAS logo abaixo: a unica TSS dessa familia passou a ser
+// nossa em 18/11/2026, e a excecao e por NOME de servico, nao pela
+// familia inteira.
 const EXCLUDED_DISPLAY = ["VISTORIA","CORTE SUPRESSÃO ADM","FISCALIZAÇÃO","SERV COMPLEMENTAR","ABASTECIMENTO","GARANTIA"];
 // Também saíram três TSS de OUTROS SERVIÇOS DE ESGOTO, na mesma
 // data e pelo mesmo motivo: TESTE DE CORANTE OP, LAVAR REDE DE
@@ -118,6 +121,28 @@ const EXCLUDED_TSS = [
   "MANUTENÇÃO EM INSTALAÇÕES ESGOTO SABESP","PROLONGAR REDE DE ESGOTO",
   "REMANEJAR REDE DE ESGOTO","HIDRANTE VAZANDO",
 ];
+
+/* SERVIÇOS QUE PASSARAM A SER NOSSOS.
+   Esta lista VENCE as duas exclusões acima e também a regra do
+   "VERIFICAR ..." — é a porta de entrada para um serviço que estava
+   fora e voltou.
+
+   "VERIFICAR SERVIÇO EM GARANTIA OP" entrou em 18/11/2026: a empresa
+   passou a executar esse serviço, então ele é carteira. Ele é a ÚNICA
+   TSS da família GARANTIA hoje (9 serviços na carteira de 18/11), mas
+   a exceção é pelo NOME do serviço e não pela família, de propósito —
+   pelo mesmo motivo que a regra do VERIFICAR é por nome: o GEOCALL
+   acerta o nome do serviço e erra a família. Se amanhã aparecer outra
+   TSS de GARANTIA que a gente NÃO faça, ela continua fora sozinha, sem
+   ninguém precisar lembrar de nada.
+
+   Para liberar outro serviço um dia, acrescente o nome aqui — e nos
+   mesmos lugares do robô (`robo-geocall/index.js`), senão a tela
+   mostra e o gráfico não. */
+const TSS_LIBERADAS = [
+  "VERIFICAR SERVIÇO EM GARANTIA OP",
+];
+const tssLiberada = tss => TSS_LIBERADAS.some(x => norm(x) === norm(tss));
 
 /* TSS QUE NÃO É TSS.
    O relatório do GEOCALL às vezes vem com uma mensagem de erro do
@@ -150,8 +175,11 @@ function tssValida(tss){
    os_entrada: a mesma "VERIFICAR EXISTÊNCIA LIG ESGOTO AVULSA" veio
    42 vezes como VISTORIA e 18 como VAZAMENTO DE ÁGUA.
 
-   Se um dia existir um "VERIFICAR ..." que SEJA serviço da carteira,
-   é esta linha que tem de sair. Até hoje não existe nenhum. */
+   Em 18/11/2026 apareceu o primeiro "VERIFICAR ..." que É da carteira:
+   "VERIFICAR SERVIÇO EM GARANTIA OP". A linha abaixo NÃO saiu por
+   causa dele — ele entrou pela TSS_LIBERADAS, que é olhada antes. Os
+   outros três "VERIFICAR ..." da carteira de hoje continuam sendo
+   vistoria e continuam fora. */
 const tssDeVerificacao = tss => /^VERIFICAR\s/i.test(String(tss||"").trim());
 
 // A mesma pergunta estava escrita em quatro lugares, com redações
@@ -159,7 +187,8 @@ const tssDeVerificacao = tss => /^VERIFICAR\s/i.test(String(tss||"").trim());
 // diverge: basta alguém mexer em uma cópia. Agora é uma só.
 function familiaTssVisivel(familia,tss){
   const fam=String(familia||"").trim(), t=String(tss||"").trim();
-  if(!tssValida(t)) return false;
+  if(!tssValida(t)) return false;          // lixo do GEOCALL nunca passa
+  if(tssLiberada(t)) return true;          // serviço nosso vence as exclusões
   if(tssDeVerificacao(t)) return false;
   if(EXCLUDED_DISPLAY.includes(fam)) return false;
   if(EXCLUDED_TSS.includes(t)) return false;

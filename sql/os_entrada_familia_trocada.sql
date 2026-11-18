@@ -52,10 +52,18 @@ UPDATE os_entrada e
 -- O site já deixou de contar essas, pelo NOME do serviço. Aqui é só
 -- para a tabela não guardar o que ninguém vai usar.
 --
--- Se um dia existir um "VERIFICAR ..." que SEJA serviço da carteira,
--- não rode este bloco — e me avise, porque a mesma regra está no site
--- e no robô.
-DELETE FROM os_entrada WHERE tss ILIKE 'VERIFICAR %';
+-- ESSE DIA CHEGOU, em 18/11/2026: "VERIFICAR SERVIÇO EM GARANTIA OP"
+-- passou a ser serviço nosso. Por isso o DELETE abaixo ganhou uma
+-- exceção — sem ela, rodar este arquivo de novo apagaria as entradas
+-- do serviço que hoje é carteira, e a coluna Entradas zeraria para
+-- ele sem ninguém entender por quê.
+--
+-- A lista tem de ser a mesma da TSS_LIBERADAS do `src/App.jsx` e da
+-- do `robo-geocall/index.js`. São três lugares porque são três
+-- caminhos de dado; ao liberar outro serviço, mexa nos três.
+DELETE FROM os_entrada
+ WHERE tss ILIKE 'VERIFICAR %'
+   AND upper(btrim(tss)) <> 'VERIFICAR SERVIÇO EM GARANTIA OP';
 
 
 -- ---------- Conferência ----------
@@ -63,7 +71,10 @@ DELETE FROM os_entrada WHERE tss ILIKE 'VERIFICAR %';
 --   SELECT count(*) FROM os_entrada e JOIN tss_familia t
 --     ON t.tss = e.tss AND t.firme WHERE e.familia IS DISTINCT FROM t.familia;
 --
---   SELECT count(*) FROM os_entrada WHERE tss ILIKE 'VERIFICAR %';
+--   SELECT count(*) FROM os_entrada WHERE tss ILIKE 'VERIFICAR %'
+--     AND upper(btrim(tss)) <> 'VERIFICAR SERVIÇO EM GARANTIA OP';
+--
+-- A de garantia NÃO tem de dar zero: ela é carteira desde 18/11/2026.
 --
 -- E a coluna Entradas se corrige sozinha no próximo carregamento.
 

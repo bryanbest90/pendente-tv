@@ -12,9 +12,35 @@ registro, volta a ser "corrigida" errado meses depois.
   fazia a tabela e o gráfico falarem de universos diferentes.
   *(Bryan, 07/10/2026)*
 
-- **GARANTIA não faz parte da carteira.** Fica nas duas listas de
-  exclusão. É serviço de verificação de garantia.
-  *(Bryan, 06/10/2026)*
+- **GARANTIA não faz parte da carteira, MENOS a "VERIFICAR SERVIÇO EM
+  GARANTIA OP", que passou a ser nossa.** A família continua nas duas
+  listas de exclusão; o que mudou é que existe agora uma lista que
+  vence as exclusões — `TSS_LIBERADAS`, no `src/App.jsx` e no
+  `robo-geocall/index.js`. Em 18/11/2026 a empresa passou a executar
+  esse serviço: 9 na carteira daquele dia, 5 fora do prazo.
+
+  **A exceção é pelo NOME do serviço, não pela família**, mesmo sendo
+  hoje a única TSS de GARANTIA. É o mesmo motivo da regra do
+  "VERIFICAR ...": o GEOCALL acerta o nome e erra a família. Se
+  aparecer outra TSS de GARANTIA que a gente não faça, ela fica fora
+  sozinha, sem ninguém ter de lembrar.
+
+  **São TRÊS lugares, e eles têm de andar juntos:** `src/App.jsx`
+  (o que a tela conta, em todas as abas, porque todas passam pelo
+  `familiaTssVisivel`), `robo-geocall/index.js` (o que entra na foto
+  diária e no histórico, que alimenta o gráfico) e o DELETE do
+  `sql/os_entrada_familia_trocada.sql` (que apagaria as entradas
+  dela se alguém rodasse o arquivo de novo). Liberar um serviço só
+  no site faz a tabela mostrar e o gráfico não.
+  *(Bryan, 06/10/2026; aberta em 18/11/2026)*
+
+- **O histórico de GARANTIA não volta.** A `pendente_historico` só tem
+  essa família em 06 e 07/10/2026 — de 08/10 até 18/11 o robô não
+  gravou, porque a exclusão estava lá. O gráfico passa a contá-la de
+  18/11 em diante e isso é um degrau correto, igual ao do prazo em
+  15/10: o que nunca foi gravado não existe em lugar nenhum. A coluna
+  Entradas não tem esse buraco — o gatilho da `os_entrada` nunca
+  filtrou, e as 18 linhas de 18/11 já estavam lá.
 
 As duas listas precisam ser olhadas juntas quando uma família muda de
 status: `EXCLUDED_DISPLAY` em `src/App.jsx` controla o que a tela mostra;
