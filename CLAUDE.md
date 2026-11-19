@@ -348,6 +348,43 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   garante é que ela não passa por quem está do lado nem fica no
   histórico do terminal. *(19/11/2026)*
 
+- **Robô que faz login confere que ENTROU, antes do primeiro passo.**
+  Em 17/11/2026, às 10:50, a senha do GEOCALL foi trocada. O robô do
+  pendente seguiu adiante clicando no vazio: "não encontrou Busca",
+  "não encontrou Opções", "não encontrou o campo do nome", "não
+  encontrou Ok" — esperou os 10 minutos de um relatório que nunca foi
+  pedido e desistiu 18 minutos depois. **A causa única apareceu
+  disfarçada de dez defeitos de tela**, e foi isso que fez a gente
+  procurar no lugar errado: mexemos em espera, em refresh, em nome de
+  arquivo. Foram 48 rodadas assim em dois dias.
+
+  O sinal que deveria ter sido lido primeiro é a **duração idêntica**:
+  12,5 min até as 10:02 e 17,8 min de lá em diante, sempre, até a casa
+  decimal. Tempo constante é relógio estourando, não trabalho.
+
+  Agora o login espera o campo de usuário SUMIR e, não sumindo, levanta
+  erro na hora dizendo que a senha caiu. Falhar ali custa 25 segundos e
+  diz a verdade; falhar adiante custava 18 minutos e mentia.
+  *(19/11/2026)*
+
+- **O ✅ do orquestrador só vale se o robô souber falhar.** As mesmas
+  48 rodadas saíram todas como `✅ PENDENTE concluido`, porque o
+  `executar()` registrava `❌ ERRO:` no log e **engolia** a exceção —
+  processo saía com código 0, e o orquestrador só olha o código. Dois
+  dias de dado faltando sem um único aviso. O `throw err` no fim do
+  catch é o que fecha isso: com `--once`, o erro sobe até o
+  `main().catch`, que sai com 1. **Robô que não sabe falhar é pior que
+  robô travado**, porque travado estoura o prazo e aparece.
+  *(19/11/2026)*
+
+- **Quando um robô para, a fila NÃO para junto — isso já foi
+  consertado.** A suspeita natural (e certa em 14/10) é que o robô
+  quebrado trava os outros. Conferido no log de 17 e 18/11: EXECUCOES
+  rodou nos dois dias às 00:30, RESUMO DO DIA rodou no dia 17 às 08:30.
+  O `processarFila` captura a falha de cada job e segue, e o prazo
+  máximo mata quem pendura. Então, faltando dado de um dia, o robô a
+  investigar é o do próprio dado — não a fila. *(19/11/2026)*
+
 - **O robô antigo de executados está desativado, e não volta.** Ele
   gravava chamando `limpar_execucao(ini,fim)`, que APAGA a faixa inteira
   e regrava com as 12 colunas antigas — destruindo `cod_tss`,
