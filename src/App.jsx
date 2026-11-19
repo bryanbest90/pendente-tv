@@ -646,6 +646,38 @@ async function fetchProducao(tok,diaIni,diaFim){
   }
 }
 
+/* EXECUTADO SEM NUNCA TER PASSADO PELA CARTEIRA.
+   É o grupo que explica a diferença entre o painel de baixo (produção)
+   e o gráfico (movimento de carteira): serviço que abriu e foi baixado
+   entre duas fotos, então a equipe trabalhou e a carteira nunca soube
+   que ele existiu. A conta mora na `v_producao_fora_carteira`
+   (sql/producao_fora_carteira.sql).
+
+   Devolve NULL — e não erro — quando a view não existe. Assim o site
+   continua inteiro em quem ainda não rodou o SQL, e o cartão
+   simplesmente não aparece. É também o botão de desfazer: um
+   DROP VIEW tira o cartão da tela sem tocar no código. */
+async function fetchForaCarteira(tok,diaIni,diaFim){
+  const H={...authHeaders(tok)};
+  const out=[];let from=0;const ps=1000;
+  try{
+    while(true){
+      const res=await fetch(SUPABASE_URL+
+        `/rest/v1/v_producao_fora_carteira?dia=gte.${diaIni}&dia=lte.${diaFim}`+
+        `&select=dia,atc,equipe,familia,numero_os,tss,tse`+
+        `&order=dia.asc,numero_os.asc,tss.asc`,
+        {headers:{...H,"Range":from+"-"+(from+ps-1)}});
+      if(!res.ok&&res.status!==206) return null;   // view ausente ou sem permissão
+      const d=await res.json();
+      if(!d?.length) break;
+      out.push(...d);
+      if(d.length<ps) break;
+      from+=ps;
+    }
+    return out;
+  }catch{ return null; }
+}
+
 // O IDG. A view v_idg já devolve o veredito calculado no banco — a conta
 // é a da Sabesp, decifrada da planilha ISAP e conferida linha a linha
 // (ver ANALISE_IDG_ISAP.md). Aqui é só leitura.
@@ -5254,6 +5286,8 @@ function BarraProp({valor,max,cor}){
   </div>;
 }
 
+const tdFora={padding:"6px 12px",borderBottom:`1px solid ${C.border}`,verticalAlign:"top"};
+
 function ProducaoView({sess,onLogout,historico,entradaSerie,activeUnit}){
   /* A série de saídas vem da v_execucao_serie, que é de `authenticated`
      — por isso é buscada AQUI, com o token da sessão, e não lá em cima
@@ -5291,6 +5325,8 @@ function ProducaoView({sess,onLogout,historico,entradaSerie,activeUnit}){
   const [data,setData]=useState(null);
   const [loading,setLoading]=useState(true);
   const [erro,setErro]=useState("");
+  const [fora,setFora]=useState(null);       // null = a view não respondeu
+  const [verFora,setVerFora]=useState(false);
 
   useEffect(()=>{let vivo=true;
     (async()=>{
@@ -5301,12 +5337,30 @@ function ProducaoView({sess,onLogout,historico,entradaSerie,activeUnit}){
       }catch(e){
         if(vivo){setErro(String(e.message||e));setData(null);}
       }
+      // Busca à parte e sem try/catch em volta: se esta falhar, a
+      // Produção inteira continua de pé e só o cartão some.
+      const f=await fetchForaCarteira(sess.access_token,ini,fim);
+      if(vivo){setFora(f);setVerFora(false);}
       if(vivo)setLoading(false);
     })();
     return()=>{vivo=false;};
   },[sess.access_token,ini,fim]);
 
   const atcAlvo=UNITS.find(u=>u.id===unidade)?.atc??null;
+
+  /* null enquanto a view não existir — e aí o cartão nem é desenhado.
+     Dia sem foto fica FORA da conta: se o robô não tirou o retrato
+     naquele dia, nenhum serviço dele está em foto nenhuma e todos
+     pareceriam "fora da carteira". Em 18/11/2026 isso faria o número
+     saltar de ~26% para 71,6% das execuções — número falso, e logo
+     num dia em que o robô estava com problema. Os dias assim viram
+     aviso, não viram contagem. */
+  const foraFiltrada=useMemo(()=>{
+    if(!fora) return null;
+    const f=atcAlvo===null?fora:fora.filter(r=>Number(r.atc)===atcAlvo);
+    const semFoto=[...new Set(f.filter(r=>r.dia_tem_foto===false).map(r=>r.dia))].sort();
+    return {linhas:f.filter(r=>r.dia_tem_foto!==false),semFoto};
+  },[fora,atcAlvo]);
 
   const ag=useMemo(()=>{
     if(!data)return null;
@@ -5477,7 +5531,50 @@ function ProducaoView({sess,onLogout,historico,entradaSerie,activeUnit}){
         <SummaryCard label="Equipes"          value={ag.equipes.length}                          color="#8b5cf6"  icon="👷"/>
         <SummaryCard label={`Tipos de ${rotuloTipo}`} value={ag.nTiposGeral}                     color={C.accent} icon="🔧"/>
         <SummaryCard label="Média por dia"    value={nDias?Math.round(ag.total/nDias):0}          color={C.amber}  icon="📅"/>
+        {foraFiltrada&&<SummaryCard label="Fora da carteira" value={foraFiltrada.linhas.length}
+          color="#06b6d4" icon="👻" onClick={()=>setVerFora(v=>!v)}/>}
       </div>
+
+      {/* O grupo que explica por que este painel e o gráfico lá de cima
+          não batem — e que até agora não aparecia em lugar nenhum. */}
+      {foraFiltrada&&<div style={{marginBottom:14,background:C.card,borderRadius:12,
+        border:`1px solid ${C.border}`,overflow:"hidden"}}>
+        <div onClick={()=>setVerFora(v=>!v)} style={{padding:"10px 16px",cursor:"pointer",
+          display:"flex",alignItems:"center",gap:8,fontSize:12.5,color:C.textMuted}}>
+          <span style={{color:"#06b6d4",fontWeight:800}}>{foraFiltrada.linhas.length}</span>
+          <span>das {ag.total} execuções nunca passaram pela carteira — abriram e foram baixadas
+            entre duas fotos, então a equipe trabalhou e a carteira não chegou a vê-las.</span>
+          <span style={{marginLeft:"auto",color:C.textDim,whiteSpace:"nowrap"}}>
+            {verFora?"esconder ▲":"ver a lista ▼"}</span>
+        </div>
+        {foraFiltrada.semFoto.length>0&&<div style={{padding:"9px 16px",fontSize:12,
+          borderTop:`1px solid ${C.border}`,background:"rgba(245,158,11,0.07)",color:C.amber}}>
+          ⚠ {foraFiltrada.semFoto.length===1?"O dia":"Os dias"}{" "}
+          {foraFiltrada.semFoto.map(d=>d.slice(8,10)+"/"+d.slice(5,7)).join(", ")}{" "}
+          {foraFiltrada.semFoto.length===1?"ficou":"ficaram"} de fora desta conta: o robô não tirou a
+          foto da carteira{foraFiltrada.semFoto.length===1?" nesse dia":" nesses dias"}, e sem ela
+          toda execução pareceria estar fora da carteira. A produção do painel acima continua inteira.
+        </div>}
+        {verFora&&<div style={{borderTop:`1px solid ${C.border}`,maxHeight:360,overflowY:"auto"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+            <thead><tr>{["Dia","OS","Serviço solicitado","Executado","Equipe","Família"].map(h=>
+              <th key={h} style={{position:"sticky",top:0,background:C.cardAlt,textAlign:"left",
+                padding:"7px 12px",color:C.textDim,fontSize:10.5,letterSpacing:"0.08em",
+                textTransform:"uppercase",borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead>
+            <tbody>{foraFiltrada.linhas.slice(0,400).map((r,i)=>
+              <tr key={i}>
+                <td style={tdFora}>{String(r.dia||"").slice(8,10)}/{String(r.dia||"").slice(5,7)}</td>
+                <td style={{...tdFora,fontFamily:FONTE_NUM}}>{r.numero_os}</td>
+                <td style={tdFora}>{r.tss}</td>
+                <td style={tdFora}>{r.tse}</td>
+                <td style={tdFora}>{r.equipe}</td>
+                <td style={tdFora}>{r.familia}</td>
+              </tr>)}</tbody>
+          </table>
+          {foraFiltrada.linhas.length>400&&<div style={{padding:"8px 12px",fontSize:11.5,color:C.textDim}}>
+            mostrando as 400 primeiras de {foraFiltrada.linhas.length}.</div>}
+        </div>}
+      </div>}
 
       {ag.total===0&&<div style={{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,padding:"40px 20px",textAlign:"center",color:C.textDim,fontSize:13}}>
         Nenhuma execução nesse período{unidade!=="geral"?" para esta unidade":""}.

@@ -252,6 +252,32 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   anônima do bundle. *(Bryan, 16/10/2026 — "só eu e o gerente poderemos
   ver por hora")*
 
+- **O que foi executado sem nunca passar pela carteira tem número
+  próprio agora** (`v_producao_fora_carteira`, cartão "Fora da
+  carteira" na Produção). É o grupo que explicava a diferença entre o
+  painel de baixo e o gráfico: em 16/11/2026, 332 execuções contra 244
+  saídas, e 86 desses 332 nunca estiveram em foto nenhuma. Ficava sem
+  aparecer em lugar algum desde outubro.
+
+  **A definição é "nunca esteve em foto NENHUMA", não "não estava na
+  foto de ontem".** As duas dão números diferentes — 86 contra 88 em
+  16/11 — e a diferença são serviços que apareceram em fotos antigas,
+  sumiram e voltaram. Esses já passaram pela carteira.
+
+  **Dia sem foto fica FORA da conta, e vira aviso na tela.** Sem essa
+  trava a conta mente: se o robô não tirou o retrato, nenhum serviço
+  do dia está em foto e TODOS parecem fora da carteira. Em 18/11 isso
+  dava 71,6% das execuções contra os ~26% de um dia normal — número
+  falso, justamente num dia em que o robô estava com problema.
+  *(Bryan, 19/11/2026 — pediu com opção de desfazer, por não confiar
+  ainda na conta)*
+
+- **A foto da carteira só é salva no primeiro ciclo depois das 17h**
+  (`index.js`, passo 14). Quem não roda depois das 17h não deixa
+  retrato, e o dia some do gráfico e do histórico sem nada avisar: 17
+  e 18/11/2026 ficaram assim. A `v_dias_sem_foto` lista os buracos —
+  eram 7 desde agosto.
+
 - **O `v_desfecho_dia` parou em 01/10/2026.** É ele que classifica o
   não executado em Improdutiva / Cancelada / Erro de base / Nada
   consta. Enquanto a `os_desfecho` não voltar a ser alimentada, a barra
