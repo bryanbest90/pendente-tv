@@ -272,11 +272,17 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   *(Bryan, 19/11/2026 — pediu com opção de desfazer, por não confiar
   ainda na conta)*
 
-- **A foto da carteira só é salva no primeiro ciclo depois das 17h**
-  (`index.js`, passo 14). Quem não roda depois das 17h não deixa
-  retrato, e o dia some do gráfico e do histórico sem nada avisar: 17
-  e 18/11/2026 ficaram assim. A `v_dias_sem_foto` lista os buracos —
-  eram 7 desde agosto.
+- **A foto da carteira é salva em TODA rodada das 17h em diante, e a
+  última do dia é a que fica** (`index.js`, passo 14: `hora >= 17`,
+  regravando por cima). Na prática o retrato do dia é o da rodada das
+  23:50. *(Conferido no log de 19/11/2026: salvou às 17:54, 18:54 e
+  19:54. Antes estava escrito aqui que só o primeiro ciclo salvava —
+  estava errado.)*
+
+  A consequência é que um dia só some se **nenhuma** rodada terminar
+  entre as 17h e a meia-noite — não se faltar a primeira. Foi o que
+  houve em 17 e 18/11/2026, quando o robô falhou o dia inteiro. A
+  `v_dias_sem_foto` lista os buracos — eram 7 desde agosto.
 
 - **O `v_desfecho_dia` parou em 01/10/2026.** É ele que classifica o
   não executado em Improdutiva / Cancelada / Erro de base / Nada
