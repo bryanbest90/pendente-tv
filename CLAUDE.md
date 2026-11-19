@@ -327,6 +327,27 @@ foto diária e no histórico, que é o que alimenta o gráfico.
 
 ## Robôs
 
+- **O `robo-geocall` roda com a conta de UM FUNCIONÁRIO DA SABESP, e
+  nós não sabemos a senha dele.** Os outros dois (`robo-execucoes` e
+  `robo-resumo-dia`) usam o login do Bryan, 552656, que não enxerga
+  tudo o que o pendente precisa. Em 19/11/2026 o funcionário aceitou
+  emprestar a conta dele — login 40043 — com a condição de digitar ele
+  mesmo, sem passar a senha para ninguém. Foi por isso que o pendente
+  ficou parado em 17 e 18/11: trocaram a senha no GEOCALL e só essa
+  conta é de fora.
+
+  **A troca é pelo `nuvem/senha_sabesp.sh`, na máquina da nuvem.** Ele
+  pergunta o login (aparece na tela) e a senha (não aparece: nem
+  letra, nem bolinha), grava nos dois campos do `config.json` do
+  `robo-geocall`, guarda um `.bak` do que havia antes e no fim roda
+  `index.js --login`, que entra no GEOCALL de verdade e responde
+  ENTROU ou NÃO ENTROU — quem digitou confere na hora, em vez de o
+  erro aparecer na madrugada seguinte. **Não dá para prometer sigilo
+  além disso:** a senha fica em texto puro no `config.json`, como
+  todas as outras, e quem tem acesso à máquina a lê. O que o script
+  garante é que ela não passa por quem está do lado nem fica no
+  histórico do terminal. *(19/11/2026)*
+
 - **O robô antigo de executados está desativado, e não volta.** Ele
   gravava chamando `limpar_execucao(ini,fim)`, que APAGA a faixa inteira
   e regrava com as 12 colunas antigas — destruindo `cod_tss`,
