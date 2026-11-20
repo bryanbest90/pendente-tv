@@ -62,10 +62,28 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   variação — não o buraco — que fazia a conta da tela errar por 3 num
   dia e 83 noutro. A aba Produção passou a contar o saldo da própria
   foto (`v_carteira_foto`) para a conta fechar; a Pendente continua na
-  `pendente_historico`, que é o número do contrato. **O conserto de
-  verdade é no robô**, gravando por par (numero_os, tss) — e só vale
-  daí em diante: as linhas que nunca foram gravadas não existem em
-  lugar nenhum. *(16/10/2026, Bryan conferindo o gráfico)*
+  `pendente_historico`, que é o número do contrato.
+  *(16/10/2026, Bryan conferindo o gráfico)*
+
+- **CONSERTADO em 19/11/2026: a foto passou a gravar por par.** O
+  defeito não estava na tabela, estava em quem escrevia nela — o robô
+  deduplicava por `numero_os` antes de enviar (`seen.has(numero)` no
+  `salvarDiarioOS`, e o mesmo no `importar_historico.js`). Os dois
+  passaram a deduplicar pelo par.
+
+  **A chave do banco tinha de mudar junto**, senão a segunda linha da
+  mesma OS é recusada e o passo 14 morre — e ele é embrulhado num
+  try/catch "não crítico", então o dia ficaria sem foto com um aviso
+  solto no log. O `sql/diario_os_por_par.sql` troca a chave e tem a
+  conferência; o robô passou a reconhecer o erro 23505 e dizer para
+  rodar esse arquivo, em vez de um erro cru do PostgREST.
+
+  **O degrau é esperado e não se conserta:** a carteira passa a contar
+  serviços e sobe de 5 a 24 de um dia para o outro. O passado não pode
+  ser recalculado — as linhas que nunca foram gravadas não existem em
+  lugar nenhum. É o mesmo caso do prazo em 15/10 e da GARANTIA em
+  18/11. Em troca, a foto e a `pendente_historico` passam a contar a
+  mesma coisa, e aquela diferença sem padrão acaba.
 
 - **"Saiu da carteira" não é "executada".** Pode ter sido cancelada ou
   encerrada sem execução. O porquê está na aba Etiquetas.
