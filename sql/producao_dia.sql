@@ -62,6 +62,28 @@
 -- ============================================================
 
 
+-- ---------- 0. DERRUBAR A SÉRIE ANTES DE RECRIAR ----------
+-- `CREATE OR REPLACE VIEW` só acrescenta coluna NO FIM. Mexer na
+-- ordem, ou inserir uma no meio, dá erro 42P16 e o arquivo inteiro é
+-- recusado:
+--
+--   cannot change name of view column "carteira" to "baixa_chegou"
+--
+-- Aconteceu em 19/11/2026, ao acrescentar a `baixa_chegou` antes da
+-- `carteira`. E o pior não é o erro: é o que vem depois. A view fica
+-- como estava, o site já atualizado pede a coluna nova, a busca falha
+-- e o gráfico volta calado ao desenho antigo. O erro aparece no SQL
+-- Editor; o estrago, na tela.
+--
+-- Esta regra já estava no CLAUDE.md desde 16/10 ("antes de recriar
+-- qualquer view deste projeto, olhar as colunas que ela realmente
+-- tem") e eu a repeti. Com o DROP na frente, a ordem das colunas
+-- deixa de importar.
+--
+-- A v_producao_dia usa a v_producao_sumiram, então ela cai primeiro.
+DROP VIEW IF EXISTS v_producao_dia;
+
+
 -- ---------- 1. A LISTA DOS QUE SUMIRAM ----------
 -- É o cartão que abre ao clicar na faixa cinza do gráfico. Existe
 -- porque "sumiram 6" é um número que ninguém consegue checar: com a

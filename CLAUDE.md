@@ -109,6 +109,16 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   deste projeto, olhar as colunas que ela realmente tem** — é um
   SELECT.
 
+  **Em 19/11/2026 o mesmo 42P16 voltou**, ao acrescentar a
+  `baixa_chegou` antes da `carteira` na `v_producao_dia`:
+  `CREATE OR REPLACE VIEW` só acrescenta coluna NO FIM. E o erro é a
+  parte barata — o caro é o que vem depois: a view fica como estava, o
+  site já atualizado pede a coluna nova, a busca falha e o gráfico
+  volta CALADO ao desenho antigo. O erro aparece no SQL Editor; o
+  estrago, na tela. **Todo arquivo que mexe numa view existente leva um
+  `DROP VIEW IF EXISTS` na frente** — aí a ordem das colunas deixa de
+  importar.
+
 - **APLICADO em 16/10/2026, 13h56, e CONFERIDO contra a Sabesp.** As
   13.486 horas do backfill (agosto, setembro, outubro, da tela Lista
   OS) mais as 984 da carteira aberta deixaram 13.572 de 15.076 linhas
