@@ -109,7 +109,27 @@ GRANT SELECT ON v_producao_sumiram TO authenticated;
 
 -- ---------- 2. A SÉRIE DO GRÁFICO ----------
 CREATE OR REPLACE VIEW v_producao_dia AS
-WITH chaves AS (
+WITH
+/* DIA SEM EXECUÇÃO REGISTRADA NÃO TEM BARRA — nem de zero.
+
+   Conferido em 19/11/2026, com o banco de verdade: em 31/10 e em
+   19/11 não há nenhuma baixa gravada, e nesses dois dias TODO serviço
+   que saiu da carteira caiu no `sumiram` — 114 e 300, contra uma
+   mediana de 13. É óbvio depois de visto: sem baixa no banco, o
+   serviço executado é indistinguível do cancelado.
+
+   Acontece todo dia, aliás: as execuções só chegam no robô das 00:30
+   da madrugada seguinte, então o dia corrente SEMPRE está assim.
+
+   Zero seria mentira — a equipe trabalhou, o dado é que não chegou.
+   Então as três colunas que dependem da baixa vêm NULAS, e o gráfico
+   não desenha barra nenhuma ali. É a mesma regra do `dia_tem_foto` na
+   v_producao_fora_carteira, e eu a repeti errado aqui antes de
+   alguém medir. */
+cob AS (
+  SELECT dia, count(*) AS baixas FROM v_execucao_final GROUP BY 1
+),
+chaves AS (
   SELECT dia, unidade, familia FROM v_entrada_serie
   UNION
   SELECT dia, unidade, familia FROM v_execucao_serie
@@ -126,10 +146,13 @@ sumiu AS (
 SELECT k.dia,
        k.unidade,
        k.familia,
+       -- A entrada não depende de baixa nenhuma, então vale sempre.
        COALESCE(e.entradas,  0)::int AS entraram,
-       COALESCE(x.executados,0)::int AS executados,
-       COALESCE(x.nao_executados, 0)::int AS nao_executados,
-       COALESCE(s.sumiram,   0)::int AS sumiram,
+       -- Estas três dependem da baixa ter chegado. Sem ela, NULO.
+       CASE WHEN COALESCE(b.baixas,0) > 0 THEN COALESCE(x.executados, 0)::int END     AS executados,
+       CASE WHEN COALESCE(b.baixas,0) > 0 THEN COALESCE(x.nao_executados, 0)::int END AS nao_executados,
+       CASE WHEN COALESCE(b.baixas,0) > 0 THEN COALESCE(s.sumiram, 0)::int END        AS sumiram,
+       (COALESCE(b.baixas,0) > 0)                                                     AS baixa_chegou,
        -- A carteira vem da foto e fica NULA no dia sem foto.
        c.total      AS carteira,
        c.no_prazo,
@@ -139,6 +162,7 @@ SELECT k.dia,
   LEFT JOIN v_execucao_serie x ON x.dia = k.dia AND x.unidade = k.unidade AND x.familia = k.familia
   LEFT JOIN v_carteira_foto  c ON c.dia = k.dia AND c.unidade = k.unidade AND c.familia = k.familia
   LEFT JOIN sumiu            s ON s.dia = k.dia AND s.unidade = k.unidade AND s.familia = k.familia
+  LEFT JOIN cob              b ON b.dia = k.dia
  WHERE k.unidade IS NOT NULL
    AND k.familia IS NOT NULL;
 
@@ -157,11 +181,21 @@ GRANT SELECT ON v_producao_dia TO authenticated;
 --    serviço criado depois da foto, linha perdida pelo robô. Se ela
 --    for pequena e sem tendência, o gráfico está honesto.
 --
--- WITH t AS (
---   SELECT dia,
---          sum(entraram) e, sum(executados) x, sum(nao_executados) n,
---          sum(sumiram) s, sum(carteira) c
---     FROM v_producao_dia
+--    DUAS RESSALVAS, descobertas medindo em 19/11/2026:
+--    1. só vale nos dias em que a baixa já chegou (`baixa_chegou`);
+--    2. só vale nas famílias que a FOTO tem. A os_entrada e a execucao
+--       têm famílias que o robô exclui do retrato: contá-las de um
+--       lado e não do outro faz a conta errar por dezenas sem que
+--       nada esteja errado.
+--
+-- WITH fam AS (SELECT DISTINCT unidade, familia FROM v_carteira_foto),
+-- t AS (
+--   SELECT p.dia,
+--          sum(p.entraram) e, sum(p.executados) x, sum(p.nao_executados) n,
+--          sum(p.sumiram) s, sum(p.carteira) c
+--     FROM v_producao_dia p
+--     JOIN fam f ON f.unidade = p.unidade AND f.familia = p.familia
+--    WHERE p.baixa_chegou
 --    GROUP BY 1
 -- )
 -- SELECT dia, c AS carteira, e, x, n, s,

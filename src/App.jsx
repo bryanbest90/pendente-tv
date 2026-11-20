@@ -439,7 +439,7 @@ async function fetchProducaoDia(token){
   const cab=token?authHeaders(token):HEADERS;
   const out=[];let from=0;const ps=1000;
   for(;;){
-    const r=await fetch(SUPABASE_URL+"/rest/v1/v_producao_dia?select=dia,unidade,familia,entraram,executados,nao_executados,sumiram&order=dia.asc,unidade.asc,familia.asc",
+    const r=await fetch(SUPABASE_URL+"/rest/v1/v_producao_dia?select=dia,unidade,familia,entraram,executados,nao_executados,sumiram,baixa_chegou&order=dia.asc,unidade.asc,familia.asc",
       {headers:{...cab,"Range":from+"-"+(from+ps-1)}});
     if(!r.ok&&r.status!==206) return null;
     const d=await r.json();
@@ -3845,16 +3845,28 @@ function HistoricoChart({historico,entradaSerie,execucaoSerie,movimentoSerie,pro
         if(familyFilter.size>0 && !familyFilter.has(r.familia)) return;
         if(!allFamilies.includes(r.familia)) return;
         const d=String(r.dia).slice(0,10);
-        if(!pr[d]) pr[d]={ent:0,ex:0,ne:0,su:0};
+        if(!pr[d]) pr[d]={ent:0,ex:0,ne:0,su:0,baixa:false};
         pr[d].ent+=r.entraram||0;
         pr[d].ex +=r.executados||0;
         pr[d].ne +=r.nao_executados||0;
         pr[d].su +=r.sumiram||0;
+        if(r.baixa_chegou===true) pr[d].baixa=true;
       });
-      data=data.map(d=>pr[d.dia]
-        ?{...d,entraram:pr[d.dia].ent,executados:pr[d.dia].ex,
-               nao_executados:pr[d.dia].ne,sumiram:pr[d.dia].su}
-        :{...d,entraram:null,executados:null,nao_executados:null,sumiram:null});
+      /* DIA SEM BAIXA NENHUMA NÃO DESENHA BARRA DE SAÍDA — nem de zero.
+
+         As execuções só chegam no robô das 00:30 da madrugada
+         seguinte, então o dia corrente está sempre assim. Zero seria
+         mentira (a equipe trabalhou, o dado é que não chegou) e, pior,
+         jogava TODO mundo que saiu da carteira no cinza: em 19/11 isso
+         dava 300 "sumiram" contra uma mediana de 13. A entrada fica,
+         porque não depende de baixa nenhuma. */
+      data=data.map(d=>{
+        const p=pr[d.dia];
+        if(!p) return {...d,entraram:null,executados:null,nao_executados:null,sumiram:null};
+        return p.baixa
+          ? {...d,entraram:p.ent,executados:p.ex,nao_executados:p.ne,sumiram:p.su}
+          : {...d,entraram:p.ent,executados:null,nao_executados:null,sumiram:null};
+      });
       // o saldo de ontem viaja junto, para o tooltip escrever a conta
       const serieP=data;
       data=serieP.map((d,i)=>i>0?{...d,ontem:serieP[i-1].total,diaAnt:serieP[i-1].dia}:{...d});
