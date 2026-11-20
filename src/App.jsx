@@ -418,6 +418,54 @@ async function fetchMovimento(token){
   }
   return out;
 }
+/* A PRODUÇÃO DO DIA, pela v_producao_dia — a série que o Bryan pediu
+   em 19/11/2026, e que substitui o movimento no gráfico.
+
+   A diferença é o que cada barra significa. O movimento comparava
+   duas fotos, então o serviço que entrava e era executado no mesmo
+   dia não aparecia em foto nenhuma e sumia da barra de executados:
+   em 16/11, com VAZAMENTO, a tela mostrava 10 num dia em que a
+   produção por equipe era muito maior. Aqui cada barra é datada pelo
+   PRÓPRIO FATO — entrou na data de criação, executado na data de
+   execução —, então aquele serviço entra nas duas, como deve.
+
+   A quarta barra, `sumiram`, é o que a regra não cobre: o serviço que
+   sai da carteira sem baixa nenhuma. Sem ela a carteira encolhe
+   sozinha no gráfico e a conta não fecha.
+
+   Devolve null se a view não existir, e aí a aba volta ao movimento
+   de antes — é o desfazer, sem precisar reverter o site. */
+async function fetchProducaoDia(token){
+  const cab=token?authHeaders(token):HEADERS;
+  const out=[];let from=0;const ps=1000;
+  for(;;){
+    const r=await fetch(SUPABASE_URL+"/rest/v1/v_producao_dia?select=dia,unidade,familia,entraram,executados,nao_executados,sumiram&order=dia.asc,unidade.asc,familia.asc",
+      {headers:{...cab,"Range":from+"-"+(from+ps-1)}});
+    if(!r.ok&&r.status!==206) return null;
+    const d=await r.json();
+    if(!d?.length) break;
+    out.push(...d);
+    if(d.length<ps) break;
+    from+=ps;
+  }
+  return out;
+}
+/* A LISTA de quem sumiu num dia — o cartão que abre ao clicar na
+   faixa cinza.
+
+   Existe porque "sumiram 6" é um número que ninguém consegue checar.
+   Com a OS na mão dá para abrir no GEOCALL e ver o motivo — e se a
+   maioria tiver baixa lá e não aqui, o defeito é do robô de
+   execuções, não do gráfico. Um dia só, então não precisa paginar. */
+async function fetchSumiram(token,dia){
+  const cab=token?authHeaders(token):HEADERS;
+  const r=await fetch(SUPABASE_URL+
+    `/rest/v1/v_producao_sumiram?dia=eq.${dia}`+
+    "&select=unidade,familia,numero_os,tss,ultima_foto,dias_na_carteira"+
+    "&order=dias_na_carteira.desc,numero_os.asc,tss.asc",{headers:cab});
+  if(!r.ok&&r.status!==206) return null;
+  return await r.json();
+}
 /* O SALDO CONTADO DA MESMA FOTO que o movimento, pela v_carteira_foto.
 
    Existe porque, com o movimento já no ar, a conta ainda errava por
@@ -3483,11 +3531,11 @@ function CustomTooltip({active,payload,label}){
         naquele dia; a divisão entre executado e não executado é a
         segunda. O gráfico mostra a altura, o tooltip dá o número. */}
     {(()=>{const v=k=>payload.find(p=>p.dataKey===k)?.value;
-           const e=v("executados"), n=v("nao_executados"), o=v("outro_motivo");
-           if(e==null&&n==null&&o==null) return null;
+           const e=v("executados"), n=v("nao_executados"), o=v("outro_motivo"), s=v("sumiram");
+           if(e==null&&n==null&&o==null&&s==null) return null;
            return <div style={{display:"flex",alignItems:"center",gap:8,padding:"2px 0",borderBottom:`1px solid ${C.border}`,marginBottom:4,paddingBottom:5}}>
              <span style={{width:8,height:8,borderRadius:2,background:C.textMuted,flexShrink:0}}/><span style={{color:C.textMuted}}>Saíram:</span>
-             <span style={{fontWeight:700,color:C.text,fontVariantNumeric:"tabular-nums"}}>{((e||0)+(n||0)+(o||0)).toLocaleString("pt-BR")}</span>
+             <span style={{fontWeight:700,color:C.text,fontVariantNumeric:"tabular-nums"}}>{((e||0)+(n||0)+(o||0)+(s||0)).toLocaleString("pt-BR")}</span>
            </div>;})()}
     {payload.filter(p=>p.value!=null).map((p,i)=>(<div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"2px 0"}}>
       <span style={{width:8,height:8,borderRadius:"50%",background:p.color,flexShrink:0}}/><span style={{color:C.textMuted}}>{p.name}:</span>
@@ -3501,9 +3549,9 @@ function CustomTooltip({active,payload,label}){
     {(()=>{const row=payload[0]?.payload;
            if(row?.ontem==null||row?.entraram==null) return null;
            const v=k=>payload.find(p=>p.dataKey===k)?.value;
-           const e=v("executados"), n=v("nao_executados"), o=v("outro_motivo");
-           if(e==null&&n==null&&o==null) return null;
-           const sai=(e||0)+(n||0)+(o||0), ent=row.entraram;
+           const e=v("executados"), n=v("nao_executados"), o=v("outro_motivo"), s=v("sumiram");
+           if(e==null&&n==null&&o==null&&s==null) return null;
+           const sai=(e||0)+(n||0)+(o||0)+(s||0), ent=row.entraram;
            return <div style={{fontSize:10,color:C.textDim,marginTop:5,borderTop:`1px solid ${C.border}`,paddingTop:5,lineHeight:1.5}}>
              <div style={{fontVariantNumeric:"tabular-nums",color:C.textMuted}}>
                {row.ontem.toLocaleString("pt-BR")} − {sai.toLocaleString("pt-BR")} + {ent.toLocaleString("pt-BR")} = <strong style={{color:C.text}}>{(row.ontem-sai+ent).toLocaleString("pt-BR")}</strong>
@@ -3515,6 +3563,77 @@ function CustomTooltip({active,payload,label}){
 }
 
 const dateInputStyle = {padding:"4px 8px",borderRadius:6,fontSize:12,fontWeight:600,border:`1px solid ${C.border}`,background:C.cardAlt,color:C.text,cursor:"pointer",colorScheme:"dark"};
+
+/* ── Modal dos que SUMIRAM da carteira ──
+   Abre ao clicar na faixa cinza do gráfico. São os serviços que
+   deixaram de estar na foto sem baixa nenhuma: nem executado, nem
+   improdutiva. Existe porque "sumiram 6" é um número que ninguém
+   consegue conferir — com a OS na mão dá para abrir no GEOCALL e ver
+   o motivo. E se a maioria tiver baixa lá e não aqui, o defeito é do
+   robô de execuções, não do gráfico. (19/11/2026) */
+function SumiramModal({dia,sess,activeUnit,familyFilter,onClose}){
+  const [loading,setLoading]=useState(true);
+  const [linhas,setLinhas]=useState(null);   // null = a view não respondeu
+  const unidadeFilter = UNIT_TO_HISTORICO[activeUnit];
+
+  useEffect(()=>{let vivo=true;
+    (async()=>{
+      const r=await fetchSumiram(sess?.access_token,dia).catch(()=>null);
+      if(!vivo) return;
+      if(!r){setLinhas(null);setLoading(false);return;}
+      let f=r;
+      if(unidadeFilter) f=f.filter(x=>x.unidade===unidadeFilter);
+      if(familyFilter?.size>0) f=f.filter(x=>familyFilter.has(x.familia));
+      setLinhas(f);setLoading(false);
+    })();
+    return()=>{vivo=false;};
+  },[dia,sess?.access_token,unidadeFilter,familyFilter]);
+
+  const th={padding:"8px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:C.textDim,
+            borderBottom:`1px solid ${C.border}`,position:"sticky",top:0,background:C.card};
+  const td={padding:"7px 12px",borderBottom:`1px solid ${C.border}`,fontSize:12,color:C.text};
+
+  return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(4px)"}}>
+    <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:16,border:`1px solid ${C.border}`,width:"100%",maxWidth:760,maxHeight:"85vh",display:"flex",flexDirection:"column",overflow:"hidden",animation:"modalIn 0.2s ease"}}>
+      <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+        <div>
+          <div style={{fontSize:16,fontWeight:700,color:C.text}}>Sumiram da carteira</div>
+          <div style={{fontSize:13,color:C.textDim,marginTop:2}}>
+            {fmtDiaFull(dia)} · estavam na foto anterior e saíram sem baixa nenhuma
+          </div>
+        </div>
+        <button onClick={onClose} style={{background:"transparent",border:"none",color:C.textDim,fontSize:22,cursor:"pointer",padding:"4px 8px"}}>✕</button>
+      </div>
+      <div style={{overflow:"auto",flex:1}}>
+        {loading&&<div style={{padding:24,color:C.textDim,fontSize:13}}>Carregando…</div>}
+        {!loading&&linhas===null&&<div style={{padding:24,color:C.textDim,fontSize:13}}>
+          A lista não respondeu. Rode o <code>sql/producao_dia.sql</code> no Supabase.
+        </div>}
+        {!loading&&linhas?.length===0&&<div style={{padding:24,color:C.textDim,fontSize:13}}>
+          Nenhum serviço neste recorte de unidade e família.
+        </div>}
+        {!loading&&linhas?.length>0&&<table style={{width:"100%",borderCollapse:"collapse"}}>
+          <thead><tr>
+            <th style={th}>OS</th><th style={th}>Serviço</th><th style={th}>Família</th>
+            <th style={th}>Última foto</th><th style={{...th,textAlign:"right"}}>Na carteira</th>
+          </tr></thead>
+          <tbody>{linhas.map((r,i)=>
+            <tr key={i}>
+              <td style={{...td,fontVariantNumeric:"tabular-nums",fontWeight:600}}>{r.numero_os}</td>
+              <td style={td}>{r.tss}</td>
+              <td style={{...td,color:C.textMuted}}>{r.familia}</td>
+              <td style={{...td,color:C.textMuted,fontVariantNumeric:"tabular-nums"}}>{fmtDiaShort(r.ultima_foto)}</td>
+              <td style={{...td,textAlign:"right",fontVariantNumeric:"tabular-nums"}}>{r.dias_na_carteira} d</td>
+            </tr>)}
+          </tbody>
+        </table>}
+      </div>
+      {!loading&&linhas?.length>0&&<div style={{padding:"10px 20px",borderTop:`1px solid ${C.border}`,fontSize:11,color:C.textDim,flexShrink:0}}>
+        {linhas.length} {linhas.length===1?"serviço":"serviços"} · confira no GEOCALL: tendo baixa lá e não aqui, o buraco é do robô de execuções
+      </div>}
+    </div>
+  </div>;
+}
 
 /* ── Modal de OS que saíram do pendente ── */
 function OSExitModal({diaA,diaB,activeUnit,familyFilter,onClose}){
@@ -3615,10 +3734,16 @@ function OSExitModal({diaA,diaB,activeUnit,familyFilter,onClose}){
   </div>;
 }
 
-function HistoricoChart({historico,entradaSerie,execucaoSerie,movimentoSerie,activeUnit}){
+function HistoricoChart({historico,entradaSerie,execucaoSerie,movimentoSerie,producaoSerie,sess,activeUnit}){
   const [showChart,setShowChart]=useState(true);
   const [diffModal,setDiffModal]=useState(null);
   const [exitModal,setExitModal]=useState(null);
+  const [sumiuModal,setSumiuModal]=useState(null);
+  /* O clique na faixa cinza e o clique no gráfico disparam os dois, e
+     a ordem entre eles não é garantida pelo Recharts. Marcar a hora do
+     clique no cinza e ignorar o do gráfico logo em seguida resolve sem
+     depender dessa ordem. */
+  const cliqueCinza=useRef(0);
   /* Abre nos últimos 15 dias. Com a série passando de 50 dias, abrir no
      período inteiro espremia o mês corrente — que é o que se olha todo
      dia — num terço da largura, e deixava as colunas finas demais para
@@ -3704,6 +3829,40 @@ function HistoricoChart({historico,entradaSerie,execucaoSerie,movimentoSerie,act
        está presente: são perguntas diferentes. "Entraram na carteira"
        (aqui) não é "foram solicitados" (v_entrada_serie), que
        continua sendo o número da coluna Entradas da aba Carteira. */
+    /* PRODUÇÃO — quando esta série existe, é ela que manda, e o
+       movimento abaixo nem é consultado.
+
+       Cada barra datada pelo próprio fato: entrou na data de criação,
+       executado na data de execução. Assim o serviço que nasce e morre
+       no mesmo dia aparece nas duas, em vez de sumir das duas — era o
+       defeito que fazia a tela mostrar 10 executados num dia de muito
+       mais. A quarta barra é quem saiu sem baixa nenhuma; sem ela a
+       carteira encolhe sozinha e a conta do tooltip não fecha. */
+    if(producaoSerie?.length){
+      const pr={};
+      producaoSerie.forEach(r=>{
+        if(unidadeFilter!==null && r.unidade!==unidadeFilter) return;
+        if(familyFilter.size>0 && !familyFilter.has(r.familia)) return;
+        if(!allFamilies.includes(r.familia)) return;
+        const d=String(r.dia).slice(0,10);
+        if(!pr[d]) pr[d]={ent:0,ex:0,ne:0,su:0};
+        pr[d].ent+=r.entraram||0;
+        pr[d].ex +=r.executados||0;
+        pr[d].ne +=r.nao_executados||0;
+        pr[d].su +=r.sumiram||0;
+      });
+      data=data.map(d=>pr[d.dia]
+        ?{...d,entraram:pr[d.dia].ent,executados:pr[d.dia].ex,
+               nao_executados:pr[d.dia].ne,sumiram:pr[d.dia].su}
+        :{...d,entraram:null,executados:null,nao_executados:null,sumiram:null});
+      // o saldo de ontem viaja junto, para o tooltip escrever a conta
+      const serieP=data;
+      data=serieP.map((d,i)=>i>0?{...d,ontem:serieP[i-1].total,diaAnt:serieP[i-1].dia}:{...d});
+      if(dateFrom) data=data.filter(d=>d.dia>=dateFrom);
+      if(dateTo)   data=data.filter(d=>d.dia<=dateTo);
+      return data.map(d=>({...d,label:fmtDiaShort(d.dia)}));
+    }
+
     if(movimentoSerie?.length){
       const mv={};
       movimentoSerie.forEach(r=>{
@@ -3770,9 +3929,10 @@ function HistoricoChart({historico,entradaSerie,execucaoSerie,movimentoSerie,act
     if(dateFrom) data = data.filter(d => d.dia >= dateFrom);
     if(dateTo) data = data.filter(d => d.dia <= dateTo);
     return data.map(d=>({...d,label:fmtDiaShort(d.dia)}));
-  },[historico,entradaSerie,execucaoSerie,movimentoSerie,allFamilies,unidadeFilter,familyFilter,dateFrom,dateTo]);
+  },[historico,entradaSerie,execucaoSerie,movimentoSerie,producaoSerie,allFamilies,unidadeFilter,familyFilter,dateFrom,dateTo]);
 
   const handleChartClick = useCallback((e)=>{
+    if(Date.now()-cliqueCinza.current<400) return;   // o clique foi na faixa cinza
     if(!e?.activePayload?.length) return;
     const clicked = e.activePayload[0].payload;
     const idx = chartData.findIndex(d=>d.dia===clicked.dia);
@@ -3796,6 +3956,8 @@ function HistoricoChart({historico,entradaSerie,execucaoSerie,movimentoSerie,act
   const somaNE   = chartData.reduce((a,d)=>a+(d.nao_executados||0),0);
   const temOutro = chartData.some(d=>d.outro_motivo!=null);
   const somaOU   = chartData.reduce((a,d)=>a+(d.outro_motivo||0),0);
+  const temSumiu = chartData.some(d=>d.sumiram!=null);
+  const somaSU   = chartData.reduce((a,d)=>a+(d.sumiram||0),0);
 
   return <div style={{background:C.card,borderRadius:RAIO,border:`1px solid ${C.border}`,marginBottom:16,overflow:"hidden"}}>
     <div onClick={()=>setShowChart(!showChart)} style={{padding:"14px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",borderBottom:showChart?`1px solid ${C.border}`:"none"}}
@@ -3812,6 +3974,7 @@ function HistoricoChart({historico,entradaSerie,execucaoSerie,movimentoSerie,act
         {temSaida&&<span style={{fontSize:11,color:C.textDim}}>
           <b style={{color:C.green}}>{somaExec}</b> executados · <b style={{color:C.amber}}>{somaNE}</b> não
           {temOutro&&somaOU>0&&<> · <b style={{color:C.textMuted}}>{somaOU}</b> outro motivo</>}
+          {temSumiu&&somaSU>0&&<> · <b style={{color:C.textMuted}}>{somaSU}</b> sumiram</>}
         </span>}
         <span style={{color:varTotal>0?C.red:varTotal<0?C.green:C.textDim,fontWeight:600}}>{varTotal>0?"+":""}{varTotal} OS</span>
         <span style={{color:varFora>0?C.red:varFora<0?C.green:C.textDim,fontWeight:600}}>{varFora>0?"+":""}{varFora} fora</span>
@@ -3881,6 +4044,16 @@ function HistoricoChart({historico,entradaSerie,execucaoSerie,movimentoSerie,act
                 aparece quando a série de movimento está ligada, que é
                 a única que sabe distinguir isso. */}
             {temOutro&&<RBar yAxisId="mov" stackId="saiu" dataKey="outro_motivo" name="Outro motivo" fill={C.textDim} fillOpacity={0.55} radius={[2,2,0,0]} maxBarSize={14}/>}
+            {/* SUMIRAM — saiu da carteira sem baixa nenhuma. É a única
+                barra sem data própria (vale o dia em que deixou de
+                estar na foto), e por isso é a única clicável: abre a
+                lista das OS, para dar para conferir uma a uma no
+                GEOCALL. Um número que ninguém consegue checar não
+                merece estar num gráfico. */}
+            {temSumiu&&<RBar yAxisId="mov" stackId="saiu" dataKey="sumiram" name="Sumiram" fill={C.textDim} fillOpacity={0.55} radius={[2,2,0,0]} maxBarSize={14}
+              cursor="pointer"
+              onClick={(p)=>{const dia=p?.payload?.dia; if(!dia||!p?.payload?.sumiram) return;
+                             cliqueCinza.current=Date.now(); setSumiuModal({dia});}}/>}
             <Area yAxisId="saldo" type="monotone" dataKey="total" name="Carteira" stroke={C.accent} fill="url(#gradTotal)" strokeWidth={2.4} dot={false} activeDot={{r:6,stroke:C.accent,strokeWidth:2,fill:C.card}}/>
             <RLine yAxisId="saldo" type="monotone" dataKey="no_prazo" name="No Prazo" stroke={C.green} strokeWidth={2} dot={false} activeDot={{r:5,stroke:C.green,strokeWidth:2,fill:C.card}}/>
             <RLine yAxisId="saldo" type="monotone" dataKey="fora_prazo" name="Fora do Prazo" stroke={C.red} strokeWidth={2} dot={false} activeDot={{r:5,stroke:C.red,strokeWidth:2,fill:C.card}}/>
@@ -3890,7 +4063,8 @@ function HistoricoChart({historico,entradaSerie,execucaoSerie,movimentoSerie,act
           {[{label:"Carteira",color:C.accent,barra:false},{label:"No Prazo",color:C.green,barra:false},{label:"Fora do Prazo",color:C.red,barra:false},
             ...(temMovimento?[{label:"Entraram",color:C.accent,barra:true}]:[]),
             ...(temSaida?[{label:"Executados",color:C.green,barra:true},{label:"Não executados",color:C.amber,barra:true}]:[]),
-            ...(temOutro?[{label:"Outro motivo",color:C.textDim,barra:true}]:[])].map(l=>
+            ...(temOutro?[{label:"Outro motivo",color:C.textDim,barra:true}]:[]),
+            ...(temSumiu?[{label:"Sumiram",color:C.textDim,barra:true}]:[])].map(l=>
             <div key={l.label} style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:C.textMuted}}>
               <span style={{width:l.barra?8:10,height:l.barra?9:3,borderRadius:2,background:l.color,opacity:l.barra?0.5:1}}/>{l.label}
             </div>
@@ -3909,6 +4083,7 @@ function HistoricoChart({historico,entradaSerie,execucaoSerie,movimentoSerie,act
 
     {diffModal&&<DiffModal historico={historico} dia={diffModal.dia} prevDia={diffModal.prevDia} activeUnit={activeUnit} familyFilter={familyFilter} onClose={()=>setDiffModal(null)}/>}
     {exitModal&&<OSExitModal diaA={exitModal.diaA} diaB={exitModal.diaB} activeUnit={activeUnit} familyFilter={familyFilter} onClose={()=>setExitModal(null)}/>}
+    {sumiuModal&&<SumiramModal dia={sumiuModal.dia} sess={sess} activeUnit={activeUnit} familyFilter={familyFilter} onClose={()=>setSumiuModal(null)}/>}
   </div>;
 }
 /* ── Family Row ── */
@@ -5300,12 +5475,19 @@ function ProducaoView({sess,onLogout,historico,entradaSerie,activeUnit}){
      fecha na tela. Enquanto a view não existir no banco, fica null e a
      aba usa o histórico de sempre. */
   const [fotoSerie,setFotoSerie]=useState(null);
+  /* A série nova, da v_producao_dia. Existindo, ela manda no gráfico e
+     o movimento acima vira só reserva: é o desfazer desta mudança —
+     derrubando a view no banco, a aba volta sozinha ao desenho antigo,
+     sem precisar reverter o site. (19/11/2026) */
+  const [producaoSerie,setProducaoSerie]=useState(null);
   useEffect(()=>{let vivo=true;
     (async()=>{
       try{const xs=await fetchExecucaoSerie(sess?.access_token);
         if(vivo&&xs?.length>0)setExecucaoSerie(xs);}catch{}
       try{const mv=await fetchMovimento(sess?.access_token);
         if(vivo&&mv?.length>0)setMovimentoSerie(mv);}catch{}
+      try{const pd=await fetchProducaoDia(sess?.access_token);
+        if(vivo&&pd?.length>0)setProducaoSerie(pd);}catch{}
       try{const ft=await fetchCarteiraFoto(sess?.access_token);
         if(vivo&&ft?.length>0)setFotoSerie(ft);}catch{}
     })();
@@ -5496,7 +5678,7 @@ function ProducaoView({sess,onLogout,historico,entradaSerie,activeUnit}){
         Ele traz os próprios filtros de período e família, separados
         dos filtros de Produção logo abaixo — são duas perguntas
         diferentes na mesma tela. */}
-    {saldoSerie&&saldoSerie.length>0&&<HistoricoChart historico={saldoSerie} entradaSerie={entradaSerie} execucaoSerie={execucaoSerie} movimentoSerie={movimentoSerie} activeUnit={activeUnit}/>}
+    {saldoSerie&&saldoSerie.length>0&&<HistoricoChart historico={saldoSerie} entradaSerie={entradaSerie} execucaoSerie={execucaoSerie} movimentoSerie={movimentoSerie} producaoSerie={producaoSerie} sess={sess} activeUnit={activeUnit}/>}
 
     {/* filtros */}
     <div style={{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,padding:"12px 16px",marginBottom:14,display:"flex",flexDirection:"column",gap:10}}>

@@ -284,6 +284,43 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   houve em 17 e 18/11/2026, quando o robô falhou o dia inteiro. A
   `v_dias_sem_foto` lista os buracos — eram 7 desde agosto.
 
+- **O gráfico da Produção passou a contar PRODUÇÃO, não movimento —
+  cada barra datada pelo próprio fato.** `entraram` pela data de
+  criação, `executados` e `nao_executados` pela data de execução,
+  `sumiram` pelo dia em que o serviço deixou de estar na foto. As
+  linhas continuam sendo a foto do fim do dia. A view é a
+  `v_producao_dia` (`sql/producao_dia.sql`).
+
+  **O defeito que isto conserta:** o gráfico anterior comparava duas
+  fotos, então quem entrava e era executado no mesmo dia não aparecia
+  em foto nenhuma e sumia da barra de executados. Em 16/11/2026, com
+  VAZAMENTO, a tela mostrava 10 executados num dia de muito mais — e
+  o Bryan estranhou com razão. **A observação dele é a regra:** esse
+  serviço aparece sim na execução das equipes, então contá-lo pela
+  data de execução já o traz de volta; e o que não é executado
+  continua na carteira, logo aparece na foto.
+
+  **O que a regra dele não cobre, e por isso a barra `sumiram`:** o
+  serviço que sai da carteira sem baixa NENHUMA — nem executado, nem
+  improdutiva. Cancelamento, mudança de status, troca de família. Em
+  01/10 eram 30 num dia. Sem ela a carteira encolhe sozinha e a conta
+  do tooltip não fecha. **Ela é a única barra sem data própria, e por
+  isso é a única clicável:** o clique abre a lista das OS
+  (`v_producao_sumiram`), para dar para conferir uma a uma no GEOCALL.
+  Número que ninguém consegue checar não merece estar num gráfico — e
+  se a maioria tiver baixa lá e não aqui, o buraco é do
+  `robo-execucoes`, não do desenho.
+
+  Conferido num Postgres local com um caso montado: serviço criado e
+  executado no mesmo dia entra nas duas barras, e a identidade
+  `carteira(ontem) + entraram − executados − nao_executados − sumiram
+  = carteira(hoje)` fecha com sobra zero nas três transições.
+
+  **O desfazer está no site, não no banco:** existindo a view, ela
+  manda; derrubando as duas views, a aba volta sozinha ao desenho
+  antigo (`v_carteira_movimento`), sem reverter o site.
+  *(Bryan, 19/11/2026)*
+
 - **O `v_desfecho_dia` parou em 01/10/2026.** É ele que classifica o
   não executado em Improdutiva / Cancelada / Erro de base / Nada
   consta. Enquanto a `os_desfecho` não voltar a ser alimentada, a barra
