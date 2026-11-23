@@ -683,14 +683,32 @@ async function fetchProducao(tok,diaIni,diaFim){
     }
     return out;
   };
+  const ordem="dia.asc,equipe.asc,tss.asc,tse.asc,atc.asc";
+  /* Três tentativas, da melhor para a pior, porque cada uma depende de
+     uma versão diferente do banco:
+
+     1. com `os_lista` — é ela que enche a aba "OS executadas" do Excel,
+        e só existe depois do sql/producao_os_lista.sql;
+     2. sem ela — a view de antes, que soma no banco. A aba nova some e
+        o resto da Produção continua igual;
+     3. a tabela crua — soma no navegador. É pesado, mas é o que mantém
+        a aba de pé se a view não existir.
+
+     Sem o degrau 2, quem ainda não rodou o SQL novo cairia direto no
+     degrau 3 e a Produção ficaria lenta sem nenhum motivo visível. */
   try{
-    const v=await puxar("v_producao_detalhe","dia,equipe,tss,tse,atc,qtd,os_distintas",
-                        "dia.asc,equipe.asc,tss.asc,tse.asc,atc.asc");
-    return {rows:v,agregado:true};
-  }catch(e){
-    const t=await puxar("execucao","dia,equipe,tss,tse,atc,numero_os",
-                        "dia.asc,numero_os.asc,tss.asc");
-    return {rows:t.map(r=>({...r,qtd:1,os_distintas:1})),agregado:false};
+    const v=await puxar("v_producao_detalhe","dia,equipe,tss,tse,atc,municipio,qtd,os_distintas,os_lista",ordem);
+    return {rows:v,agregado:true,temOS:true};
+  }catch(e1){
+    try{
+      const v=await puxar("v_producao_detalhe","dia,equipe,tss,tse,atc,qtd,os_distintas",ordem);
+      return {rows:v,agregado:true,temOS:false};
+    }catch(e2){
+      const t=await puxar("execucao","dia,equipe,tss,tse,atc,municipio,numero_os",
+                          "dia.asc,numero_os.asc,tss.asc");
+      return {rows:t.map(r=>({...r,qtd:1,os_distintas:1,os_lista:[r.numero_os]})),
+              agregado:false,temOS:true};
+    }
   }
 }
 
@@ -5569,11 +5587,27 @@ function ProducaoView({sess,onLogout,historico,entradaSerie,activeUnit}){
       const tp=String(r[campo]||"").trim()||(modo==="tss"?"(sem TSS)":"(sem TSE)");
       const q=Number(r.qtd)||1;
       total+=q;
-      if(!equipes.has(eq))equipes.set(eq,{equipe:eq,total:0,tipos:new Map()});
+      if(!equipes.has(eq))equipes.set(eq,{equipe:eq,total:0,tipos:new Map(),osPorTipo:new Map()});
       const e=equipes.get(eq);
       e.total+=q;
       e.tipos.set(tp,(e.tipos.get(tp)||0)+q);
       dias.set(r.dia,(dias.get(r.dia)||0)+q);
+      /* Os números por trás de cada contagem, para a aba "OS
+         executadas" do Excel. Vêm do `os_lista` da MESMA linha que
+         produziu o `qtd`, então a lista não tem como discordar do
+         número. A chave é OS + dia: a mesma OS executada em dois dias
+         são duas passagens da equipe, e as duas interessam para
+         conferir foto. */
+      if(Array.isArray(r.os_lista)&&r.os_lista.length){
+        if(!e.osPorTipo.has(tp))e.osPorTipo.set(tp,new Map());
+        const m=e.osPorTipo.get(tp);
+        r.os_lista.forEach(os=>{
+          const n=String(os||"").trim();
+          if(!n)return;
+          const k=n+"|"+r.dia;
+          if(!m.has(k))m.set(k,{os:n,dia:r.dia,municipio:String(r.municipio||"").trim()});
+        });
+      }
     });
 
     const listaEquipes=[...equipes.values()].sort((a,b)=>b.total-a.total||a.equipe.localeCompare(b.equipe));
@@ -5594,6 +5628,9 @@ function ProducaoView({sess,onLogout,historico,entradaSerie,activeUnit}){
       dias:listaDias,
       totalRecorte:listaTipos.reduce((s,t)=>s+t.qtd,0),
       nTiposGeral:new Set(listaEquipes.flatMap(e=>[...e.tipos.keys()])).size,
+      // false quando o banco ainda não tem a coluna os_lista: aí o Excel
+      // sai sem a aba das OS, em vez de sair com uma aba vazia.
+      temOS:listaEquipes.some(e=>e.osPorTipo.size>0),
     };
   },[data,modo,atcAlvo,equipeSel]);
 

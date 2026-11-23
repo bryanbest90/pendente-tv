@@ -313,6 +313,63 @@ export async function gerarRelatorioProducao({ag, modo, ini, fim, unidadeLabel, 
   linhaTotal(wdia, colDia, {data:"TOTAL", sem:`${nDias} dias`, qtd:total, pct:total?1:0});
   configurarImpressao(wdia, false);
 
+  /* ─────────────── 6. OS executadas ───────────────
+     Uma linha por OS, para conferir serviço a serviço — é por onde o
+     Bryan vai abrir as fotos no GEOCALL.
+
+     POR QUE É UMA ABA NOVA e não uma coluna na "Equipe x ${rotulo}":
+     aquela aba tem uma linha por equipe e serviço, com a quantidade e
+     o percentual. Uma equipe com 5 execuções do mesmo serviço são 5
+     OS, e elas não cabem numa célula de forma utilizável — nem dá para
+     filtrar ou marcar uma de cada vez. Então a aba somada fica como
+     está, respondendo "quem fez quanto de quê", e esta responde
+     "quais". As duas saem do MESMO dado: a lista vem do `os_lista` da
+     mesma linha que gerou a contagem.
+
+     A ORDEM é a mesma da aba somada — equipe por volume, serviço por
+     quantidade — para a lista ser aquela aba aberta, e não outra
+     coisa. Dentro de cada serviço, OS em ordem.
+
+     ATENÇÃO AO NÚMERO: esta aba conta OS, a outra conta EXECUÇÕES. Uma
+     OS que recebeu duas baixas do mesmo serviço aparece aqui uma vez
+     só e lá vale 2. Por isso o total no fim fala em OS, e a diferença
+     está escrita na própria linha — dois números que discordam sem
+     explicação viram uma reunião. */
+  const linhasOS = [];
+  ag.equipes.forEach(e=>{
+    if(!e.osPorTipo) return;
+    [...e.tipos.entries()].sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0]))
+      .forEach(([tp])=>{
+        const m = e.osPorTipo.get(tp);
+        if(!m) return;
+        [...m.values()].sort((a,b)=>a.os.localeCompare(b.os,undefined,{numeric:true}))
+          .forEach(o=>linhasOS.push({equipe:e.equipe, tipo:tp, os:o.os,
+                                     data:dataBR(o.dia), municipio:o.municipio}));
+      });
+  });
+
+  if(linhasOS.length){
+    const colOS = [
+      {header:"Equipe",      key:"equipe",    width:42},
+      {header:rotulo,        key:"tipo",      width:52},
+      {header:"Número OS",   key:"os",        width:16, align:"center", negrito:true},
+      {header:"Data",        key:"data",      width:13, align:"center", cor:CINZA},
+      {header:"Município",   key:"municipio", width:20, cor:CINZA},
+      {header:"Conferido",   key:"ok",        width:12, align:"center"},
+      {header:"Observação",  key:"obs",       width:46},
+    ];
+    const wos = wb.addWorksheet("OS executadas", {properties:{tabColor:{argb:ROXO}}});
+    montarCabecalho(wos, colOS);
+    linhasOS.forEach(l=>wos.addRow({...l, ok:"", obs:""}));
+    vestirCorpo(wos, colOS, 2, wos.rowCount);
+    aplicarFiltro(wos, colOS.length, wos.rowCount);
+    const nOS = new Set(linhasOS.map(l=>l.os)).size;
+    linhaTotal(wos, colOS, {equipe:"TOTAL",
+      tipo:`${linhasOS.length} linhas · ${nOS} OS distintas · ${total} execuções nas outras abas`,
+      os:"", data:"", municipio:"", ok:"", obs:""});
+    configurarImpressao(wos, true);
+  }
+
   const buf = await wb.xlsx.writeBuffer();
   return new Blob([buf], {type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
 }
