@@ -1,34 +1,44 @@
 -- ============================================================
--- A LISTA DE OS DENTRO DA PRODUÇÃO
+-- v_producao_detalhe — RESTAURAR O FILTRO + a lista de OS
 --
--- POR QUE
+-- LEIA ISTO ANTES: ESTE ARQUIVO CONSERTA UM ESTRAGO MEU
 --
--- A aba Equipe x TSE do Excel diz que o MATHEUS fez 5 serviços de
--- FALTA DE AGUA LOCAL ATENDIDA. Para conferir a foto de cada um, o
--- Bryan precisa dos 5 números. A `v_producao_detalhe` entrega só a
--- contagem (`count(*)`), então os números não chegavam ao arquivo.
+-- Em 23/11/2026 eu recriei esta view copiando a definição do
+-- `sql/isap_execucao.sql`. A view VIVA no banco não era aquela: ela
+-- tinha um `WHERE executado IS TRUE` que o arquivo do repositório
+-- nunca teve. Sem o filtro, a Produção do dia 19/11 pulou de 236 para
+-- 514 execuções e de 40 para 51 equipes — passou a contar toda baixa
+-- da tabela, inclusive as não executadas e as repetidas da mesma OS.
 --
--- A SOLUÇÃO, E POR QUE ELA É ASSIM
+-- A regra que eu quebrei está escrita no CLAUDE.md desde 16/10 e eu a
+-- tinha citado ao Bryan na mesma manhã: **antes de recriar qualquer
+-- view deste projeto, olhar o que ela REALMENTE é** — `SELECT
+-- pg_get_viewdef('v_producao_detalhe'::regclass, true);`. Arquivo no
+-- repositório não é prova do que está no banco.
 --
--- Acrescenta `os_lista` À PRÓPRIA VIEW, em vez de criar uma consulta
--- separada que buscasse as OS por conta própria. As 5 OS listadas
--- passam a sair da MESMA linha que produziu o número 5 — não tem como
--- uma dizer 5 e a outra listar 4. Consulta paralela é regra copiada, e
--- regra copiada é regra que diverge.
+-- O filtro foi reencontrado medindo, não lembrando: das seis
+-- candidatas testadas em 19/11, só `executado IS TRUE` devolveu
+-- exatamente 236. (`IS NOT FALSE` deu o mesmo número nesse dia porque
+-- não há `executado` nulo nele; o `IS TRUE` é o que casa com o rótulo
+-- da planilha, "execuções confirmadas".)
+--
+-- A COLUNA NOVA, que era o pedido original
+--
+-- `os_lista` traz os números por trás de cada contagem. A aba
+-- Equipe x TSE diz que o MATHEUS fez 5 de FALTA DE AGUA LOCAL
+-- ATENDIDA; para conferir a foto de cada um, é preciso os 5 números.
+-- Ela sai da MESMA linha que gerou o 5 — consulta paralela seria
+-- regra copiada, e regra copiada diverge.
 --
 -- CUIDADO AO RODAR
 --
--- A `v_producao_detalhe` nasce no `sql/isap_execucao.sql`. **Não rode
--- aquele arquivo** para aplicar esta mudança: ele também cria a
--- `v_idg`, com 18 colunas, e apagaria o `no_espelho` da versão viva
--- (a do `isap_espelho.sql`). É a armadilha que já está no CLAUDE.md.
--- Este arquivo toca só na view da produção.
+-- **Não rode o `sql/isap_execucao.sql`** para mexer nesta view: ele
+-- também cria a `v_idg`, com 18 colunas, e apagaria o `no_espelho` da
+-- versão viva (a do `isap_espelho.sql`). Este arquivo toca só aqui.
 --
--- A coluna nova entra NO FIM da lista, que é a única posição que o
--- `CREATE OR REPLACE VIEW` aceita — mexer na ordem dá erro 42P16.
--- Como é uma substituição, e não um DROP, as permissões e o
--- `security_invoker` que a view já tem são preservados: não há GRANT
--- nenhum aqui de propósito.
+-- É uma substituição, não um DROP, então as permissões e o
+-- `security_invoker` que a view já tem são preservados — por isso não
+-- há GRANT nenhum aqui.
 -- (23/11/2026)
 -- ============================================================
 
@@ -46,46 +56,54 @@ SELECT dia,
        -- sempre na mesma sequência.
        array_agg(DISTINCT numero_os ORDER BY numero_os) AS os_lista
   FROM execucao
+ WHERE executado IS TRUE          -- <<< o filtro que eu havia apagado
  GROUP BY 1,2,3,4,5,6;
 
 
 -- ============================================================
--- CONFERÊNCIA
+-- CONFERÊNCIA — rode junto, não depois
 -- ============================================================
 
--- A) A LISTA BATE COM A CONTAGEM? `os_distintas` e o tamanho da lista
---    têm de ser iguais em TODAS as linhas. Diferente de zero aqui
---    significa que uma das duas está errada.
+-- A) OS TRÊS NÚMEROS DO DIA 19/11 TÊM DE VOLTAR AO QUE ERAM.
+--    Saíram do Excel que o Bryan gerou às 07:39, antes do estrago:
+--    236 execuções, 40 equipes, 56 tipos de TSE.
+--
+-- SELECT sum(qtd)                AS execucoes,   -- 236
+--        count(DISTINCT equipe)  AS equipes,     -- 40
+--        count(DISTINCT tse)     AS tipos_tse    -- 56
+--   FROM v_producao_detalhe
+--  WHERE dia = '2026-11-19';
+
+-- B) A LISTA BATE COM A CONTAGEM? Tem de dar zero em todas as linhas.
 --
 -- SELECT count(*) AS linhas_com_divergencia
 --   FROM v_producao_detalhe
 --  WHERE os_distintas <> cardinality(os_lista);
 
--- B) O CASO DO BRYAN, para olhar com os olhos:
+-- C) O `executado` NULO MUDA ALGUMA COISA? Se `nulos` for zero, o
+--    `IS TRUE` e o `IS NOT FALSE` dão o mesmo em qualquer período e a
+--    escolha entre os dois não tem consequência. Se não for, o número
+--    de dias antigos depende dessa escolha — e aí vale conferir contra
+--    um relatório velho antes de confiar.
 --
--- SELECT dia, equipe, tse, qtd, os_distintas, os_lista
---   FROM v_producao_detalhe
---  WHERE dia = '2026-11-19'
---    AND equipe ILIKE '%MATHEUS%'
---  ORDER BY qtd DESC;
+-- SELECT count(*) FILTER (WHERE executado IS NULL)  AS nulos,
+--        count(*) FILTER (WHERE executado IS TRUE)  AS verdadeiros,
+--        count(*) FILTER (WHERE executado IS FALSE) AS falsos,
+--        count(*)                                   AS total
+--   FROM execucao;
 
--- C) A MESMA OS EM ETAPAS DIFERENTES — é o que ele descreveu: a OS
---    aparece em mais de uma linha, uma por etapa, mantendo o número.
+-- D) O CASO QUE ORIGINOU A COLUNA, para olhar com os olhos:
 --
--- SELECT numero_os, count(*) AS etapas, array_agg(DISTINCT tse) AS servicos
---   FROM execucao
---  WHERE dia = '2026-11-19'
---  GROUP BY 1 HAVING count(*) > 1
---  ORDER BY 2 DESC LIMIT 10;
+-- SELECT equipe, tse, qtd, os_distintas, os_lista
+--   FROM v_producao_detalhe
+--  WHERE dia = '2026-11-19' AND equipe ILIKE '%MATHEUS%'
+--  ORDER BY qtd DESC;
 
 
 -- ============================================================
 -- DESFAZER
 -- ============================================================
--- Volta a view ao que era, sem a coluna. O site continua funcionando:
--- ele pede `os_lista` junto com o resto e, se a coluna não existir, a
--- busca falha e a Produção cai no caminho reserva, que lê a `execucao`
--- direto. A aba nova do Excel some, as outras ficam.
---
--- Para reverter de verdade, rode este mesmo arquivo com a linha do
--- `array_agg` removida — nunca o isap_execucao.sql inteiro.
+-- Para tirar só a coluna nova e deixar a view como estava ANTES de
+-- tudo isto, rode este mesmo arquivo sem a linha do `array_agg`. O
+-- `WHERE executado IS TRUE` tem de ficar nos dois casos — ele é a
+-- view original, não parte da mudança.

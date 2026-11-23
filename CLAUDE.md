@@ -119,6 +119,19 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   `DROP VIEW IF EXISTS` na frente** — aí a ordem das colunas deixa de
   importar.
 
+  **E em 23/11/2026 a terceira vez, pior que as duas.** Para
+  acrescentar uma coluna à `v_producao_detalhe`, copiei a definição do
+  `sql/isap_execucao.sql`. A view VIVA não era aquela: tinha um
+  `WHERE executado IS TRUE` que o arquivo nunca teve. A Produção de
+  19/11 pulou de 236 para 514 execuções e de 40 para 51 equipes,
+  porque passou a contar toda baixa da tabela. **Arquivo no
+  repositório não é prova do que está no banco** — o SELECT que prova
+  é `SELECT pg_get_viewdef('nome_da_view'::regclass, true);`, e ele
+  vem ANTES de escrever qualquer `CREATE OR REPLACE`. Recuperado
+  medindo: das seis regras candidatas, só `executado IS TRUE` devolveu
+  os 236. O conserto está no `sql/producao_os_lista.sql`, que agora é
+  o arquivo vivo dessa view.
+
 - **APLICADO em 16/10/2026, 13h56, e CONFERIDO contra a Sabesp.** As
   13.486 horas do backfill (agosto, setembro, outubro, da tela Lista
   OS) mais as 984 da carteira aberta deixaram 13.572 de 15.076 linhas
