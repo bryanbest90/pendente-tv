@@ -5529,7 +5529,7 @@ function ProducaoView({sess,onLogout,historico,entradaSerie,activeUnit}){
         const d=await fetchProducao(sess.access_token,ini,fim);
         if(vivo){setData(d);setEquipeSel(null);}
       }catch(e){
-        if(vivo){setErro(String(e.message||e));setData(null);}
+        if(vivo){setErro("Não consegui ler a produção: "+String(e.message||e));setData(null);}
       }
       // Busca à parte e sem try/catch em volta: se esta falhar, a
       // Produção inteira continua de pé e só o cartão some.
@@ -5625,6 +5625,8 @@ function ProducaoView({sess,onLogout,historico,entradaSerie,activeUnit}){
     setBaixando(true);
     try{
       const {gerarRelatorioProducao}=await import("./relatorioProducao.js");
+      // Carregou: a aba está com o código da publicação atual.
+      try{ sessionStorage.removeItem("recarga_chunk"); }catch{}
       const blob=await gerarRelatorioProducao({
         ag, modo, ini, fim,
         unidadeLabel: unidade==="geral" ? "Geral (todas as unidades)"
@@ -5639,7 +5641,34 @@ function ProducaoView({sess,onLogout,historico,entradaSerie,activeUnit}){
       // deixa o download pela metade em alguns navegadores
       setTimeout(()=>URL.revokeObjectURL(a.href),1000);
     }catch(e){
-      setErro("Não consegui montar o Excel: "+String(e.message||e));
+      const msg=String(e?.message||e);
+      /* ABA ABERTA DE ANTES DE UMA PUBLICAÇÃO.
+
+         O gerador do Excel é carregado só no clique, e cada publicação
+         renomeia os arquivos (`relatorioProducao-C-zdut1v.js`). Então a
+         aba que ficou aberta desde ontem pede um nome que não existe
+         mais, e o clique falha com "Failed to fetch dynamically
+         imported module" — nada a ver com permissão nem com o Supabase.
+         Aconteceu em 23/11/2026, depois das publicações de quinta.
+
+         Recarregar resolve, porque a página nova aponta para os nomes
+         novos. O `sessionStorage` existe para não entrar em laço: se já
+         recarregou uma vez e continua falhando, a causa é outra e a
+         mensagem passa a dizer isso. */
+      if(/dynamically imported module|importing a module script failed|error loading dynamically/i.test(msg)){
+        let jaTentou=false;
+        try{ jaTentou=sessionStorage.getItem("recarga_chunk")==="1"; }catch{}
+        if(!jaTentou){
+          try{ sessionStorage.setItem("recarga_chunk","1"); }catch{}
+          setErro("O site foi atualizado desde que esta aba abriu. Recarregando…");
+          setTimeout(()=>location.reload(),700);
+          return;   // não tira o "baixando": a página vai embora
+        }
+        setErro("O site foi atualizado e a aba continua com a versão antiga. "
+              + "Feche a aba e abra de novo, ou aperte Ctrl+Shift+R.");
+      } else {
+        setErro("Não consegui montar o Excel: "+msg);
+      }
     }
     setBaixando(false);
   };
@@ -5711,9 +5740,17 @@ function ProducaoView({sess,onLogout,historico,entradaSerie,activeUnit}){
       </div>
     </div>
 
+    {/* A mensagem é a do próprio erro: antes vinha com "Não consegui ler
+        a produção:" grudado na frente de TODOS, então uma falha ao
+        montar o Excel aparecia como erro de leitura. E a dica de
+        permissão aparecia sempre, mandando procurar no lugar errado
+        quem tinha outro problema — foi o que aconteceu em 23/11/2026,
+        com um erro que era de código velho em cache. Agora ela só
+        aparece quando a mensagem é mesmo de permissão. */}
     {erro&&<div style={{background:C.redBg,border:`1px solid ${C.redBorder}`,borderRadius:10,padding:"12px 16px",marginBottom:14,fontSize:12,color:C.red,lineHeight:1.5}}>
-      Não consegui ler a produção: {erro}
-      <div style={{color:C.textMuted,marginTop:6}}>Se a mensagem fala em permissão, falta rodar a etapa 1 de <code>sql/producao.sql</code> ou marcar <code>pode_producao = true</code> no seu perfil.</div>
+      {erro}
+      {/permiss|permission|denied|401|403|policy|row-level/i.test(erro)&&
+        <div style={{color:C.textMuted,marginTop:6}}>Falta rodar a etapa 1 de <code>sql/producao.sql</code> ou marcar <code>pode_producao = true</code> no seu perfil.</div>}
     </div>}
 
     {loading&&<div style={{textAlign:"center",padding:"40px 0",color:C.textDim,fontSize:13}}>Carregando produção…</div>}
