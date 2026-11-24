@@ -572,6 +572,58 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   quando o arquivo vem abaixo de 80%. Só aí vale quebrar em períodos
   menores. *(corrigido em 14/10/2026)*
 
+## Fotos das valas (robô em construção)
+
+- **Clique por JavaScript NÃO funciona na Busca Execução do GEOCALL.**
+  `el.click()` não abre o menu da linha nem dispara o botão Busca — e
+  nenhum dos dois reclama. Numa rodada inteira o robô releu a lista da
+  OS anterior sem desconfiar. O que funciona é mandar o Chrome mover o
+  mouse (`frame.click`), o mesmo caminho que resolveu o arrasto da tela
+  de materiais em 15/10. *(23/11/2026)*
+
+- **O "Resumo OS" fica no menuzinho DA LINHA, e esse menu muda de
+  tamanho:** seis itens quando a etapa foi executada (Visualizar OS,
+  Resultado Intervenção, Contabilização Usuários, Resumo OS, Impressão
+  de OS Fechada, Impressão de Fotos da OS) e **três** quando não foi —
+  não há o que resumir num serviço que não aconteceu. Etapa com
+  resultado `-` se pula antes de clicar.
+
+- **As fotos têm endereço direto, e a miniatura já é a foto inteira.**
+  O `src` da miniatura devolve 800×1067; não precisa abrir foto por
+  foto. O endereço leva uma assinatura presa à sessão, então não dá
+  para montá-lo à mão: lê-se da página e baixa-se por `fetch` dentro
+  dela. E o nome do arquivo é o relógio — `foto_121816653` é 12:18:16.
+
+- **Busca-se pela OS, nunca pela data.** A busca por OS traz todas as
+  etapas, de todos os dias; a reposição costuma ser dias depois da
+  abertura e por outra equipe. Em 19/11 só 4 das 36 OS de pavimento
+  tiveram abertura e reposição no mesmo dia.
+
+- **O veredito é por SUPERFÍCIE, não por OS.** Asfalto e calçada são
+  equipes diferentes: calçada mal feita não derruba o asfalto da mesma
+  vala. Dentro da mesma superfície vale a regra do Bryan — uma foto
+  ruim condena as outras do mesmo serviço. *(Bryan, 23/11/2026)*
+
+- **Foto do ANTES não se julga, e o sinal é o mato.** As primeiras
+  fotos da primeira etapa são o estado em que a equipe encontrou.
+  Entulho com mato crescendo no meio está ali há meses; reprovar
+  aquilo é acusar a equipe pelo buraco que ela foi consertar.
+
+- **O que separa serra de marreta é a COSTURA**, não o formato. Num
+  corte de serra existe uma linha fina e nítida separando remendo e
+  pavimento; sem ela, o material se espalha por cima e vai sumindo.
+  Medido contra 27 fotos julgadas pelo Bryan: a regra do formato dava
+  14 certas e **13 erradas**; a da costura deu 16 certas e **1
+  errada**, e nenhuma reprovação indevida. Um buraco pode ser quase
+  quadrado e mesmo assim ter sido quebrado.
+
+- **Toda rodada leva fotos repetidas de propósito.** Arquivo igual tem
+  de receber resposta igual — é a única conferência que funciona sem
+  alguém olhar foto por foto. Foi assim que o Haiku caiu: deu resposta
+  oposta em 7 de 16 pares idênticos, e descrevia conteúdo em imagens
+  que estão praticamente pretas. Salve cada cópia com compressão
+  diferente, senão o tamanho em disco entrega a armadilha.
+
 ## Mapa de ocorrências
 
 - **A contagem por setor sai do campo SF, NUNCA dos pinos.** O SF vem
