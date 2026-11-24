@@ -657,10 +657,20 @@ async function tokenFresco(sess){
 // A RLS de `perfis` devolve só a própria linha — daí a lista de quem
 // tem acesso não vaza nem para quem está logado.
 async function fetchPerfil(tok){
-  const res=await fetch(SUPABASE_URL+"/rest/v1/perfis?select=email,nome,pode_producao,pode_importar,pode_cadastro,pode_idg",{headers:authHeaders(tok)});
-  if(!res.ok) return null;
-  const j=await res.json().catch(()=>[]);
-  return j?.[0]||null;
+  /* Duas tentativas, como a da Produção. Pedir uma coluna que não
+     existe faz o PostgREST recusar a consulta INTEIRA — e é esta que
+     decide se a pessoa entra. Quem ainda não rodou o
+     sql/analise_fotos.sql não tem `pode_analise`, e sem este degrau
+     o site inteiro pararia de deixar entrar, inclusive quem só usa a
+     Produção. */
+  const puxar=async sel=>{
+    const res=await fetch(SUPABASE_URL+"/rest/v1/perfis?select="+sel,{headers:authHeaders(tok)});
+    if(!res.ok) return null;
+    const j=await res.json().catch(()=>[]);
+    return j?.[0]||null;
+  };
+  const base="email,nome,pode_producao,pode_importar,pode_cadastro,pode_idg";
+  return (await puxar(base+",pode_analise")) ?? (await puxar(base));
 }
 // Detalhe da produção. Usa a view quando existe (soma no banco, não no
 // navegador); se ela não existe ainda, lê a tabela e soma aqui.
@@ -5450,7 +5460,7 @@ function LoginModal({onClose,onOk}){
       if(!perfil) throw new Error("Usuário sem linha em `perfis`. Rode a etapa 1 de sql/producao.sql.");
       // Duas permissões independentes: ver a Produção e importar arquivos.
       // O gerente tem a primeira sem a segunda.
-      if(!perfil.pode_producao&&!perfil.pode_importar&&!perfil.pode_cadastro&&!perfil.pode_idg)
+      if(!perfil.pode_producao&&!perfil.pode_importar&&!perfil.pode_cadastro&&!perfil.pode_idg&&!perfil.pode_analise)
         throw new Error("Este usuário existe, mas não está liberado para nada ainda.");
       onOk({access_token:s.access_token,refresh_token:s.refresh_token,expires_at:s.expires_at,perfil});
     }catch(e){setErro(e.message);}
@@ -6181,6 +6191,457 @@ function FichaLigacao({l,rotulo,destaque,extra,dist}){
    faça o que fizer. Esse número não existe no relatório da Sabesp
    porque lá só entra o que já fechou.
    ══════════════════════════════════════════════════════════ */
+/* ============================================================
+   ANÁLISE DAS FOTOS DAS VALAS   (aba restrita — perfis.pode_analise)
+
+   A pessoa escolhe um dia passado e as equipes, o robô vai ao
+   GEOCALL buscar as fotos daquelas equipes, e aqui ela julga uma a
+   uma. Quem julga é gente; nada aqui é automático.
+
+   POR QUE PELA EQUIPE, E NÃO PELA FRENTE: uma equipe de vazamento
+   às vezes baixa um cavalete ou uma reposição. O que a gente quer
+   olhar é o que a EQUIPE fez no dia, qualquer que seja a família —
+   então a frente não entra nesta conta. (Bryan, 24/11/2026)
+
+   POR QUE O DIA TEM DE SER PASSADO: a equipe ainda está em campo
+   hoje; julgar meio serviço é reprovar quem não terminou. A trava
+   está no banco também (CHECK dia < CURRENT_DATE), porque esconder
+   o botão não protegeria a tabela que a chave do navegador alcança.
+
+   AS FOTOS SÃO PRIVADAS. O bucket é privado e a imagem só chega ao
+   navegador por URL assinada, pedida com o token da sessão — mesmo
+   motivo de a Produção buscar a série com o token e não com a chave
+   anônima do bundle.
+   ============================================================ */
+
+/* O que conta como etapa de REPOSIÇÃO. Não é chute: saiu de contar
+   as 164 etapas das 36 OS de pavimento de 19/11/2026. As famílias
+   que apareceram foram REPOSIÇÃO DE (ASFALTO, CAPA ASFALTICA, PA
+   CIMENTADO, CONCRETO, BLOQUETE, SARJETA, GUIA), RECOMPOSTA
+   SINALIZAÇÃO VIARIA e FRESADO E RECAPEADO PAVIMENTO. O sufixo
+   " INV" é a mesma etapa invertida e entra junto. */
+const REPOSICAO_TSE=/REPOSI|RECOMPOST|FRESAD|RECAPEAD/i;
+
+const VEREDITOS=[
+  {id:"CONFORME",      label:"Conforme",          cor:"green", dica:"recorte com costura — serra"},
+  {id:"NAO_CONFORME",  label:"Não conforme",      cor:"red",   dica:"sem costura — marreta/rompedor"},
+  {id:"NAO_DA_PARA_JULGAR",label:"Não dá p/ julgar",cor:"amber",dica:"escura, de longe, sem a borda"},
+  {id:"NAO_SERVE",     label:"Não serve",         cor:"muted", dica:"antes do serviço, meio de obra, outra coisa"},
+];
+
+async function fetchEquipesDoDia(tok,dia){
+  // Sai da mesma view da aba Produção. É instantâneo e não depende do
+  // robô: a equipe aparece aqui no momento em que a baixa existe.
+  const res=await fetch(SUPABASE_URL+`/rest/v1/v_producao_detalhe?dia=eq.${dia}`+
+    `&select=equipe,qtd,os_distintas&order=equipe.asc`,{headers:authHeaders(tok)});
+  if(!res.ok) throw new Error("Não consegui ler as equipes do dia ("+res.status+")");
+  const j=await res.json();
+  const m=new Map();
+  for(const r of j){
+    const e=m.get(r.equipe)||{equipe:r.equipe,qtd:0,os:0};
+    e.qtd+=Number(r.qtd)||0; e.os+=Number(r.os_distintas)||0; m.set(r.equipe,e);
+  }
+  return [...m.values()].sort((a,b)=>b.qtd-a.qtd);
+}
+
+async function fetchPedidos(tok){
+  const res=await fetch(SUPABASE_URL+"/rest/v1/analise_pedido?select=*&order=pedido_em.desc&limit=40",
+    {headers:authHeaders(tok)});
+  if(!res.ok) throw new Error("Não consegui ler os pedidos ("+res.status+")");
+  return res.json();
+}
+
+async function criarPedido(tok,dia,equipes,uid){
+  const res=await fetch(SUPABASE_URL+"/rest/v1/analise_pedido",
+    {method:"POST",headers:{...authHeaders(tok),"Prefer":"return=representation"},
+     body:JSON.stringify({dia,equipes,pedido_por:uid})});
+  const t=await res.text();
+  if(!res.ok){
+    // 23505 = esse dia com essas equipes já está na fila.
+    if(t.includes("23505")) throw new Error("Esse mesmo dia com essas mesmas equipes já está na fila.");
+    if(t.includes("dia_passado")) throw new Error("O dia tem de ser anterior a hoje.");
+    throw new Error("Não consegui criar o pedido: "+t.slice(0,140));
+  }
+  return JSON.parse(t)[0];
+}
+
+async function fetchFotos(tok,pedidoId){
+  const out=[];let from=0;const ps=1000;
+  while(true){
+    // order único (id) junto com Range — sem isso o PostgREST repete e
+    // omite linhas entre uma página e outra.
+    const res=await fetch(SUPABASE_URL+`/rest/v1/analise_foto?pedido_id=eq.${pedidoId}`+
+      `&select=*&order=numero_os.asc,tse.asc,arquivo.asc,id.asc`,
+      {headers:{...authHeaders(tok),"Range":from+"-"+(from+ps-1)}});
+    if(!res.ok&&res.status!==206) throw new Error("Não consegui ler as fotos ("+res.status+")");
+    const d=await res.json();
+    if(!d?.length)break;
+    out.push(...d);
+    if(d.length<ps)break;
+    from+=ps;
+  }
+  return out;
+}
+
+async function fetchVereditos(tok,pedidoId){
+  const res=await fetch(SUPABASE_URL+`/rest/v1/analise_veredito?select=*,analise_foto!inner(pedido_id)`+
+    `&analise_foto.pedido_id=eq.${pedidoId}&order=id.asc`,{headers:authHeaders(tok)});
+  if(!res.ok) return [];
+  return res.json();
+}
+
+/* As URLs assinadas vêm em lote: uma chamada para cada 200 fotos, em
+   vez de 863 chamadas. Valem 8 horas — o suficiente para uma sessão
+   de análise sem a imagem morrer no meio. */
+async function assinarFotos(tok,caminhos,segundos=8*3600){
+  const mapa={};
+  for(let i=0;i<caminhos.length;i+=200){
+    const lote=caminhos.slice(i,i+200);
+    const res=await fetch(SUPABASE_URL+"/storage/v1/object/sign/analise-fotos",
+      {method:"POST",headers:authHeaders(tok),
+       body:JSON.stringify({expiresIn:segundos,paths:lote})});
+    if(!res.ok) throw new Error("Não consegui abrir as fotos ("+res.status+")");
+    for(const r of await res.json()){
+      if(r.signedURL) mapa[r.path]=SUPABASE_URL+"/storage/v1"+r.signedURL;
+    }
+  }
+  return mapa;
+}
+
+function AnaliseView({sess}){
+  const ontem=()=>{const d=new Date();d.setDate(d.getDate()-1);return fmtISO(d);};
+  const hojeISO=fmtISO(new Date());
+  const tok=sess?.access_token;
+  // O id do usuário sai do próprio token (campo `sub` do JWT). A sessão
+  // guardada no navegador nunca teve esse campo, e quem já está logado
+  // não ia reaprender sozinho — lendo do token funciona para todo mundo
+  // desde o primeiro carregamento.
+  const uid=useMemo(()=>{
+    try{return JSON.parse(atob(tok.split(".")[1].replace(/-/g,"+").replace(/_/g,"/"))).sub||null;}
+    catch{return null;}
+  },[tok]);
+
+  const [dia,setDia]=useState(ontem());
+  const [equipes,setEquipes]=useState(null);
+  const [sel,setSel]=useState(new Set());
+  const [pedidos,setPedidos]=useState([]);
+  const [aberto,setAberto]=useState(null);      // pedido sendo julgado
+  const [fotos,setFotos]=useState([]);
+  const [urls,setUrls]=useState({});
+  const [meus,setMeus]=useState({});            // foto_id -> veredito meu
+  const [outros,setOutros]=useState({});        // foto_id -> [vereditos dos outros]
+  const [erro,setErro]=useState(null);
+  const [carregando,setCarregando]=useState(false);
+  const [sóFaltando,setSóFaltando]=useState(false);
+  const [lupa,setLupa]=useState(null);
+
+  // ---------- lista de equipes do dia escolhido ----------
+  useEffect(()=>{
+    if(!tok||!dia)return;
+    let vivo=true; setEquipes(null); setSel(new Set()); setErro(null);
+    fetchEquipesDoDia(tok,dia).then(e=>{if(vivo)setEquipes(e);})
+      .catch(e=>{if(vivo){setEquipes([]);setErro(e.message);}});
+    return()=>{vivo=false;};
+  },[tok,dia]);
+
+  // ---------- pedidos já feitos ----------
+  const recarregarPedidos=useCallback(()=>{
+    if(!tok)return;
+    fetchPedidos(tok).then(setPedidos).catch(e=>setErro(e.message));
+  },[tok]);
+  useEffect(()=>{recarregarPedidos();},[recarregarPedidos]);
+
+  // Enquanto houver pedido na fila ou coletando, pergunta de novo a cada
+  // 20 segundos. Sem isso a pessoa fica olhando para "na fila" para
+  // sempre, sem saber que já ficou pronto.
+  useEffect(()=>{
+    const andando=pedidos.some(p=>p.estado==="na_fila"||p.estado==="coletando");
+    if(!andando)return;
+    const t=setInterval(recarregarPedidos,20000);
+    return()=>clearInterval(t);
+  },[pedidos,recarregarPedidos]);
+
+  // ---------- abrir um pedido pronto ----------
+  const abrir=async(p)=>{
+    setCarregando(true); setErro(null);
+    try{
+      const f=await fetchFotos(tok,p.id);
+      /* Assina as duas: a miniatura para a grade e a original para a
+         lupa. Quem não tem miniatura (coluna vazia) cai na original
+         sozinho — a tela não quebra, só fica mais cara. */
+      const u=await assinarFotos(tok,[...new Set(f.flatMap(x=>[x.caminho_min,x.caminho].filter(Boolean)))]);
+      const v=await fetchVereditos(tok,p.id);
+      const m={},o={};
+      for(const x of v){
+        if(uid&&x.julgado_por===uid) m[x.foto_id]=x;
+        else (o[x.foto_id]=o[x.foto_id]||[]).push(x);
+      }
+      setFotos(f); setUrls(u); setMeus(m); setOutros(o); setAberto(p);
+    }catch(e){setErro(e.message);}
+    setCarregando(false);
+  };
+
+  // ---------- gravar um julgamento ----------
+  const julgar=async(foto,campos)=>{
+    const anterior=meus[foto.id];
+    const corpo={foto_id:foto.id,julgado_por:uid,
+      veredito:campos.veredito??anterior?.veredito??null,
+      superficie:campos.superficie??anterior?.superficie??"LEITO",
+      piso_especial:campos.piso_especial??anterior?.piso_especial??false,
+      observacao:campos.observacao??anterior?.observacao??null};
+    if(!corpo.veredito)return;
+    // Pinta na hora e desfaz se o banco recusar: 863 fotos não podem
+    // esperar a ida e volta da rede a cada clique.
+    setMeus(s=>({...s,[foto.id]:{...(anterior||{}),...corpo}}));
+    const res=await fetch(SUPABASE_URL+"/rest/v1/analise_veredito"+
+      "?on_conflict=foto_id,julgado_por",
+      {method:"POST",headers:{...authHeaders(tok),"Prefer":"resolution=merge-duplicates,return=representation"},
+       body:JSON.stringify(corpo)});
+    if(!res.ok){
+      setMeus(s=>{const n={...s};anterior?n[foto.id]=anterior:delete n[foto.id];return n;});
+      setErro("Não gravou: "+(await res.text()).slice(0,140));
+    }
+  };
+
+  // ---------- agrupamento por OS ----------
+  const porOS=useMemo(()=>{
+    const m=new Map();
+    for(const f of fotos){
+      const g=m.get(f.numero_os)||{os:f.numero_os,equipe:f.equipe,etapas:new Map(),n:0};
+      const e=g.etapas.get(f.tse||"(sem etapa)")||[];
+      e.push(f); g.etapas.set(f.tse||"(sem etapa)",e); g.n++;
+      m.set(f.numero_os,g);
+    }
+    for(const g of m.values()) g.temReposicao=[...g.etapas.keys()].some(t=>REPOSICAO_TSE.test(t));
+    return [...m.values()];
+  },[fotos]);
+
+  const julgadas=Object.keys(meus).length;
+  const semReposicao=porOS.filter(g=>!g.temReposicao);
+
+  // ====================== TELA DE JULGAR ======================
+  if(aberto){
+    return <div>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16,flexWrap:"wrap"}}>
+        <button onClick={()=>{setAberto(null);setFotos([]);setUrls({});}}
+          style={{padding:"8px 16px",borderRadius:8,border:`1px solid ${C.border}`,background:"transparent",
+            color:C.textMuted,cursor:"pointer",fontSize:13}}>← voltar</button>
+        <div>
+          <div style={{fontSize:15,fontWeight:700}}>{fmtDiaFull(aberto.dia)} — {aberto.equipes.join(", ")}</div>
+          <div style={{fontSize:12,color:C.textDim}}>
+            {fotos.length} fotos em {porOS.length} OS · <b style={{color:C.accent}}>{julgadas} julgadas</b>
+            {julgadas<fotos.length&&` · faltam ${fotos.length-julgadas}`}
+          </div>
+        </div>
+        <label style={{marginLeft:"auto",fontSize:13,color:C.textMuted,cursor:"pointer",display:"flex",alignItems:"center",gap:6}}>
+          <input type="checkbox" checked={sóFaltando} onChange={e=>setSóFaltando(e.target.checked)}/>
+          mostrar só as que faltam
+        </label>
+      </div>
+
+      {semReposicao.length>0&&
+        <div style={{padding:"10px 14px",borderRadius:10,marginBottom:16,fontSize:13,
+          background:"rgba(245,158,11,0.10)",border:"1px solid rgba(245,158,11,0.35)",color:C.amber}}>
+          <b>{semReposicao.length} {semReposicao.length===1?"OS não tem":"OS não têm"} etapa de reposição neste dia.</b>{" "}
+          A vala pode estar aberta ainda, esperando o pavimento — nesse caso não há o que reprovar hoje:{" "}
+          {semReposicao.slice(0,8).map(g=>g.os).join(", ")}{semReposicao.length>8&&` e mais ${semReposicao.length-8}`}.
+        </div>}
+
+      {erro&&<div style={{padding:"10px 14px",borderRadius:10,marginBottom:16,fontSize:13,
+        background:"rgba(239,68,68,0.10)",border:`1px solid ${C.redBorder}`,color:C.red}}>{erro}</div>}
+
+      {porOS.map(g=>{
+        const etapas=[...g.etapas.entries()];
+        const visiveis=etapas.map(([tse,fs])=>[tse,sóFaltando?fs.filter(f=>!meus[f.id]):fs])
+                             .filter(([,fs])=>fs.length);
+        if(!visiveis.length)return null;
+        return <div key={g.os} style={{marginBottom:28,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden"}}>
+          <div style={{padding:"10px 16px",background:C.card,borderBottom:`1px solid ${C.border}`,
+            display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+            <span style={{fontFamily:FONTE_NUM,fontWeight:700,fontSize:14}}>OS {g.os}</span>
+            <span style={{fontSize:12,color:C.textDim}}>{g.equipe}</span>
+            <span style={{marginLeft:"auto",fontSize:12,color:C.textDim}}>{g.n} fotos</span>
+            {!g.temReposicao&&<span style={{fontSize:11,color:C.amber,border:`1px solid ${C.amber}`,
+              borderRadius:6,padding:"1px 7px"}}>sem reposição</span>}
+          </div>
+          {visiveis.map(([tse,fs])=>
+            <div key={tse} style={{padding:"12px 16px"}}>
+              <div style={{fontSize:12,fontWeight:700,color:C.textMuted,marginBottom:10,letterSpacing:"0.04em"}}>
+                {tse} <span style={{fontWeight:400,color:C.textDim}}>· {fs.length}</span>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(230px,1fr))",gap:14}}>
+                {fs.map(f=><CartaoFoto key={f.id} foto={f} meu={meus[f.id]}
+                  url={urls[f.caminho_min]||urls[f.caminho]} outros={outros[f.id]} onJulgar={julgar}
+                  onLupa={()=>setLupa({foto:f,url:urls[f.caminho]||urls[f.caminho_min]})}/>)}
+              </div>
+            </div>)}
+        </div>;
+      })}
+
+      {lupa&&<div onClick={()=>setLupa(null)}
+        style={{position:"fixed",inset:0,zIndex:3000,background:"rgba(0,0,0,0.88)",display:"flex",
+          alignItems:"center",justifyContent:"center",padding:20,cursor:"zoom-out"}}>
+        <img src={lupa.url} alt="" style={{maxWidth:"100%",maxHeight:"100%",objectFit:"contain",borderRadius:8}}/>
+      </div>}
+    </div>;
+  }
+
+  // ====================== TELA DE PEDIR ======================
+  return <div>
+    {erro&&<div style={{padding:"10px 14px",borderRadius:10,marginBottom:16,fontSize:13,
+      background:"rgba(239,68,68,0.10)",border:`1px solid ${C.redBorder}`,color:C.red}}>{erro}</div>}
+
+    <div style={{border:`1px solid ${C.border}`,borderRadius:14,padding:18,marginBottom:24,background:C.card}}>
+      <div style={{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap",marginBottom:14}}>
+        <label style={{fontSize:13,color:C.textMuted}}>Dia</label>
+        <input type="date" value={dia} max={(()=>{const d=new Date();d.setDate(d.getDate()-1);return fmtISO(d);})()}
+          onChange={e=>setDia(e.target.value)}
+          style={{padding:"7px 10px",borderRadius:8,border:`1px solid ${C.border}`,background:C.bg,
+            color:C.text,fontSize:13,fontFamily:FONTE_NUM}}/>
+        {dia>=hojeISO&&<span style={{fontSize:12,color:C.amber}}>o dia tem de ser anterior a hoje</span>}
+        <span style={{marginLeft:"auto",fontSize:12,color:C.textDim}}>
+          {equipes===null?"procurando equipes…":`${equipes.length} equipes baixaram serviço neste dia`}
+        </span>
+      </div>
+
+      {equipes!==null&&equipes.length>0&&<>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:8,marginBottom:14}}>
+          {equipes.map(e=>{
+            const on=sel.has(e.equipe);
+            return <label key={e.equipe} style={{display:"flex",alignItems:"center",gap:9,padding:"8px 11px",
+              borderRadius:9,cursor:"pointer",fontSize:13,
+              border:`1px solid ${on?"rgba(59,130,246,0.45)":C.border}`,
+              background:on?C.accentBg:"transparent"}}>
+              <input type="checkbox" checked={on} onChange={()=>setSel(s=>{
+                const n=new Set(s); n.has(e.equipe)?n.delete(e.equipe):n.add(e.equipe); return n;})}/>
+              <span style={{flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.equipe}</span>
+              <span style={{fontSize:11,color:C.textDim,fontFamily:FONTE_NUM}}>{e.qtd} serv · {e.os} OS</span>
+            </label>;
+          })}
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+          <button onClick={()=>setSel(new Set(equipes.map(e=>e.equipe)))}
+            style={{fontSize:12,color:C.accent,background:"none",border:"none",cursor:"pointer"}}>marcar todas</button>
+          <button onClick={()=>setSel(new Set())}
+            style={{fontSize:12,color:C.textDim,background:"none",border:"none",cursor:"pointer"}}>limpar</button>
+          <button disabled={!sel.size||dia>=hojeISO}
+            onClick={async()=>{
+              setErro(null);
+              try{ await criarPedido(tok,dia,[...sel],uid); setSel(new Set()); recarregarPedidos(); }
+              catch(e){setErro(e.message);}
+            }}
+            style={{marginLeft:"auto",padding:"9px 20px",borderRadius:9,fontSize:13,fontWeight:700,
+              cursor:sel.size&&dia<hojeISO?"pointer":"not-allowed",
+              border:`1px solid ${sel.size?"rgba(59,130,246,0.45)":C.border}`,
+              background:sel.size&&dia<hojeISO?C.accentBg:"transparent",
+              color:sel.size&&dia<hojeISO?C.accent:C.textDim}}>
+            Pedir as fotos {sel.size>0&&`(${sel.size} ${sel.size===1?"equipe":"equipes"})`}
+          </button>
+        </div>
+        <div style={{fontSize:12,color:C.textDim,marginTop:10}}>
+          O robô vai ao GEOCALL buscar as fotos dessas equipes. Ele entra na fila dos outros robôs,
+          então demora alguns minutos — dá para fechar a página e voltar depois.
+        </div>
+      </>}
+
+      {equipes!==null&&equipes.length===0&&
+        <div style={{fontSize:13,color:C.textDim}}>Nenhuma baixa registrada neste dia.</div>}
+    </div>
+
+    <div style={{fontSize:13,fontWeight:700,color:C.textMuted,marginBottom:10}}>Pedidos</div>
+    {pedidos.length===0&&<div style={{fontSize:13,color:C.textDim}}>Nenhum pedido ainda.</div>}
+    {pedidos.map(p=>{
+      const cor={pronto:C.green,coletando:C.accent,na_fila:C.textDim,falhou:C.red}[p.estado]||C.textDim;
+      const texto={pronto:"pronto",coletando:"buscando as fotos…",na_fila:"na fila",falhou:"falhou"}[p.estado]||p.estado;
+      return <div key={p.id} style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",
+        padding:"12px 16px",borderRadius:11,marginBottom:8,border:`1px solid ${C.border}`,background:C.card}}>
+        <div style={{minWidth:0,flex:1}}>
+          <div style={{fontSize:14,fontWeight:600}}>{fmtDiaFull(p.dia)}</div>
+          <div style={{fontSize:12,color:C.textDim,overflow:"hidden",textOverflow:"ellipsis"}}>{p.equipes.join(", ")}</div>
+          {p.estado==="falhou"&&p.erro&&<div style={{fontSize:12,color:C.red,marginTop:3}}>{p.erro}</div>}
+        </div>
+        <span style={{fontSize:12,color:cor}}>{texto}</span>
+        {p.estado==="pronto"&&<>
+          <span style={{fontSize:12,color:C.textDim,fontFamily:FONTE_NUM}}>{p.fotos??"?"} fotos</span>
+          <button onClick={()=>abrir(p)} disabled={carregando}
+            style={{padding:"7px 16px",borderRadius:8,fontSize:13,fontWeight:700,cursor:"pointer",
+              border:"1px solid rgba(59,130,246,0.45)",background:C.accentBg,color:C.accent}}>
+            {carregando?"abrindo…":"julgar"}
+          </button>
+        </>}
+      </div>;
+    })}
+  </div>;
+}
+
+/* Um cartão por foto. A superfície já vem em LEITO porque é a imensa
+   maioria; trocar para calçada é um clique. O veredito é por
+   SUPERFÍCIE e não por OS — asfalto e calçada são equipes
+   diferentes, e calçada mal feita não derruba o asfalto da mesma
+   vala. (Bryan, 23/11/2026) */
+function CartaoFoto({foto,url,meu,outros,onJulgar,onLupa}){
+  const [obs,setObs]=useState(meu?.observacao||"");
+  /* A superfície e o piso especial moram AQUI na tela, e não só no que
+     já foi gravado. O banco exige o veredito para gravar, então marcar
+     "calçada" ANTES de julgar não gravava nada — e, sem guardar a
+     escolha, o clique seguinte mandava LEITO. A pessoa escolhia
+     calçada, o botão nem acendia, e a foto ia para o banco como leito,
+     calada. Medido num navegador em 24/11/2026, antes de subir. */
+  const [sup,setSup]=useState(meu?.superficie||"LEITO");
+  const [piso,setPiso]=useState(!!meu?.piso_especial);
+  useEffect(()=>{if(meu){setSup(meu.superficie||"LEITO");setPiso(!!meu.piso_especial);}},
+            [meu?.superficie,meu?.piso_especial]);
+  const hora=(foto.tirada_em||"").slice(0,8);
+  const cores={green:[C.green,C.greenBorder,C.greenBg],red:[C.red,C.redBorder,C.redBg],
+               amber:[C.amber,"rgba(245,158,11,0.3)",C.amberBg],
+               muted:[C.textDim,C.border,"rgba(100,116,139,0.10)"]};
+  return <div style={{border:`1px solid ${meu?({green:C.greenBorder,red:C.redBorder,amber:"rgba(245,158,11,0.3)",muted:C.border}[VEREDITOS.find(v=>v.id===meu.veredito)?.cor]||C.border):C.border}`,
+    borderRadius:11,overflow:"hidden",background:C.bg}}>
+    <div onClick={onLupa} style={{cursor:"zoom-in",aspectRatio:"3/4",background:"#000",overflow:"hidden"}}>
+      {url?<img src={url} alt="" loading="lazy"
+        style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>
+        :<div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",
+          color:C.textDim,fontSize:12}}>sem imagem</div>}
+    </div>
+    <div style={{padding:"8px 9px"}}>
+      <div style={{fontSize:11,color:C.textDim,fontFamily:FONTE_NUM,marginBottom:7}}>
+        {hora||foto.arquivo}
+        {outros?.length>0&&<span style={{marginLeft:6,color:C.amber}}>
+          · outro já julgou: {outros.map(o=>({CONFORME:"✓",NAO_CONFORME:"✗",NAO_DA_PARA_JULGAR:"?",NAO_SERVE:"—"}[o.veredito])).join(" ")}
+        </span>}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4,marginBottom:6}}>
+        {VEREDITOS.map(v=>{
+          const on=meu?.veredito===v.id, [cf,cb,cbg]=cores[v.cor];
+          return <button key={v.id} title={v.dica} onClick={()=>onJulgar(foto,{veredito:v.id,superficie:sup,piso_especial:piso,observacao:obs||null})}
+            style={{padding:"6px 4px",borderRadius:7,fontSize:11,fontWeight:on?700:500,cursor:"pointer",
+              border:`1px solid ${on?cb:C.border}`,background:on?cbg:"transparent",
+              color:on?cf:C.textMuted}}>{v.label}</button>;
+        })}
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:C.textDim}}>
+        {["LEITO","CALCADA"].map(s=>{
+          const on=sup===s;
+          return <button key={s} onClick={()=>{setSup(s);if(meu)onJulgar(foto,{superficie:s});}}
+            style={{padding:"3px 9px",borderRadius:6,fontSize:11,cursor:"pointer",
+              border:`1px solid ${on?"rgba(59,130,246,0.45)":C.border}`,
+              background:on?C.accentBg:"transparent",color:on?C.accent:C.textDim}}>
+            {s==="LEITO"?"leito":"calçada"}</button>;
+        })}
+        <label style={{display:"flex",alignItems:"center",gap:4,cursor:"pointer",marginLeft:"auto"}}>
+          <input type="checkbox" checked={piso}
+            onChange={e=>{setPiso(e.target.checked);if(meu)onJulgar(foto,{piso_especial:e.target.checked});}}/>
+          piso especial
+        </label>
+      </div>
+      <input value={obs} placeholder="observação" onChange={e=>setObs(e.target.value)}
+        onBlur={()=>{if(obs!==(meu?.observacao||""))onJulgar(foto,{observacao:obs||null});}}
+        style={{width:"100%",marginTop:6,padding:"5px 7px",borderRadius:6,fontSize:11,
+          border:`1px solid ${C.border}`,background:"transparent",color:C.text,boxSizing:"border-box"}}/>
+    </div>
+  </div>;
+}
+
 function IdgView({sess,rawRows}){
   const primeiroDoMes=()=>{const d=new Date();return fmtISO(new Date(d.getFullYear(),d.getMonth(),1));};
   const [ini,setIni]=useState(primeiroDoMes());
@@ -7931,7 +8392,7 @@ export default function App(){
       s.access_token=novo.access_token;s.refresh_token=novo.refresh_token;s.expires_at=novo.expires_at;
     }
     const perfil=await fetchPerfil(tok);
-    if(!perfil?.pode_producao&&!perfil?.pode_importar&&!perfil?.pode_cadastro&&!perfil?.pode_idg){saveSess(null);return;}
+    if(!perfil?.pode_producao&&!perfil?.pode_importar&&!perfil?.pode_cadastro&&!perfil?.pode_idg&&!perfil?.pode_analise){saveSess(null);return;}
     const atual={...s,perfil};
     saveSess(atual);setSess(atual);
   })();},[]);
@@ -8165,7 +8626,7 @@ export default function App(){
   return <SessaoCtx.Provider value={sess}><div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:FONTE_UI,display:"flex"}}>
     {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed} nNotas={notasDoPendente.length} onNotas={t=>{setFiltroNota(t);setShowNotas(true);}} tagsNotas={tagsNotas} onBuscarOS={buscarOS} onBuscarEndereco={buscarEndereco}/>}
     <div style={{flex:1,padding:"24px 16px",overflowY:"auto",minHeight:"100vh"}}>
-      <div style={{maxWidth:activeTab==="producao"||activeTab==="itinerario"||activeTab==="etiquetas"||activeTab==="cadastro"||activeTab==="idg"?1180:960,margin:"0 auto"}}>
+      <div style={{maxWidth:activeTab==="producao"||activeTab==="itinerario"||activeTab==="etiquetas"||activeTab==="cadastro"||activeTab==="idg"||activeTab==="analise"?1180:960,margin:"0 auto"}}>
 
         {/* Tarja da subida recusada.
             Relatório recusado deixa a carteira parada no horário
@@ -8190,16 +8651,17 @@ export default function App(){
 
         <div style={{marginBottom:24,textAlign:"center"}}>
           <h1 style={{fontSize:17,fontWeight:500,margin:0,letterSpacing:"0.2em",textTransform:"uppercase",color:C.text,fontFamily:FONTE_NUM}}>
-            {activeTab==="pendente"?"Controle de Prazos — OS Pendentes":activeTab==="carteira"?"Acompanhamento de Carteira":activeTab==="etiquetas"?"Etiquetas — o que fechou":activeTab==="mapa"?"Mapa de Ocorrências":activeTab==="itinerario"?"Itinerário das Equipes":activeTab==="cadastro"?"Cadastro — quem é o imóvel":activeTab==="idg"?"IDG — Índice de Demandas Global":"Produção por Equipes"}
+            {activeTab==="pendente"?"Controle de Prazos — OS Pendentes":activeTab==="carteira"?"Acompanhamento de Carteira":activeTab==="etiquetas"?"Etiquetas — o que fechou":activeTab==="mapa"?"Mapa de Ocorrências":activeTab==="itinerario"?"Itinerário das Equipes":activeTab==="cadastro"?"Cadastro — quem é o imóvel":activeTab==="idg"?"IDG — Índice de Demandas Global":activeTab==="analise"?"Análise das Fotos":"Produção por Equipes"}
           </h1>
           <p style={{color:C.textDim,margin:"6px 0 0",fontSize:13}}>
-            {activeTab==="pendente"?"Análise por família de serviço":activeTab==="carteira"?"Carteira diária por frente de serviço":activeTab==="etiquetas"?"Executadas e encerradas sem execução, por etiqueta, no período":activeTab==="mapa"?"Onde estão os serviços da carteira, por família e por setor":activeTab==="itinerario"?"O dia de cada equipe — sugerido pelo sistema, fechado por você":activeTab==="cadastro"?"RGI, fornecimento e hidrômetro do endereço e dos vizinhos":activeTab==="idg"?"Água, esgoto e reposição — a conta da Sabesp, antes de a Sabesp enviar":"Execuções confirmadas por equipe e tipo de serviço"}
+            {activeTab==="pendente"?"Análise por família de serviço":activeTab==="carteira"?"Carteira diária por frente de serviço":activeTab==="etiquetas"?"Executadas e encerradas sem execução, por etiqueta, no período":activeTab==="mapa"?"Onde estão os serviços da carteira, por família e por setor":activeTab==="itinerario"?"O dia de cada equipe — sugerido pelo sistema, fechado por você":activeTab==="cadastro"?"RGI, fornecimento e hidrômetro do endereço e dos vizinhos":activeTab==="idg"?"Água, esgoto e reposição — a conta da Sabesp, antes de a Sabesp enviar":activeTab==="analise"?"O recorte da vala, foto a foto, julgado por quem entende":"Execuções confirmadas por equipe e tipo de serviço"}
           </p>
           {/* Tabs */}
           <div style={{display:"flex",justifyContent:"center",gap:4,marginTop:14}}>
             {[{id:"pendente",label:"Pendente",icon:"📋"},{id:"carteira",label:"Carteira",icon:"📊"},{id:"etiquetas",label:"Etiquetas",icon:"🏷"},{id:"mapa",label:"Mapa",icon:"🗺"},
               ...(sess?.perfil?.pode_producao?[{id:"producao",label:"Produção",icon:"👷"},{id:"itinerario",label:"Itinerário",icon:"🚚"}]:[]),
               ...(sess?.perfil?.pode_idg?[{id:"idg",label:"IDG",icon:"🎯"}]:[]),
+              ...(sess?.perfil?.pode_analise?[{id:"analise",label:"Análise",icon:"📷"}]:[]),
               ...(sess?.perfil?.pode_cadastro?[{id:"cadastro",label:"Cadastro",icon:"🚰"}]:[])].map(tab=>
               <button key={tab.id} onClick={()=>setActiveTab(tab.id)}
                 style={{padding:"8px 24px",borderRadius:8,fontSize:13,fontWeight:700,cursor:"pointer",border:activeTab===tab.id?`1px solid rgba(59,130,246,0.4)`:`1px solid ${C.border}`,
@@ -8222,6 +8684,7 @@ export default function App(){
         {activeTab==="mapa"&&<MapaView rows={filteredRows} excludedTSS={excludedTSS}/>}
         {activeTab==="producao"&&sess?.perfil?.pode_producao&&<ProducaoView sess={sess} onLogout={sair} historico={historico} entradaSerie={entradaSerie} activeUnit={activeUnit}/>}
         {activeTab==="idg"&&sess?.perfil?.pode_idg&&<IdgView sess={sess} rawRows={rawRows}/>}
+        {activeTab==="analise"&&sess?.perfil?.pode_analise&&<AnaliseView sess={sess}/>}
         {activeTab==="itinerario"&&sess?.perfil?.pode_producao&&<ItinerarioView rawRows={rawRows} notas={notas} sess={sess}/>}
         {activeTab==="cadastro"&&sess?.perfil?.pode_cadastro&&<CadastroView sess={sess} rawRows={rawRows}/>}
         {showLogin&&<LoginModal onClose={()=>setShowLogin(false)} onOk={entrar}/>}
