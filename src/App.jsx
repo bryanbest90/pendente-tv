@@ -6464,17 +6464,35 @@ function AnaliseView({sess}){
             {!g.temReposicao&&<span style={{fontSize:11,color:C.amber,border:`1px solid ${C.amber}`,
               borderRadius:6,padding:"1px 7px"}}>sem reposição</span>}
           </div>
-          {visiveis.map(([tse,fs])=>
-            <div key={tse} style={{padding:"12px 16px"}}>
-              <div style={{fontSize:12,fontWeight:700,color:C.textMuted,marginBottom:10,letterSpacing:"0.04em"}}>
-                {tse} <span style={{fontWeight:400,color:C.textDim}}>· {fs.length}</span>
+          {visiveis.map(([tse,fs],iEtapa)=>{
+            /* A EQUIPE DA ETAPA, não a da OS. Asfalto e calçada são
+               turmas diferentes, e a reposição costuma ser dias depois
+               da abertura, por outra equipe — julgar sem saber de quem
+               é o serviço é o começo de cobrar a pessoa errada.
+               (Bryan, 25/11/2026) */
+            const equipeDaEtapa=[...new Set(fs.map(f=>f.equipe).filter(Boolean))].join(" · ");
+            const doPedido=aberto.equipes.some(e=>equipeDaEtapa&&equipeDaEtapa.includes(e));
+            return <div key={tse} style={{padding:"14px 16px",
+              // uma linha separando uma etapa da outra: sem ela as fotos
+              // de duas etapas viram um bloco só na leitura
+              borderTop:iEtapa?`1px solid ${C.border}`:"none"}}>
+              <div style={{display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap",marginBottom:10}}>
+                <span style={{fontSize:12,fontWeight:700,color:C.textMuted,letterSpacing:"0.04em"}}>
+                  {tse} <span style={{fontWeight:400,color:C.textDim}}>· {fs.length}</span>
+                </span>
+                {equipeDaEtapa&&<span style={{fontSize:12,color:doPedido?C.accent:C.textDim}}>
+                  {equipeDaEtapa}
+                  {doPedido&&<span style={{marginLeft:6,fontSize:10,border:`1px solid ${C.accent}`,
+                    borderRadius:5,padding:"0 5px"}}>equipe do pedido</span>}
+                </span>}
               </div>
               <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(230px,1fr))",gap:14}}>
                 {fs.map(f=><CartaoFoto key={f.id} foto={f} meu={meus[f.id]}
                   url={urls[f.caminho_min]||urls[f.caminho]} outros={outros[f.id]} onJulgar={julgar}
                   onLupa={()=>setLupa({foto:f,url:urls[f.caminho]||urls[f.caminho_min]})}/>)}
               </div>
-            </div>)}
+            </div>;
+          })}
         </div>;
       })}
 
@@ -6567,6 +6585,23 @@ function AnaliseView({sess}){
           <div style={{fontSize:14,fontWeight:600}}>{fmtDiaFull(p.dia)}</div>
           <div style={{fontSize:12,color:C.textDim,overflow:"hidden",textOverflow:"ellipsis"}}>{p.equipes.join(", ")}</div>
           {p.estado==="falhou"&&p.erro&&<div style={{fontSize:12,color:C.red,marginTop:3}}>{p.erro}</div>}
+          {/* A BARRA. Um número que muda de 3 em 3 minutos não dá para
+              distinguir de uma tela travada; a barra anda e se vê. Ela
+              só aparece quando há o que medir — sem os_previstas não
+              existe fração, e barra chutada é pior que número nenhum. */}
+          {p.estado==="coletando"&&p.os_previstas>0&&
+            <div style={{height:5,borderRadius:3,marginTop:7,background:C.border,overflow:"hidden"}}>
+              <div style={{height:"100%",borderRadius:3,background:C.accent,
+                width:`${Math.min(100,Math.round(100*(p.os_coletadas||0)/p.os_previstas))}%`,
+                transition:"width .6s ease"}}/>
+            </div>}
+          {/* Na fila ainda não há fração nenhuma: uma barra que anda
+              sozinha diz "estou vivo" sem fingir que sabe o quanto falta. */}
+          {p.estado==="na_fila"&&
+            <div style={{height:5,borderRadius:3,marginTop:7,background:C.border,overflow:"hidden"}}>
+              <div style={{height:"100%",width:"30%",borderRadius:3,background:C.textDim,
+                animation:"analiseFila 1.6s ease-in-out infinite"}}/>
+            </div>}
         </div>
         <span style={{fontSize:12,color:cor}}>{texto}</span>
         {p.estado==="pronto"&&<>
@@ -8778,6 +8813,6 @@ export default function App(){
         <div style={{textAlign:"center",padding:"32px 16px 16px",color:C.textDim,fontSize:11,letterSpacing:0.3,opacity:0.6}}>Desenvolvido por Bryan Mendes Deodato, todos os direitos reservados</div>
       </div>
     </div>
-    <style>{`@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@keyframes modalIn{from{opacity:0;transform:scale(0.95)}to{opacity:1;transform:scale(1)}}@keyframes gasPulse{0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,0.3)}50%{box-shadow:0 0 12px 4px rgba(245,158,11,0.15)}}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}`}</style>
+    <style>{`@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@keyframes modalIn{from{opacity:0;transform:scale(0.95)}to{opacity:1;transform:scale(1)}}@keyframes gasPulse{0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,0.3)}50%{box-shadow:0 0 12px 4px rgba(245,158,11,0.15)}}@keyframes analiseFila{0%{margin-left:-30%}100%{margin-left:100%}}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}`}</style>
   </div></SessaoCtx.Provider>;
 }
