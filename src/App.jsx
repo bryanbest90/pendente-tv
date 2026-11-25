@@ -6560,7 +6560,7 @@ function AnaliseView({sess}){
         ? `buscando as fotos… ${p.os_coletadas||0} de ${p.os_previstas} OS`
         : null;
       const texto=andamento||{pronto:"pronto",coletando:"buscando as fotos…",
-        na_fila:"na fila — o robô pega em até 15 min",falhou:"falhou"}[p.estado]||p.estado;
+        na_fila:"na fila — o robô pega em até 1 min",falhou:"falhou"}[p.estado]||p.estado;
       return <div key={p.id} style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",
         padding:"12px 16px",borderRadius:11,marginBottom:8,border:`1px solid ${C.border}`,background:C.card}}>
         <div style={{minWidth:0,flex:1}}>
