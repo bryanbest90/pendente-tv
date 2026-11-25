@@ -670,7 +670,9 @@ async function fetchPerfil(tok){
     return j?.[0]||null;
   };
   const base="email,nome,pode_producao,pode_importar,pode_cadastro,pode_idg";
-  return (await puxar(base+",pode_analise")) ?? (await puxar(base));
+  return (await puxar(base+",pode_analise,analise_admin"))
+      ?? (await puxar(base+",pode_analise"))
+      ?? (await puxar(base));
 }
 // Detalhe da produção. Usa a view quando existe (soma no banco, não no
 // navegador); se ela não existe ainda, lê a tabela e soma aqui.
@@ -6251,10 +6253,12 @@ async function fetchPedidos(tok){
   return res.json();
 }
 
-async function criarPedido(tok,dia,equipes,uid){
+async function criarPedido(tok,dia,equipes,uid,nome){
+  /* O nome vai junto, no momento do pedido. Buscar depois pelo uuid
+     daria o nome de hoje; o que interessa é quem pediu naquele dia. */
   const res=await fetch(SUPABASE_URL+"/rest/v1/analise_pedido",
     {method:"POST",headers:{...authHeaders(tok),"Prefer":"return=representation"},
-     body:JSON.stringify({dia,equipes,pedido_por:uid})});
+     body:JSON.stringify({dia,equipes,pedido_por:uid,pedido_por_nome:nome||null})});
   const t=await res.text();
   if(!res.ok){
     // 23505 = esse dia com essas equipes já está na fila.
@@ -6263,6 +6267,43 @@ async function criarPedido(tok,dia,equipes,uid){
     throw new Error("Não consegui criar o pedido: "+t.slice(0,140));
   }
   return JSON.parse(t)[0];
+}
+
+/* APAGAR UM PEDIDO pela tela. Tira as imagens do bucket ANTES da
+   linha: apagando a linha primeiro, os caminhos somem junto (o
+   CASCADE leva a analise_foto) e os arquivos ficam órfãos no bucket,
+   ocupando espaço que ninguém mais sabe de quem é.
+   Quem pode isso é decidido no banco, não aqui. */
+async function apagarPedido(tok,pedidoId){
+  const r=await fetch(SUPABASE_URL+`/rest/v1/analise_foto?pedido_id=eq.${pedidoId}`+
+    `&select=caminho,caminho_min`,{headers:authHeaders(tok)});
+  const chaves=[];
+  if(r.ok) for(const f of await r.json()){
+    if(f.caminho)chaves.push(f.caminho);
+    if(f.caminho_min)chaves.push(f.caminho_min);
+  }
+  for(let i=0;i<chaves.length;i+=100){
+    await fetch(SUPABASE_URL+"/storage/v1/object/analise-fotos",
+      {method:"DELETE",headers:authHeaders(tok),
+       body:JSON.stringify({prefixes:chaves.slice(i,i+100)})}).catch(()=>{});
+  }
+  const d=await fetch(SUPABASE_URL+`/rest/v1/analise_pedido?id=eq.${pedidoId}`,
+    {method:"DELETE",headers:authHeaders(tok)});
+  if(!d.ok) throw new Error("não consegui apagar: "+(await d.text()).slice(0,140));
+  return chaves.length;
+}
+
+/* As equipes e a frente de cada uma saem da tabela `equipe`, a mesma
+   que o Sugerir usa. Agrupar por frente aqui com uma regra própria
+   seria uma segunda definição de "equipe de vazamento" para divergir
+   da primeira. */
+async function fetchFrentesDasEquipes(tok){
+  const r=await fetch(SUPABASE_URL+"/rest/v1/equipe?select=nome,tipo,tipos&order=nome.asc",
+    {headers:authHeaders(tok)});
+  if(!r.ok) return {};
+  const m={};
+  for(const e of await r.json()) m[e.nome]=e.tipo||(e.tipos||[])[0]||null;
+  return m;
 }
 
 async function fetchFotos(tok,pedidoId){
@@ -6323,6 +6364,8 @@ function AnaliseView({sess}){
 
   const [dia,setDia]=useState(ontem());
   const [equipes,setEquipes]=useState(null);
+  const [frentes,setFrentes]=useState({});
+  const [busca,setBusca]=useState("");
   const [sel,setSel]=useState(new Set());
   const [pedidos,setPedidos]=useState([]);
   const [aberto,setAberto]=useState(null);      // pedido sendo julgado
@@ -6334,11 +6377,18 @@ function AnaliseView({sess}){
   const [carregando,setCarregando]=useState(false);
   const [sóFaltando,setSóFaltando]=useState(false);
   const [lupa,setLupa]=useState(null);
+  const [apagando,setApagando]=useState(null);
+  const admin=!!sess?.perfil?.analise_admin;
 
   // ---------- lista de equipes do dia escolhido ----------
   useEffect(()=>{
+    if(!tok)return;
+    fetchFrentesDasEquipes(tok).then(setFrentes).catch(()=>{});
+  },[tok]);
+
+  useEffect(()=>{
     if(!tok||!dia)return;
-    let vivo=true; setEquipes(null); setSel(new Set()); setErro(null);
+    let vivo=true; setEquipes(null); setSel(new Set()); setBusca(""); setErro(null);
     fetchEquipesDoDia(tok,dia).then(e=>{if(vivo)setEquipes(e);})
       .catch(e=>{if(vivo){setEquipes([]);setErro(e.message);}});
     return()=>{vivo=false;};
@@ -6422,7 +6472,13 @@ function AnaliseView({sess}){
   // ====================== TELA DE JULGAR ======================
   if(aberto){
     return <div>
-      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16,flexWrap:"wrap"}}>
+      {/* GRUDADO NO TOPO. São centenas de fotos numa página só; com o
+          voltar lá em cima, sair da tela depois de rolar meia hora
+          vira uma viagem de volta. O contador de julgadas também
+          acompanha, que é o que diz onde a pessoa está. */}
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16,flexWrap:"wrap",
+        position:"sticky",top:0,zIndex:20,padding:"10px 12px",marginLeft:-12,marginRight:-12,
+        background:C.bg,borderBottom:`1px solid ${C.border}`}}>
         <button onClick={()=>{setAberto(null);setFotos([]);setUrls({});}}
           style={{padding:"8px 16px",borderRadius:8,border:`1px solid ${C.border}`,background:"transparent",
             color:C.textMuted,cursor:"pointer",fontSize:13}}>← voltar</button>
@@ -6523,8 +6579,51 @@ function AnaliseView({sess}){
       </div>
 
       {equipes!==null&&equipes.length>0&&<>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:8,marginBottom:14}}>
-          {equipes.map(e=>{
+        {/* Buscar por nome. Com 40 equipes no dia, varrer a lista com
+            o olho é mais lento que digitar três letras. */}
+        <input value={busca} onChange={e=>setBusca(e.target.value)}
+          placeholder="filtrar equipe pelo nome…"
+          style={{width:"100%",boxSizing:"border-box",marginBottom:12,padding:"8px 11px",
+            borderRadius:9,border:`1px solid ${C.border}`,background:C.bg,color:C.text,fontSize:13}}/>
+
+        {(()=>{
+          /* AGRUPADAS POR FRENTE, com a frente vinda da tabela
+             `equipe` — a mesma que o Sugerir usa. Escrever aqui uma
+             segunda regra de "o que é equipe de vazamento" criaria
+             duas definições para divergirem depois.
+             Equipe sem frente cadastrada cai em "sem frente", e isso
+             é informação: é alguém que o Sugerir também não enxerga. */
+          const alvo=norm(busca.trim());
+          // casa pelo nome da equipe OU pela frente: digitar "reposicao"
+          // traz a frente inteira, e "josue" traz uma pessoa só
+          const vistas=alvo?equipes.filter(e=>
+            norm(e.equipe).includes(alvo)||norm(frentes[e.equipe]||"").includes(alvo)):equipes;
+          if(!vistas.length) return <div style={{fontSize:13,color:C.textDim,marginBottom:14}}>
+            Nenhuma equipe com esse nome neste dia.</div>;
+          const grupos=new Map();
+          for(const e of vistas){
+            const f=frentes[e.equipe]||"sem frente";
+            if(!grupos.has(f)) grupos.set(f,[]);
+            grupos.get(f).push(e);
+          }
+          const ordem=[...FRENTE_ORDER,...[...grupos.keys()]
+            .filter(f=>!FRENTE_ORDER.includes(f)&&f!=="sem frente").sort(),"sem frente"];
+          return ordem.filter(f=>grupos.has(f)).map(f=>{
+            const doGrupo=grupos.get(f);
+            const todasMarcadas=doGrupo.every(e=>sel.has(e.equipe));
+            return <div key={f} style={{marginBottom:14}}>
+              <div style={{display:"flex",alignItems:"baseline",gap:10,marginBottom:6}}>
+                <span style={{fontSize:11,fontWeight:700,letterSpacing:"0.06em",
+                  color:f==="sem frente"?C.textDim:C.textMuted}}>{f}</span>
+                <span style={{fontSize:11,color:C.textDim}}>{doGrupo.length}</span>
+                <button onClick={()=>setSel(s=>{const n=new Set(s);
+                  doGrupo.forEach(e=>todasMarcadas?n.delete(e.equipe):n.add(e.equipe));return n;})}
+                  style={{fontSize:11,color:C.accent,background:"none",border:"none",cursor:"pointer"}}>
+                  {todasMarcadas?"desmarcar":"marcar"} a frente
+                </button>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:8}}>
+          {doGrupo.map(e=>{
             const on=sel.has(e.equipe);
             return <label key={e.equipe} style={{display:"flex",alignItems:"center",gap:9,padding:"8px 11px",
               borderRadius:9,cursor:"pointer",fontSize:13,
@@ -6536,7 +6635,10 @@ function AnaliseView({sess}){
               <span style={{fontSize:11,color:C.textDim,fontFamily:FONTE_NUM}}>{e.qtd} serv · {e.os} OS</span>
             </label>;
           })}
-        </div>
+              </div>
+            </div>;
+          });
+        })()}
         <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
           <button onClick={()=>setSel(new Set(equipes.map(e=>e.equipe)))}
             style={{fontSize:12,color:C.accent,background:"none",border:"none",cursor:"pointer"}}>marcar todas</button>
@@ -6545,7 +6647,8 @@ function AnaliseView({sess}){
           <button disabled={!sel.size||dia>=hojeISO}
             onClick={async()=>{
               setErro(null);
-              try{ await criarPedido(tok,dia,[...sel],uid); setSel(new Set()); recarregarPedidos(); }
+              try{ await criarPedido(tok,dia,[...sel],uid,sess?.perfil?.nome||sess?.perfil?.email);
+                   setSel(new Set()); recarregarPedidos(); }
               catch(e){setErro(e.message);}
             }}
             style={{marginLeft:"auto",padding:"9px 20px",borderRadius:9,fontSize:13,fontWeight:700,
@@ -6584,6 +6687,12 @@ function AnaliseView({sess}){
         <div style={{minWidth:0,flex:1}}>
           <div style={{fontSize:14,fontWeight:600}}>{fmtDiaFull(p.dia)}</div>
           <div style={{fontSize:12,color:C.textDim,overflow:"hidden",textOverflow:"ellipsis"}}>{p.equipes.join(", ")}</div>
+          {/* Quem pediu só aparece para quem administra. Vale dizer
+              que isto é a TELA escondendo: o nome está numa coluna
+              comum e quem consultar a tabela lê. Virar segredo de
+              verdade pede uma view separada. */}
+          {admin&&p.pedido_por_nome&&
+            <div style={{fontSize:11,color:C.textDim,marginTop:2}}>pedido por {p.pedido_por_nome}</div>}
           {/* A ressalva vale em qualquer estado, não só no falhou. Um
               pedido pronto onde 5 de 28 OS não abriram precisa dizer
               isso aqui, senão quem julga acha que viu o dia inteiro. */}
@@ -6608,6 +6717,24 @@ function AnaliseView({sess}){
             </div>}
         </div>
         <span style={{fontSize:12,color:cor}}>{texto}</span>
+        {admin&&<button
+          onClick={async()=>{
+            /* Duas etapas de propósito: o primeiro clique pergunta, o
+               segundo faz. Não tem volta — leva as fotos do bucket e
+               os vereditos junto. */
+            if(apagando!==p.id){ setApagando(p.id); setTimeout(()=>setApagando(a=>a===p.id?null:a),5000); return; }
+            setApagando("indo");
+            try{ await apagarPedido(tok,p.id); recarregarPedidos(); }
+            catch(e){ setErro(e.message); }
+            setApagando(null);
+          }}
+          title="apaga o pedido, as fotos e os vereditos"
+          style={{padding:"6px 11px",borderRadius:8,fontSize:12,cursor:"pointer",
+            border:`1px solid ${apagando===p.id?C.redBorder:C.border}`,
+            background:apagando===p.id?C.redBg:"transparent",
+            color:apagando===p.id?C.red:C.textDim}}>
+          {apagando===p.id?"apagar mesmo?":"apagar"}
+        </button>}
         {p.estado==="pronto"&&<>
           <span style={{fontSize:12,color:C.textDim,fontFamily:FONTE_NUM}}>{p.fotos??"?"} fotos</span>
           <button onClick={()=>abrir(p)} disabled={carregando}
