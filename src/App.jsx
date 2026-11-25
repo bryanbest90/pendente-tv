@@ -6552,7 +6552,15 @@ function AnaliseView({sess}){
     {pedidos.length===0&&<div style={{fontSize:13,color:C.textDim}}>Nenhum pedido ainda.</div>}
     {pedidos.map(p=>{
       const cor={pronto:C.green,coletando:C.accent,na_fila:C.textDim,falhou:C.red}[p.estado]||C.textDim;
-      const texto={pronto:"pronto",coletando:"buscando as fotos…",na_fila:"na fila",falhou:"falhou"}[p.estado]||p.estado;
+      /* Enquanto coleta, mostra em que OS está. Sem isso um pedido de
+         200 OS fica meia hora dizendo só "buscando as fotos", e não há
+         como saber se anda ou travou. O robô grava o andamento a cada
+         OS, justamente para isto. */
+      const andamento=p.estado==="coletando"&&p.os_previstas
+        ? `buscando as fotos… ${p.os_coletadas||0} de ${p.os_previstas} OS`
+        : null;
+      const texto=andamento||{pronto:"pronto",coletando:"buscando as fotos…",
+        na_fila:"na fila — o robô pega em até 15 min",falhou:"falhou"}[p.estado]||p.estado;
       return <div key={p.id} style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",
         padding:"12px 16px",borderRadius:11,marginBottom:8,border:`1px solid ${C.border}`,background:C.card}}>
         <div style={{minWidth:0,flex:1}}>
