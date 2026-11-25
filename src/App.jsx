@@ -6584,7 +6584,11 @@ function AnaliseView({sess}){
         <div style={{minWidth:0,flex:1}}>
           <div style={{fontSize:14,fontWeight:600}}>{fmtDiaFull(p.dia)}</div>
           <div style={{fontSize:12,color:C.textDim,overflow:"hidden",textOverflow:"ellipsis"}}>{p.equipes.join(", ")}</div>
-          {p.estado==="falhou"&&p.erro&&<div style={{fontSize:12,color:C.red,marginTop:3}}>{p.erro}</div>}
+          {/* A ressalva vale em qualquer estado, não só no falhou. Um
+              pedido pronto onde 5 de 28 OS não abriram precisa dizer
+              isso aqui, senão quem julga acha que viu o dia inteiro. */}
+          {p.erro&&<div style={{fontSize:12,marginTop:3,
+            color:p.estado==="falhou"?C.red:C.amber}}>{p.erro}</div>}
           {/* A BARRA. Um número que muda de 3 em 3 minutos não dá para
               distinguir de uma tela travada; a barra anda e se vê. Ela
               só aparece quando há o que medir — sem os_previstas não
