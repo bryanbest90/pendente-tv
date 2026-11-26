@@ -582,9 +582,14 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   de materiais em 15/10. *(23/11/2026)*
 
 - **Com outra linha já selecionada, o primeiro clique na alça só
-  SELECIONA — o menu abre no segundo.** A primeira linha de cada
-  lista abre com um clique, porque nada estava selecionado; da
-  segunda em diante são dois. Custou cinco rodadas a descobrir, e o
+  SELECIONA — o menu abre no segundo.** O padrão é exato, medido em
+  26/11/2026 às 13h31 em 8 etapas de 4 OS: a **primeira etapa de
+  cada OS** abre com um clique, porque nada estava selecionado; da
+  segunda em diante são dois, 5 vezes em 5. Por isso o robô espera
+  2,5s na primeira (seis vezes os 0,4s que um menu leva para abrir)
+  e só 1,2s nas outras, onde já conta com o segundo clique — a folga
+  existe porque o segundo clique FECHA um menu que já abriu.
+  Custou cinco rodadas a descobrir, e o
   que atrasou foi o erro mentir: sem erro de servidor, com o botão
   dentro da janela e em posições diferentes (y=373 com rolagem 320,
   y=693 com rolagem 0), ele dizia "o menu não abriu em 10s" e
