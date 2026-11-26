@@ -597,6 +597,28 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   rodadas: a linha que funcionava era sempre a primeira a ser
   aberta. O robô espera, clica de novo e segue. *(26/11/2026)*
 
+- **A prova de que voltou do Resumo é SAIR DO RESUMO, não o filtro
+  estar aberto.** Em 25/11/2026 troquei essa pergunta pela
+  `TEM_FILTRO`, que exige o campo de data do painel de filtro
+  visível — e depois do "Fecha" a lista volta com o painel FECHADO,
+  porque ele é uma aba na lateral. A resposta era "não" em toda
+  etapa, e o robô caía no plano B (refazer a busca inteira) sempre,
+  **calado**, porque o `catch` não escrevia nada.
+
+  **O estrago não era só lentidão.** Cada etapa terminava num Resumo
+  que ninguém fechava, as "vistas" do GEOCALL iam se acumulando, e
+  daí vinham o `ABRIU A ETAPA ERRADA` (o Resumo de uma etapa com o
+  TSE de outra) e o encalhe que matou 35 de 37 OS em 26/11. No
+  começo do projeto o Fecha funcionava: 164 etapas em 5 minutos, sem
+  um erro. **Quem viu primeiro foi o Bryan, pela barra de tarefas**
+  — "está fazendo muito diferente do que fizemos no começo" — e o
+  vídeo dele provou: clicando Fecha, a tela volta para a Busca
+  Execução com a lista intacta e o filtro fechado.
+
+  A lição que fica é a do `catch` mudo: plano B que não diz que
+  entrou em ação esconde o plano A quebrado por quatro dias.
+  *(26/11/2026)*
+
 - **As bolinhas do "Status de Validação" dizem se pode haver foto.**
   Azul (`rgb(33,150,243)`) é baixa pelo PDA, no campo; verde
   (`rgb(139,195,74)`) é baixa interna, feita no sistema — e baixa
