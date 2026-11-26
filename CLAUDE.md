@@ -581,6 +581,42 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   mouse (`frame.click`), o mesmo caminho que resolveu o arrasto da tela
   de materiais em 15/10. *(23/11/2026)*
 
+- **Com outra linha já selecionada, o primeiro clique na alça só
+  SELECIONA — o menu abre no segundo.** A primeira linha de cada
+  lista abre com um clique, porque nada estava selecionado; da
+  segunda em diante são dois. Custou cinco rodadas a descobrir, e o
+  que atrasou foi o erro mentir: sem erro de servidor, com o botão
+  dentro da janela e em posições diferentes (y=373 com rolagem 320,
+  y=693 com rolagem 0), ele dizia "o menu não abriu em 10s" e
+  mandava procurar na tela. O que entregou foi comparar as cinco
+  rodadas: a linha que funcionava era sempre a primeira a ser
+  aberta. O robô espera, clica de novo e segue. *(26/11/2026)*
+
+- **As bolinhas do "Status de Validação" dizem se pode haver foto.**
+  Azul (`rgb(33,150,243)`) é baixa pelo PDA, no campo; verde
+  (`rgb(139,195,74)`) é baixa interna, feita no sistema — e baixa
+  interna não carrega foto no GEOCALL. Elas não são `<img>`: são cor
+  de fundo, por isso não apareciam na lista de ícones. O sinal é
+  melhor que o do clipe porque explica o porquê, mas **ainda não é
+  regra de pular**: está sendo medido no log, como o clipe foi.
+  *(Bryan, 26/11/2026)*
+
+- **Baixa interna manda as fotos para fora do GEOCALL.** A etapa traz
+  `BAIXA INTERNA DEVIDO PROBLEMAS NO PDA` e um link do Google Fotos
+  escrito nas Observações de Execução. O robô captura qualquer link
+  dos campos da tela — procurar o link é mais seguro que procurar o
+  campo, cujo nome a gente não sabe. Sem isso, a etapa passa como
+  "sem foto" e quem julga nunca fica sabendo que havia foto noutro
+  lugar. *(26/11/2026)*
+
+- **"Ajax Exception: error" é a sessão do robô disputando com a de
+  gente.** O menu da linha vem do servidor; Ajax que falha é menu que
+  nunca abre. Apareceu quando o Bryan estava no GEOCALL com a MESMA
+  conta do robô (552656) e sumiu quando ele fechou. O robô passa a
+  parar a rodada ao ver essa caixinha, em vez de clicar no vazio — e
+  a conta do robô de fotos precisa deixar de ser a do Bryan, como já
+  é no `robo-geocall` (40043). *(26/11/2026)*
+
 - **O "Resumo OS" fica no menuzinho DA LINHA, e esse menu muda de
   tamanho:** seis itens quando a etapa foi executada (Visualizar OS,
   Resultado Intervenção, Contabilização Usuários, Resumo OS, Impressão
