@@ -6353,6 +6353,15 @@ function AnaliseView({sess}){
   const ontem=()=>{const d=new Date();d.setDate(d.getDate()-1);return fmtISO(d);};
   const hojeISO=fmtISO(new Date());
   const tok=sess?.access_token;
+  /* O TOKEN DURA UMA HORA, E ESTA ABA GUARDAVA UM SÓ. Numa coleta
+     longa a barra de progresso simplesmente parava de andar: a busca
+     de 20 em 20 segundos passava a voltar 401 e ninguém via por quê —
+     a tela ficava mostrando o número da última vez que deu certo. Quem
+     percebeu foi o Bryan, em 26/11/2026, numa rodada de 37 OS.
+     O `tokenFresco` já existia e já era usado no resto do app; esta
+     aba nasceu sem ele. Para o uid o token velho serve (só se lê o
+     `sub`), mas toda busca pede um novo. */
+  const nova=useCallback(()=>tokenFresco(sess),[sess]);
   // O id do usuário sai do próprio token (campo `sub` do JWT). A sessão
   // guardada no navegador nunca teve esse campo, e quem já está logado
   // não ia reaprender sozinho — lendo do token funciona para todo mundo
@@ -6383,22 +6392,22 @@ function AnaliseView({sess}){
   // ---------- lista de equipes do dia escolhido ----------
   useEffect(()=>{
     if(!tok)return;
-    fetchFrentesDasEquipes(tok).then(setFrentes).catch(()=>{});
-  },[tok]);
+    nova().then(t=>fetchFrentesDasEquipes(t)).then(setFrentes).catch(()=>{});
+  },[tok,nova]);
 
   useEffect(()=>{
     if(!tok||!dia)return;
     let vivo=true; setEquipes(null); setSel(new Set()); setBusca(""); setErro(null);
-    fetchEquipesDoDia(tok,dia).then(e=>{if(vivo)setEquipes(e);})
+    nova().then(t=>fetchEquipesDoDia(t,dia)).then(e=>{if(vivo)setEquipes(e);})
       .catch(e=>{if(vivo){setEquipes([]);setErro(e.message);}});
     return()=>{vivo=false;};
-  },[tok,dia]);
+  },[tok,dia,nova]);
 
   // ---------- pedidos já feitos ----------
   const recarregarPedidos=useCallback(()=>{
     if(!tok)return;
-    fetchPedidos(tok).then(setPedidos).catch(e=>setErro(e.message));
-  },[tok]);
+    nova().then(t=>fetchPedidos(t)).then(setPedidos).catch(e=>setErro(e.message));
+  },[tok,nova]);
   useEffect(()=>{recarregarPedidos();},[recarregarPedidos]);
 
   // Enquanto houver pedido na fila ou coletando, pergunta de novo a cada
@@ -6415,12 +6424,13 @@ function AnaliseView({sess}){
   const abrir=async(p)=>{
     setCarregando(true); setErro(null);
     try{
-      const f=await fetchFotos(tok,p.id);
+      const t=await nova();
+      const f=await fetchFotos(t,p.id);
       /* Assina as duas: a miniatura para a grade e a original para a
          lupa. Quem não tem miniatura (coluna vazia) cai na original
          sozinho — a tela não quebra, só fica mais cara. */
-      const u=await assinarFotos(tok,[...new Set(f.flatMap(x=>[x.caminho_min,x.caminho].filter(Boolean)))]);
-      const v=await fetchVereditos(tok,p.id);
+      const u=await assinarFotos(t,[...new Set(f.flatMap(x=>[x.caminho_min,x.caminho].filter(Boolean)))]);
+      const v=await fetchVereditos(t,p.id);
       const m={},o={};
       for(const x of v){
         if(uid&&x.julgado_por===uid) m[x.foto_id]=x;
@@ -6445,7 +6455,7 @@ function AnaliseView({sess}){
     setMeus(s=>({...s,[foto.id]:{...(anterior||{}),...corpo}}));
     const res=await fetch(SUPABASE_URL+"/rest/v1/analise_veredito"+
       "?on_conflict=foto_id,julgado_por",
-      {method:"POST",headers:{...authHeaders(tok),"Prefer":"resolution=merge-duplicates,return=representation"},
+      {method:"POST",headers:{...authHeaders(await nova()),"Prefer":"resolution=merge-duplicates,return=representation"},
        body:JSON.stringify(corpo)});
     if(!res.ok){
       setMeus(s=>{const n={...s};anterior?n[foto.id]=anterior:delete n[foto.id];return n;});
@@ -6647,7 +6657,7 @@ function AnaliseView({sess}){
           <button disabled={!sel.size||dia>=hojeISO}
             onClick={async()=>{
               setErro(null);
-              try{ await criarPedido(tok,dia,[...sel],uid,sess?.perfil?.nome||sess?.perfil?.email);
+              try{ await criarPedido(await nova(),dia,[...sel],uid,sess?.perfil?.nome||sess?.perfil?.email);
                    setSel(new Set()); recarregarPedidos(); }
               catch(e){setErro(e.message);}
             }}
@@ -6724,7 +6734,7 @@ function AnaliseView({sess}){
                os vereditos junto. */
             if(apagando!==p.id){ setApagando(p.id); setTimeout(()=>setApagando(a=>a===p.id?null:a),5000); return; }
             setApagando("indo");
-            try{ await apagarPedido(tok,p.id); recarregarPedidos(); }
+            try{ await apagarPedido(await nova(),p.id); recarregarPedidos(); }
             catch(e){ setErro(e.message); }
             setApagando(null);
           }}
