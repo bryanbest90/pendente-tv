@@ -6737,13 +6737,11 @@ function AnaliseView({sess}){
           alignItems:"center",justifyContent:"center",padding:20,cursor:"zoom-out"}}>
         <img src={lupa.url} alt="" style={{maxWidth:"100%",maxHeight:"100%",objectFit:"contain",borderRadius:8}}/>
         {/* Na lupa também, porque é aqui que se olha a costura do
-            recorte e se dá o veredito — e saber que a foto veio de um
-            álbum, e não do PDA, muda o peso dela. */}
-        {lupa.foto?.origem==="google_fotos"&&
+            recorte e se dá o veredito — e saber de onde a foto veio
+            muda o peso dela. */}
+        {(()=>{const e=etiquetaDaFoto(lupa.foto);return e&&
           <span style={{position:"fixed",top:16,left:16,padding:"4px 9px",borderRadius:6,fontSize:12,
-            fontWeight:600,color:"#fff",background:"rgba(37,99,235,0.92)"}}>
-            Google Fotos — baixa interna
-          </span>}
+            fontWeight:600,color:"#fff",background:e.cor}}>{e.texto}</span>;})()}
       </div>}
     </div>;
   }
@@ -6941,6 +6939,26 @@ function AnaliseView({sess}){
    SUPERFÍCIE e não por OS — asfalto e calçada são equipes
    diferentes, e calçada mal feita não derruba o asfalto da mesma
    vala. (Bryan, 23/11/2026) */
+/* A ETIQUETA DE ORIGEM, NUM LUGAR SÓ. Ela aparece na grade e na lupa;
+   escrita duas vezes, um dia a cor de um lado muda e a do outro não.
+
+   `origem` vazio é GEOCALL: foi assim para toda foto até 27/11/2026,
+   e é assim também para quem ainda não rodou o
+   sql/analise_foto_origem.sql.
+
+   Por que as duas são marcadas, decisão do Bryan em 27/11/2026: as
+   fotos não valem o mesmo. A do GEOCALL passou pelo PDA, no campo, na
+   hora do serviço. A do álbum alguém subiu à mão e pode ser de outro
+   dia — quem julga precisa saber qual está olhando, sem ter de
+   lembrar que azul é a exceção. */
+const ETIQUETA_ORIGEM={
+  geocall:{texto:"GEOCALL",cor:"rgba(234,88,12,0.88)",
+    dica:"Baixa pelo PDA, no campo: a foto veio do próprio GEOCALL."},
+  google_fotos:{texto:"Google Fotos",cor:"rgba(37,99,235,0.88)",
+    dica:"Baixa interna: as fotos não estão no GEOCALL, vieram do álbum do Google Fotos linkado na observação da execução."},
+};
+const etiquetaDaFoto=(f)=>ETIQUETA_ORIGEM[f?.origem||"geocall"]||null;
+
 function CartaoFoto({foto,url,meu,outros,onJulgar,onLupa}){
   const [obs,setObs]=useState(meu?.observacao||"");
   /* A superfície e o piso especial moram AQUI na tela, e não só no que
@@ -6965,21 +6983,15 @@ function CartaoFoto({foto,url,meu,outros,onJulgar,onLupa}){
         style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>
         :<div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",
           color:C.textDim,fontSize:12}}>sem imagem</div>}
-      {/* A ETIQUETA DO ÁLBUM. A foto entra misturada às do GEOCALL
-          (decisão do Bryan, 27/11/2026), e é certo que entre: havendo
-          foto, quem julga tem de vê-la. Mas ela não é igual — a do
-          GEOCALL passou pelo PDA no campo; esta alguém subiu à mão no
-          Google Fotos, e pode ser de outro dia. Fica SOBRE a imagem
-          porque é na grade que se decide o que abrir.
-
-          `origem` vazio é foto do GEOCALL: foi assim para todas até
-          hoje, e é assim também para quem não rodou o
-          sql/analise_foto_origem.sql. */}
-      {foto.origem==="google_fotos"&&
-        <span title="Baixa interna: as fotos não estão no GEOCALL, vieram do álbum do Google Fotos linkado na observação da execução."
+      {/* A etiqueta fica SOBRE a imagem porque é na grade que se
+          decide o que abrir. No canto de cima à esquerda, pequena:
+          estas fotos são julgadas pela costura do recorte, e tarja
+          grande tapa justamente o que precisa ser visto. */}
+      {(()=>{const e=etiquetaDaFoto(foto);return e&&
+        <span title={e.dica}
           style={{position:"absolute",top:6,left:6,padding:"2px 6px",borderRadius:5,
-            fontSize:10,fontWeight:600,color:"#fff",background:"rgba(37,99,235,0.88)",
-            border:"1px solid rgba(255,255,255,0.25)"}}>Google Fotos</span>}
+            fontSize:10,fontWeight:600,color:"#fff",background:e.cor,
+            border:"1px solid rgba(255,255,255,0.25)"}}>{e.texto}</span>;})()}
     </div>
     <div style={{padding:"8px 9px"}}>
       <div style={{fontSize:11,color:C.textDim,fontFamily:FONTE_NUM,marginBottom:7}}>
