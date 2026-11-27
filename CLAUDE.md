@@ -701,6 +701,47 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   esquecido. Sem a coluna ele avisa alto no log, porque senão a foto
   entra sem etiqueta e ninguém reclama.
 
+- **O link é o ENDEREÇO, não o campo — e o traço do fim não é dele.**
+  Duas coisas medidas na primeira rodada de verdade, em 27/11/2026, e
+  as duas se disfarçavam da mesma mensagem ("o álbum abriu mas não
+  achei foto nenhuma"):
+
+  A observação traz link e motivo juntos —
+  `https://photos.app.goo.gl/XXXX- BAIXA INTERNA DEVIDO PROBLEMAS NO
+  PDA` — e o robô guardava o campo inteiro. Ele pediu ao Google uma
+  página com esse nome todo, recebeu a **página de erro, que abre
+  normalmente**, e culpou o leitor. Agora corta no primeiro espaço, e
+  o erro diz o título e o endereço final da página que veio — é isso
+  que separa "álbum vazio" de "não era um álbum".
+
+  **O `-` colado no fim é digitação, não código do Google:** o álbum
+  só abre sem ele, 2 de 2. Mesmo assim o robô **tenta os dois**, na
+  ordem em que leu, e escreve no log qual funcionou — o código do
+  Google aceita `-`, então uma amostra de um álbum não decide. Custa
+  ~5s, e só quando o primeiro não rende.
+
+- **Lote do PostgREST só aceita linhas com as MESMAS chaves
+  (`PGRST102: All object keys must match`).** Na primeira rodada em
+  que o álbum funcionou, a OS inteira se perdeu na gravação: as fotos
+  do GEOCALL iam sem `origem`, contando com o DEFAULT do banco, e as
+  do álbum iam com. **As 5 que já tinham subido morreram junto com as
+  8 novas**, e o pedido saiu "FALHOU: nenhuma foto".
+
+  O robô passa a escrever `origem` em TODA linha, e o `gravarLinhas`
+  separa as linhas por conjunto de chaves antes de mandar. Separar é
+  melhor que "completar" a linha faltante com null: numa coluna NOT
+  NULL DEFAULT, **null explícito é erro, não default** — o DEFAULT só
+  vale para a coluna que não foi mandada.
+
+- **O aviso "sem reposição — a vala pode estar aberta" MENTIA na baixa
+  interna.** O `temReposicao` da tela é deduzido das fotos (as etapas
+  só existem se vieram fotos), então etapa sem foto não deixa rastro
+  nenhum e a OS cai no aviso. Na 2646396746 a reposição estava feita e
+  fotografada desde 19/11 — as fotos é que estavam no Google. Não era
+  só "não dá para julgar": era o painel afirmando o contrário do que
+  aconteceu. Com o álbum gravado a etapa passa a existir e o aviso some
+  sozinho, sem mexer na regra. *(27/11/2026)*
+
 - **O "Resumo OS" fica no menuzinho DA LINHA, e esse menu muda de
   tamanho:** seis itens quando a etapa foi executada (Visualizar OS,
   Resultado Intervenção, Contabilização Usuários, Resumo OS, Impressão
