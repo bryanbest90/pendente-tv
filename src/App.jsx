@@ -6726,6 +6726,64 @@ function AnaliseView({sess}){
     return()=>ro.disconnect();
   },[aberto,porOS.length]);
 
+  /* ---------- UMA OS POR PÁGINA ----------
+     A pergunta "em qual OS eu estou?" voltou três vezes em 27/11/2026,
+     e cada conserto foi um sinal visual a mais: linha, faixa, bandeja,
+     cabeçalho grudado. O Bryan propôs virar a mesa — e tem razão: a
+     pergunta não existe quando só há uma OS na tela.
+
+     UMA OS, não um número fixo de fotos. Fotos por página partiria uma
+     OS ao meio e devolveria a confusão pela porta dos fundos, com o
+     agravante de a segunda metade começar sem cabeçalho nenhum.
+
+     Os blocos saem daqui de cima porque agora são duas coisas: a
+     paginação precisa saber quantos são, e o desenho precisa saber
+     qual mostrar. */
+  const blocos=useMemo(()=>porOS.map(g=>{
+    const visiveis=[...g.etapas.entries()]
+      .map(([tse,fs])=>[tse,sóFaltando?fs.filter(f=>!meus[f.id]):fs])
+      .filter(([,fs])=>fs.length);
+    return visiveis.length?{g,visiveis}:null;
+  }).filter(Boolean),[porOS,meus,sóFaltando]);
+
+  const [pag,setPag]=useState(0);
+  /* Volta para a primeira ao abrir outro pedido, e NÃO SAI DO LUGAR
+     quando o número de blocos muda por outro motivo — julgar a última
+     foto de uma OS com "mostrar só as que faltam" ligado tira o bloco
+     da lista, e a pessoa seria jogada para outra OS no meio do
+     trabalho. Só reposiciona quando a página atual deixa de existir. */
+  useEffect(()=>{setPag(0);},[aberto?.id]);
+  useEffect(()=>{
+    if(blocos.length && pag>blocos.length-1) setPag(blocos.length-1);
+  },[blocos.length,pag]);
+
+  /* Trocar de página e continuar no meio da anterior seria começar a
+     OS nova pelo fim. */
+  /* A página efetiva, já limitada. O `pag` cru pode ficar um passo
+     além por um instante — a lista encolhe no clique que julga a
+     última foto, e o efeito que reposiciona só roda depois do
+     desenho. Sem isto a barra mostraria "OS 7 de 5" nesse intervalo. */
+  const irPara=useCallback((n)=>{
+    setPag(n);
+    try{window.scrollTo({top:0,behavior:"smooth"});}catch{window.scrollTo(0,0);}
+  },[]);
+
+  /* Setas do teclado, que é como se vira página em qualquer lugar.
+     NÃO quando o foco está num campo de texto: a observação da foto é
+     um input, e lá a seta tem de andar entre as letras. */
+  useEffect(()=>{
+    if(!aberto) return;
+    const ouvir=(e)=>{
+      if(e.ctrlKey||e.altKey||e.metaKey) return;
+      const alvo=e.target, tag=String(alvo?.tagName||"").toLowerCase();
+      if(tag==="input"||tag==="textarea"||alvo?.isContentEditable) return;
+      if(e.key==="ArrowRight"&&pag<blocos.length-1) irPara(pag+1);
+      if(e.key==="ArrowLeft" &&pag>0)               irPara(pag-1);
+    };
+    window.addEventListener("keydown",ouvir);
+    return()=>window.removeEventListener("keydown",ouvir);
+  },[aberto,pag,blocos.length,irPara]);
+
   // ====================== TELA DE JULGAR ======================
   if(aberto){
     return <div>
@@ -6754,6 +6812,8 @@ function AnaliseView({sess}){
             {julgadas<fotos.length&&` · faltam ${fotos.length-julgadas}`}
           </div>
         </div>
+        {blocos.length>1&&<div style={{marginLeft:16}}>
+          <NavOS pag={Math.min(pag,blocos.length-1)} total={blocos.length} irPara={irPara} compacto/></div>}
         <label style={{marginLeft:"auto",fontSize:13,color:C.textMuted,cursor:"pointer",display:"flex",alignItems:"center",gap:6}}>
           <input type="checkbox" checked={sóFaltando} onChange={e=>setSóFaltando(e.target.checked)}/>
           mostrar só as que faltam
@@ -6771,20 +6831,15 @@ function AnaliseView({sess}){
       {erro&&<div style={{padding:"10px 14px",borderRadius:10,marginBottom:16,fontSize:13,
         background:"rgba(239,68,68,0.10)",border:`1px solid ${C.redBorder}`,color:C.red}}>{erro}</div>}
 
-      {/* Numero o bloco entre os que REALMENTE vao aparecer. Com
-          "mostrar so as que faltam" ligado, metade das OS some, e
-          "OS 3 de 7" contando as escondidas seria uma conta que a
-          tela desmente. */}
+      {/* UMA OS POR VEZ. A numeração conta só os blocos que REALMENTE
+          aparecem: com "mostrar só as que faltam" ligado, metade das
+          OS some, e "OS 3 de 7" contando as escondidas seria uma
+          conta que a própria tela desmente. */}
       {(()=>{
-        const blocos=porOS.map(g=>{
-          const visiveis=[...g.etapas.entries()]
-            .map(([tse,fs])=>[tse,sóFaltando?fs.filter(f=>!meus[f.id]):fs])
-            .filter(([,fs])=>fs.length);
-          return visiveis.length?{g,visiveis}:null;
-        }).filter(Boolean);
         if(!blocos.length) return <div style={{padding:"28px 4px",fontSize:13,color:C.textDim}}>
           Nada para julgar aqui — todas as fotos já foram julgadas.</div>;
-        return blocos.map(({g,visiveis},iOS)=>{
+        const iOS=Math.min(pag,blocos.length-1);
+        return [blocos[iOS]].map(({g,visiveis})=>{
         /* ONDE UMA OS ACABA E A OUTRA COMEÇA.
 
            O CABEÇALHO GRUDA, E TROCA SOZINHO. Ele fica preso logo
@@ -6816,8 +6871,9 @@ function AnaliseView({sess}){
             borderTopLeftRadius:10,borderTopRightRadius:13,
             display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
             <span style={{fontFamily:FONTE_NUM,fontWeight:700,fontSize:17,color:C.accent,letterSpacing:"0.02em"}}>OS {g.os}</span>
-            <span style={{fontSize:11,fontWeight:700,color:C.textDim,background:"rgba(148,163,184,0.12)",
-              borderRadius:6,padding:"2px 8px"}}>{iOS+1} de {blocos.length}</span>
+            {/* O "2 de 5" saiu daqui: quem conta agora é a navegação
+                da barra, que está sempre à vista. Dois contadores
+                iguais na mesma tela é um a mais para manter de pé. */}
             <span style={{fontSize:12,color:C.textDim}}>{g.equipe}</span>
             <span style={{marginLeft:"auto",fontSize:12,color:C.textDim}}>{g.n} fotos</span>
             {!g.temReposicao&&<span style={{fontSize:11,color:C.amber,border:`1px solid ${C.amber}`,
@@ -6858,6 +6914,11 @@ function AnaliseView({sess}){
         </div>;
         });
       })()}
+
+      {blocos.length>1&&<div style={{display:"flex",justifyContent:"center",alignItems:"center",
+        gap:14,padding:"4px 0 32px"}}>
+        <NavOS pag={Math.min(pag,blocos.length-1)} total={blocos.length} irPara={irPara}/>
+      </div>}
 
       {lupa&&<div onClick={()=>setLupa(null)}
         style={{position:"fixed",inset:0,zIndex:3000,background:"rgba(0,0,0,0.88)",display:"flex",
@@ -7085,6 +7146,25 @@ const BORDA_OS = "rgba(59,130,246,0.35)";
    da tela, e não é a bandeja que disputa o olho com ela. A cor saiu
    da imagem que o Bryan mandou em 27/11/2026. */
 const FUNDO_BLOCO_OS = "#1b2436";
+
+/* Virar página. Aparece em cima e embaixo do bloco: julgando a última
+   foto de uma OS, voltar ao topo só para clicar em "próxima" é a
+   mesma viagem que fez o botão "voltar" virar grudado. */
+function NavOS({pag,total,irPara,compacto}){
+  const estilo=(pode)=>({padding:compacto?"6px 12px":"10px 20px",borderRadius:8,
+    fontSize:compacto?12.5:13.5,fontWeight:600,
+    border:`1px solid ${pode?C.border:"transparent"}`,
+    background:pode?C.card:"transparent",color:pode?C.textMuted:"rgba(100,116,139,0.45)",
+    cursor:pode?"pointer":"default"});
+  return <div style={{display:"flex",alignItems:"center",gap:8}}>
+    <button disabled={pag<=0} onClick={()=>irPara(pag-1)} style={estilo(pag>0)}
+      title="Tecla ←">‹ anterior</button>
+    <span style={{fontSize:compacto?12.5:13.5,fontWeight:700,color:C.textMuted,
+      minWidth:84,textAlign:"center",...numStyle}}>OS {pag+1} de {total}</span>
+    <button disabled={pag>=total-1} onClick={()=>irPara(pag+1)} style={estilo(pag<total-1)}
+      title="Tecla →">próxima ›</button>
+  </div>;
+}
 
 /* A ETIQUETA DE ORIGEM, NUM LUGAR SÓ. Ela aparece na grade e na lupa;
    escrita duas vezes, um dia a cor de um lado muda e a do outro não.
