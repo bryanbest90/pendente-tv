@@ -6802,7 +6802,7 @@ function AnaliseView({sess}){
            lateral, que acompanha a rolagem; o número da OS grande e
            azul; e um vão largo entre um bloco e outro. */
         return <div key={g.os} style={{marginBottom:48,border:`1px solid ${C.border}`,
-          borderLeft:`5px solid ${C.accent}`,borderRadius:14}}>
+          borderLeft:`5px solid ${C.accent}`,borderRadius:14,background:FUNDO_BLOCO_OS}}>
           <div style={{position:"sticky",top:altoBarra,zIndex:15,
             padding:"12px 16px",background:FUNDO_OS,borderBottom:`1px solid ${BORDA_OS}`,
             borderTopLeftRadius:10,borderTopRightRadius:13,
@@ -6824,9 +6824,12 @@ function AnaliseView({sess}){
             const equipeDaEtapa=[...new Set(fs.map(f=>f.equipe).filter(Boolean))].join(" · ");
             const doPedido=aberto.equipes.some(e=>equipeDaEtapa&&equipeDaEtapa.includes(e));
             return <div key={tse} style={{padding:"14px 16px",
-              // uma linha separando uma etapa da outra: sem ela as fotos
-              // de duas etapas viram um bloco só na leitura
-              borderTop:iEtapa?`1px solid ${C.border}`:"none"}}>
+              /* uma linha separando uma etapa da outra: sem ela as fotos
+                 de duas etapas viram um bloco só na leitura.
+                 Clareada junto com a bandeja: o `C.border` some em cima
+                 do FUNDO_BLOCO_OS, que é quase a mesma cor — a linha
+                 continuaria no código e sairia da tela. */
+              borderTop:iEtapa?"1px solid rgba(148,163,184,0.20)":"none"}}>
               <div style={{display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap",marginBottom:10}}>
                 <span style={{fontSize:12,fontWeight:700,color:C.textMuted,letterSpacing:"0.04em"}}>
                   {tse} <span style={{fontWeight:400,color:C.textDim}}>· {fs.length}</span>
@@ -7062,6 +7065,18 @@ function AnaliseView({sess}){
    desenhada antes de grudar; só que resolvida de antemão. */
 const FUNDO_OS = "#162540";
 const BORDA_OS = "rgba(59,130,246,0.35)";
+
+/* A BANDEJA DO BLOCO. O bloco era vazado — só as fotos tinham cor, e
+   o fundo da página aparecia entre elas, de modo que uma OS não era
+   um conjunto, era um punhado de cartões soltos. Com a bandeja o
+   bloco vira uma coisa só, e o vão escuro entre um bloco e outro
+   passa a ser a divisória.
+
+   Mais claro que o fundo da página (#0a0f1a) e que o cartão da foto,
+   que segue escuro: assim a foto continua sendo a coisa mais escura
+   da tela, e não é a bandeja que disputa o olho com ela. A cor saiu
+   da imagem que o Bryan mandou em 27/11/2026. */
+const FUNDO_BLOCO_OS = "#1b2436";
 
 /* A ETIQUETA DE ORIGEM, NUM LUGAR SÓ. Ela aparece na grade e na lupa;
    escrita duas vezes, um dia a cor de um lado muda e a do outro não.
