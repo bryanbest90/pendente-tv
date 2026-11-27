@@ -6736,6 +6736,14 @@ function AnaliseView({sess}){
         style={{position:"fixed",inset:0,zIndex:3000,background:"rgba(0,0,0,0.88)",display:"flex",
           alignItems:"center",justifyContent:"center",padding:20,cursor:"zoom-out"}}>
         <img src={lupa.url} alt="" style={{maxWidth:"100%",maxHeight:"100%",objectFit:"contain",borderRadius:8}}/>
+        {/* Na lupa também, porque é aqui que se olha a costura do
+            recorte e se dá o veredito — e saber que a foto veio de um
+            álbum, e não do PDA, muda o peso dela. */}
+        {lupa.foto?.origem==="google_fotos"&&
+          <span style={{position:"fixed",top:16,left:16,padding:"4px 9px",borderRadius:6,fontSize:12,
+            fontWeight:600,color:"#fff",background:"rgba(37,99,235,0.92)"}}>
+            Google Fotos — baixa interna
+          </span>}
       </div>}
     </div>;
   }
@@ -6951,11 +6959,27 @@ function CartaoFoto({foto,url,meu,outros,onJulgar,onLupa}){
                muted:[C.textDim,C.border,"rgba(100,116,139,0.10)"]};
   return <div style={{border:`1px solid ${meu?({green:C.greenBorder,red:C.redBorder,amber:"rgba(245,158,11,0.3)",muted:C.border}[VEREDITOS.find(v=>v.id===meu.veredito)?.cor]||C.border):C.border}`,
     borderRadius:11,overflow:"hidden",background:C.bg}}>
-    <div onClick={onLupa} style={{cursor:"zoom-in",aspectRatio:"3/4",background:"#000",overflow:"hidden"}}>
+    <div onClick={onLupa} style={{cursor:"zoom-in",aspectRatio:"3/4",background:"#000",overflow:"hidden",
+      position:"relative"}}>
       {url?<img src={url} alt="" loading="lazy"
         style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>
         :<div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",
           color:C.textDim,fontSize:12}}>sem imagem</div>}
+      {/* A ETIQUETA DO ÁLBUM. A foto entra misturada às do GEOCALL
+          (decisão do Bryan, 27/11/2026), e é certo que entre: havendo
+          foto, quem julga tem de vê-la. Mas ela não é igual — a do
+          GEOCALL passou pelo PDA no campo; esta alguém subiu à mão no
+          Google Fotos, e pode ser de outro dia. Fica SOBRE a imagem
+          porque é na grade que se decide o que abrir.
+
+          `origem` vazio é foto do GEOCALL: foi assim para todas até
+          hoje, e é assim também para quem não rodou o
+          sql/analise_foto_origem.sql. */}
+      {foto.origem==="google_fotos"&&
+        <span title="Baixa interna: as fotos não estão no GEOCALL, vieram do álbum do Google Fotos linkado na observação da execução."
+          style={{position:"absolute",top:6,left:6,padding:"2px 6px",borderRadius:5,
+            fontSize:10,fontWeight:600,color:"#fff",background:"rgba(37,99,235,0.88)",
+            border:"1px solid rgba(255,255,255,0.25)"}}>Google Fotos</span>}
     </div>
     <div style={{padding:"8px 9px"}}>
       <div style={{fontSize:11,color:C.textDim,fontFamily:FONTE_NUM,marginBottom:7}}>

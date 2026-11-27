@@ -619,6 +619,14 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   entrou em ação esconde o plano A quebrado por quatro dias.
   *(26/11/2026)*
 
+  **E a regra que nasceu disso: passo de robô que está funcionando não
+  se troca sem antes medir o que ele leva hoje.** A `TEM_FILTRO` não
+  foi um erro de raciocínio, foi uma troca sem medida — a pergunta
+  antiga ("saiu do Resumo?") funcionava, e a nova ("o filtro está
+  aberto?") parecia melhor. Quatro dias de rodadas piores, e quem
+  percebeu foi o Bryan pela barra de tarefas, não o log. Número antes:
+  164 etapas em 5 minutos. Era só olhar.
+
 - **As bolinhas do "Status de Validação" dizem se pode haver foto.**
   Azul (`rgb(33,150,243)`) é baixa pelo PDA, no campo; verde
   (`rgb(139,195,74)`) é baixa interna, feita no sistema — e baixa
@@ -647,11 +655,51 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   não mexer no GEOCALL enquanto houver pedido sendo coletado.
   *(Bryan, 26/11/2026)*
 
-- **PENDENTE: guardar o link das fotos de baixa interna.** Hoje o robô
-  só grita no log quando acha um link do Google Fotos na observação.
-  Sem gravar, a etapa aparece na tela como "sem foto" e quem julga
-  nunca fica sabendo que a foto existe noutro lugar. Falta uma coluna
-  e um aviso na aba Análise. *(a estudar com o Bryan, 27/11/2026)*
+- **RESOLVIDO em 27/11/2026: o robô baixa o álbum do Google Fotos, e
+  as fotos entram MISTURADAS às do GEOCALL, com etiqueta.** Era o
+  pendente de guardar o link: a etapa de baixa interna chegava a quem
+  julga como "sem foto", havendo foto. Agora `fotosDoAlbum`
+  (`espiao/COLETAR_FOTOS.js`) abre o link numa aba, rola até parar de
+  crescer, lê as miniaturas e baixa cada foto inteira.
+
+  **Misturar foi decisão do Bryan** — havendo foto, quem julga tem de
+  vê-la, na mesma grade. A coluna `analise_foto.origem`
+  (`sql/analise_foto_origem.sql`) é que diz de onde veio, e a etiqueta
+  azul aparece na grade e na lupa, porque as duas fotos não valem o
+  mesmo: a do GEOCALL passou pelo PDA no campo, a do álbum alguém subiu
+  à mão e pode ser de outro dia.
+
+  **Medido no álbum de verdade antes de escrever uma linha**, com o
+  `ESPIAR_ALBUM`: abre sem login; a miniatura é FUNDO DE DIV, não
+  `<img>` (a primeira leitura olhou só `<img>`, achou três avatares num
+  álbum de oito fotos e o teste de download mediu a foto do perfil do
+  Bryan); o `aria-label` traz data e hora AO SEGUNDO; e `=s0` devolve
+  1204×1600, maior que os 800×1067 do GEOCALL.
+
+  **O `?authuser` vem DEPOIS do sufixo de tamanho**, então tira-se a
+  query primeiro e o tamanho depois. Cortando só o fim da linha, os
+  três sufixos testados pediram a MESMA miniatura e deram o mesmo
+  236×314 — e aquilo parecia "o Google ignora o sufixo".
+
+  **O nome do arquivo começa com `gfoto_`, não `foto_`.** A chave é
+  (pedido, OS, etapa, arquivo) com upsert `ignore-duplicates`: uma foto
+  de álbum chamada `foto_095431.jpg` colidiria com uma do GEOCALL do
+  mesmo segundo e sumiria calada. A hora vem do rótulo, não do nome.
+
+  **A coleta vem DEPOIS das medidas do clipe e das bolinhas**, de
+  propósito: são elas que vão decidir se a regra do clipe pode ser
+  ligada, e elas falam do GEOCALL. Somar foto de álbum ali faria o log
+  acusar "A REGRA DO CLIPE ERRARIA AQUI" numa etapa que o GEOCALL
+  realmente não tem — medida envenenada, e da pior espécie, porque
+  parece confirmação.
+
+  **Álbum que não abre não derruba a etapa:** link quebrado, apagado ou
+  tornado privado é coisa de fora, e o que o GEOCALL deu já está
+  gravado. E o robô pergunta se a coluna `origem` existe antes de
+  mandá-la — coluna que não existe faz o PostgREST recusar o LOTE
+  INTEIRO, e a rodada perderia as fotos por um arquivo de SQL
+  esquecido. Sem a coluna ele avisa alto no log, porque senão a foto
+  entra sem etiqueta e ninguém reclama.
 
 - **O "Resumo OS" fica no menuzinho DA LINHA, e esse menu muda de
   tamanho:** seis itens quando a etapa foi executada (Visualizar OS,
