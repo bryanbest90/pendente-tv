@@ -28,63 +28,17 @@
    dinâmico, só quando alguém clica.
    ══════════════════════════════════════════════════════════ */
 
-const TINTA  = "FF0F172A";
-const AZUL   = "FF3B82F6";
-const AMBAR  = "FFF59E0B";
-const BORDA  = "FFD5DBE5";
-const LISTRA = "FFF6F8FB";
-
-const borda1 = {
-  top:   {style:"thin",color:{argb:BORDA}},
-  left:  {style:"thin",color:{argb:BORDA}},
-  bottom:{style:"thin",color:{argb:BORDA}},
-  right: {style:"thin",color:{argb:BORDA}},
-};
-
-function dataBR(iso){
-  if(!iso) return "";
-  const [a,m,d] = String(iso).slice(0,10).split("-");
-  return `${d}/${m}/${a}`;
-}
+/* O estilo (cabeçalho, listra, borda, filtro, data) mora no
+   planilhaEstilo.js, partilhado com as outras planilhas da aba
+   Pendente — era aqui que ele estava, e a terceira planilha ia virar
+   a terceira cópia. */
+import {TINTA, AZUL, AMBAR, borda1, dataBR, montarCabecalho, vestirCorpo} from "./planilhaEstilo.js";
 
 /* Exata / Aproximada em vez de pendente / foto. Quem abre a planilha
    não tem como saber o que "foto" quer dizer, e a palavra sozinha
    sugere que há uma fotografia envolvida — não há. */
 function origemPorExtenso(o){
   return String(o||"").trim()==="foto" ? "Aproximada" : "Exata";
-}
-
-function montarCabecalho(ws, colunas){
-  ws.columns = colunas.map(c=>({key:c.key, width:c.width}));
-  const h = ws.getRow(1);
-  colunas.forEach((c,i)=>{
-    const cell = h.getCell(i+1);
-    cell.value = c.header;
-    cell.font = {bold:true, size:11, color:{argb:"FFFFFFFF"}, name:"Calibri"};
-    cell.fill = {type:"pattern", pattern:"solid", fgColor:{argb:TINTA}};
-    cell.alignment = {vertical:"middle", horizontal:c.align||"left"};
-    cell.border = borda1;
-  });
-  h.height = 24;
-  ws.views = [{state:"frozen", ySplit:1}];
-}
-
-function vestirCorpo(ws, colunas, primeira, ultima){
-  for(let r=primeira; r<=ultima; r++){
-    const row = ws.getRow(r);
-    row.height = 18;
-    colunas.forEach((c,i)=>{
-      const cell = row.getCell(i+1);
-      cell.border = borda1;
-      cell.font = {size:10, name:"Calibri"};
-      cell.alignment = {vertical:"middle", horizontal:c.align||"left"};
-      if(c.numero) cell.numFmt = "#,##0";
-      if(r%2===0) cell.fill = {type:"pattern", pattern:"solid", fgColor:{argb:LISTRA}};
-    });
-  }
-  /* Filtro sobre a tabela INTEIRA. Preso só ao cabeçalho, o Excel abre
-     com a setinha e não filtra nada — parece quebrado. */
-  if(ultima>=2) ws.autoFilter = {from:{row:1,column:1}, to:{row:ultima,column:colunas.length}};
 }
 
 /**

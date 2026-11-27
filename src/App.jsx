@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useRef, useMemo, useEffect } from "react";
 import * as XLSX from "xlsx";
 import { MAPA_SETORES, PROJ } from "./data/mapaSetores";
+import { tempo } from "./prazo.js";
 import { XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Area, AreaChart, ComposedChart, Bar as RBar, Line as RLine } from "recharts";
 
 // ━━━ SUPABASE ━━━
@@ -1189,7 +1190,8 @@ function parseFile(file){
     };reader.onerror=reject;reader.readAsArrayBuffer(file);
   });
 }
-function tempo(val){const s=String(val).trim();return !s?null:s.startsWith("-")?"fora":"prazo";}
+/* `tempo` mora no src/prazo.js: a planilha da carteira precisa do
+   MESMO veredito que a tela, e regra copiada é regra que diverge. */
 // tempoDays foi REMOVIDA. Ela lia só o componente de dias do Tempo
 // Residual (/(-?\d+)d/), então "-22h,20m" — que não tem "d" nenhum —
 // virava 0, igual a "-5h,59m" e a todas as outras do mesmo dia. Como
@@ -3220,12 +3222,13 @@ function Check({checked,onChange}){
 }
 
 /* ── OS Modal ── */
-function OSModal({rows,familia,tssName,tipo,onClose}){
+function OSModal({rows,familia,tssName,tipo,unidadeLabel,onClose}){
   // "busca" vem do campo de pesquisa da lateral: a OS pode ter linhas
   // no prazo e fora, entao o cabecalho nao afirma nenhum dos dois.
   const label=tipo==="prazo"?"No Prazo":tipo==="fora"?"Fora do Prazo"
+    :tipo==="total"?"Carteira aberta"
     :tipo==="endereco"?"Busca por endereço":"Busca por OS";
-  const color=tipo==="prazo"?C.green:tipo==="fora"?C.red:C.accent;
+  const color=tipo==="prazo"?C.green:tipo==="fora"?C.red:tipo==="total"?C.textMuted:C.accent;
   const [modalSort,setModalSort]=useState({col:null,asc:true});
   const cols=[
     {key:"os",label:"Nº OS",get:r=>r["Número OS"]},{key:"tss",label:"TSS",get:r=>r["TSS"]},{key:"sf",label:"SF",get:r=>r["SF"]},
@@ -3291,6 +3294,37 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
   // observacoes.)
   const podeCadastrar=mostraMapa&&!!sess?.perfil?.pode_importar;
   const [cadastrando,setCadastrando]=useState(null);   // a linha aberta no formulario
+
+  /* PLANILHA DA LISTA QUE ESTÁ NA TELA. O modal mostrava e parava aí:
+     quem era questionado sobre o número precisava mandar a lista, e
+     não tinha como. Manda as linhas JÁ ordenadas (`sorted`), para o
+     arquivo sair na mesma ordem em que a pessoa viu — inclusive se
+     ela tiver clicado numa coluna para reordenar.
+
+     O exceljs tem uns 940 KB: entra por import() dinâmico, só no
+     clique, senão todo mundo que abre o site paga por ele.
+     *(Bryan, 27/11/2026)* */
+  const [baixandoXls,setBaixandoXls]=useState(false);
+  const [erroXls,setErroXls]=useState(null);
+  const baixarPlanilha=async()=>{
+    if(baixandoXls||!sorted.length)return;
+    setBaixandoXls(true);setErroXls(null);
+    try{
+      const {gerarPlanilhaCarteira}=await import("./relatorioCarteira.js");
+      const blob=await gerarPlanilhaCarteira({rows:sorted,familia,tssName,tipo,unidadeLabel,
+        usuario:sess?.perfil?.nome||sess?.perfil?.email||""});
+      const pedaco=(t)=>String(t||"").normalize("NFD").replace(/[̀-ͯ]/g,"")
+        .replace(/[^A-Za-z0-9]+/g,"_").replace(/^_|_$/g,"").toLowerCase();
+      const a=document.createElement("a");
+      a.href=URL.createObjectURL(blob);
+      a.download=["carteira",pedaco(familia),pedaco(tssName),
+        tipo==="fora"?"fora_do_prazo":tipo==="prazo"?"no_prazo":"total"]
+        .filter(Boolean).join("_")+".xlsx";
+      a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+    }catch(e){ setErroXls("Não consegui montar o Excel: "+String(e?.message||e)); }
+    setBaixandoXls(false);
+  };
   return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(4px)"}}>
     <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:16,border:`1px solid ${C.border}`,width:"100%",maxWidth:1400,maxHeight:"80vh",display:"flex",flexDirection:"column",overflow:"hidden",animation:"modalIn 0.2s ease"}}>
       <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
@@ -3309,8 +3343,19 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
                · <span style={{color:C.textDim}}>{rows.length-nExato-nInterp-nAprox-nMao-nMapa-nLonga} sem base</span></>}
           </span>}
         </div></div>
-        <button onClick={onClose} style={{background:"transparent",border:"none",color:C.textDim,fontSize:22,cursor:"pointer",padding:"4px 8px"}}>✕</button>
+        <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+          <button onClick={baixarPlanilha} disabled={baixandoXls||!sorted.length}
+            title={`Baixar estes ${sorted.length} serviços em Excel`}
+            style={{display:"flex",alignItems:"center",gap:7,padding:"7px 13px",borderRadius:8,fontSize:12.5,
+              fontWeight:600,cursor:baixandoXls?"default":"pointer",opacity:baixandoXls?0.6:1,
+              border:`1px solid ${C.greenBorder}`,background:C.greenBg,color:C.green}}>
+            <span style={{fontSize:14}}>⤓</span>{baixandoXls?"montando…":"Planilha"}
+          </button>
+          <button onClick={onClose} style={{background:"transparent",border:"none",color:C.textDim,fontSize:22,cursor:"pointer",padding:"4px 8px"}}>✕</button>
+        </div>
       </div>
+      {erroXls&&<div style={{padding:"8px 20px",fontSize:12.5,color:C.red,background:"rgba(239,68,68,0.08)",
+        borderBottom:`1px solid ${C.redBorder}`,flexShrink:0}}>{erroXls}</div>}
       <div style={{overflowY:"auto",flex:1}}>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
           <thead><tr style={{background:C.headerBg,position:"sticky",top:0,zIndex:1}}>
@@ -4331,7 +4376,7 @@ function EntradaModal({titulo,dia,linhas,onClose}){
   </div>;
 }
 
-function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx,diaEntrada,entradaInfo}){
+function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx,diaEntrada,entradaInfo,unidadeLabel}){
   const [expanded,setExpanded]=useState(false);const [modal,setModal]=useState(null);
   const [entradaModal,setEntradaModal]=useState(null);   // {titulo, linhas}
   const [subAberto,setSubAberto]=useState(()=>new Set());
@@ -4377,9 +4422,16 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx,diaEntrada,
   const total=prazo+fora;
   const allNames=tssGroups.flatMap(t=>t.membros);
   const allOff=allNames.every(n=>excludedTSS.has(n));const someOff=allNames.some(n=>excludedTSS.has(n));const filterActive=someOff&&!allOff;
+  /* `tipo` pode ser "prazo", "fora" ou "total". O total é dentro MAIS
+     fora, e não "tudo": serviço sem prazo nenhum (fora da régua do
+     ISAP e sem prazo do GEOCALL) continua de fora, porque é assim que
+     o número da linha foi somado — total = prazo + fora, logo acima.
+     Contar diferente aqui faria a lista ter mais linhas do que o
+     número em que a pessoa clicou. */
   const openModal=(tipo,tssName,membros)=>{let f=activeRows;
     if(membros)f=f.filter(r=>membros.includes(String(r["TSS"]).trim()));
-    f=f.filter(r=>tempo(r["Tempo Residual"])===tipo)
+    f=f.filter(r=>{const t=tempo(r["Tempo Residual"]);
+                   return tipo==="total" ? (t==="prazo"||t==="fora") : t===tipo;})
        .sort((a,b)=>minutosResiduais(a["Tempo Residual"])-minutosResiduais(b["Tempo Residual"]));
     if(f.length>0)setModal({rows:f,tipo,tssName});};
   const entradas=entradaInfo?.porFam.get(fam)||0;
@@ -4433,7 +4485,15 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx,diaEntrada,
           clickable={entradas>0} onClick={e=>{e.stopPropagation();abrirEntradas(fam);}}/></td>}
       <td style={{padding:"11px 10px",textAlign:"center",borderBottom:`1px solid ${C.border}`}}><Pill value={prazo} color={C.green} bg={C.greenBg} border={C.greenBorder} clickable={prazo>0} onClick={e=>{e.stopPropagation();if(prazo>0)openModal("prazo");}}/></td>
       <td style={{padding:"11px 10px",textAlign:"center",borderBottom:`1px solid ${C.border}`}}><Pill value={fora} color={C.red} bg={C.redBg} border={C.redBorder} clickable={fora>0} onClick={e=>{e.stopPropagation();if(fora>0)openModal("fora");}}/></td>
-      <td style={{padding:"11px 10px",textAlign:"center",fontSize:14,fontWeight:600,color:C.textMuted,borderBottom:`1px solid ${C.border}`}}>{total}</td>
+      {/* O TOTAL TAMBÉM ABRE. Era texto solto, e com isso a única
+          lista que não dava para ver era justamente a da família
+          inteira — para mandar a carteira de VAZAMENTO a alguém, era
+          preciso abrir dois modais e juntar na mão. Cinza de
+          propósito: verde e vermelho são vereditos, este é só a soma.
+          *(Bryan, 27/11/2026)* */}
+      <td style={{padding:"11px 10px",textAlign:"center",borderBottom:`1px solid ${C.border}`}}>
+        <Pill value={total} color={C.textMuted} bg="rgba(148,163,184,0.08)" border={C.border}
+          clickable={total>0} onClick={e=>{e.stopPropagation();if(total>0)openModal("total");}}/></td>
       <td style={{padding:"11px 10px",borderBottom:`1px solid ${C.border}`,minWidth:104}}><Bar prazo={prazo} fora={fora} total={total}/></td>
     </tr>
     {expanded&&<tr><td colSpan={entradaInfo?6:5} style={{padding:0,background:"rgba(15,23,42,0.5)",borderBottom:`1px solid ${C.border}`}}>
@@ -4488,7 +4548,7 @@ function FamilyRow({fam,rows,excludedTSS,onToggleTSS,onToggleAll,idx,diaEntrada,
         })()}
       </div>
     </td></tr>}
-    {modal&&<OSModal rows={modal.rows} familia={fam} tssName={modal.tssName} tipo={modal.tipo} onClose={()=>setModal(null)}/>}
+    {modal&&<OSModal rows={modal.rows} familia={fam} tssName={modal.tssName} tipo={modal.tipo} unidadeLabel={unidadeLabel} onClose={()=>setModal(null)}/>}
     {entradaModal&&<EntradaModal titulo={entradaModal.titulo} dia={diaEntrada} linhas={entradaModal.linhas} onClose={()=>setEntradaModal(null)}/>}
   </>;
 }
@@ -4707,7 +4767,7 @@ function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitL
               </th>
             )}
           </tr></thead>
-          <tbody>{sortedFams.map((f,i)=><FamilyRow key={f.name} fam={f.name} rows={f.rows} excludedTSS={excludedTSS} onToggleTSS={onToggleTSS} onToggleAll={onToggleAll} idx={i} diaEntrada={diaEntrada} entradaInfo={entradaInfo}/>)}</tbody>
+          <tbody>{sortedFams.map((f,i)=><FamilyRow key={f.name} fam={f.name} rows={f.rows} excludedTSS={excludedTSS} onToggleTSS={onToggleTSS} onToggleAll={onToggleAll} idx={i} diaEntrada={diaEntrada} entradaInfo={entradaInfo} unidadeLabel={unitLabel}/>)}</tbody>
         </table>
       </div>
     </div>
@@ -6691,10 +6751,24 @@ function AnaliseView({sess}){
         const visiveis=etapas.map(([tse,fs])=>[tse,sóFaltando?fs.filter(f=>!meus[f.id]):fs])
                              .filter(([,fs])=>fs.length);
         if(!visiveis.length)return null;
-        return <div key={g.os} style={{marginBottom:28,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden"}}>
-          <div style={{padding:"10px 16px",background:C.card,borderBottom:`1px solid ${C.border}`,
+        /* ONDE UMA OS ACABA E A OUTRA COMEÇA. Julgando trinta fotos
+           seguidas, a divisória de 1px não segurava: a separação
+           existia e não se via, e quem julga perde a conta de qual
+           serviço está olhando. Agora são três sinais somados —
+           faixa azul na lateral, cabeçalho tingido e um vão grande
+           entre um bloco e outro. A lateral é a que mais trabalha,
+           porque acompanha a rolagem: estando no meio das fotos,
+           ela continua ali dizendo que ainda é o mesmo bloco.
+           *(Bryan, 27/11/2026)* */
+        return <div key={g.os} style={{marginBottom:44,border:`1px solid ${C.border}`,
+          borderLeft:`4px solid ${C.accent}`,borderRadius:14,overflow:"hidden"}}>
+          {/* 0,12 e não o `C.accentBg` (0,06): desenhei os dois lado a
+              lado antes de escolher, e a 0,06 a faixa quase não se
+              distingue do fundo do cartão — ela existiria no código e
+              não na tela, que é o defeito que se está consertando. */}
+          <div style={{padding:"12px 16px",background:"rgba(59,130,246,0.12)",borderBottom:`1px solid ${C.border}`,
             display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-            <span style={{fontFamily:FONTE_NUM,fontWeight:700,fontSize:14}}>OS {g.os}</span>
+            <span style={{fontFamily:FONTE_NUM,fontWeight:700,fontSize:17,color:C.accent,letterSpacing:"0.02em"}}>OS {g.os}</span>
             <span style={{fontSize:12,color:C.textDim}}>{g.equipe}</span>
             <span style={{marginLeft:"auto",fontSize:12,color:C.textDim}}>{g.n} fotos</span>
             {!g.temReposicao&&<span style={{fontSize:11,color:C.amber,border:`1px solid ${C.amber}`,
@@ -9176,7 +9250,7 @@ export default function App(){
           entradaMin={entradaMin} filtrar={filtrarEntrada} unidadeLabel={currentUnit.label}
           usuario={sess?.perfil?.nome||sess?.perfil?.email||""} onClose={()=>setPlanilhaEntradas(null)}/>}
         {activeTab==="pendente"&&showGasModal&&gas.alerts.length>0&&<GasAlertModal alerts={gas.alerts} onIgnore={gas.doIgnore} onClose={()=>setShowGasModal(false)}/>}
-        {buscaModal&&<OSModal rows={buscaModal.rows} familia={buscaModal.familia} tipo={buscaModal.tipo||"busca"} onClose={()=>setBuscaModal(null)}/>}
+        {buscaModal&&<OSModal rows={buscaModal.rows} familia={buscaModal.familia} tipo={buscaModal.tipo||"busca"} unidadeLabel={currentUnit.label} onClose={()=>setBuscaModal(null)}/>}
         {showNotas&&<NotasModal notas={notasDoPendente} rows={rawRows} filtroInicial={filtroNota} onClose={()=>setShowNotas(false)}
           onEditar={x=>setNotaAberta(x)}/>}
         {showOuvRodar&&sess?.perfil?.pode_importar&&<OuvidoriaRodarModal sess={sess} onClose={()=>setShowOuvRodar(false)}/>}
