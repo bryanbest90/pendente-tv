@@ -6709,6 +6709,23 @@ function AnaliseView({sess}){
   const julgadas=Object.keys(meus).length;
   const semReposicao=porOS.filter(g=>!g.temReposicao);
 
+  /* A ALTURA DA BARRA DE CIMA, MEDIDA — não chutada. O cabeçalho de
+     cada OS gruda LOGO ABAIXO dela, e um número fixo aqui erraria no
+     dia em que a barra quebrar em duas linhas (nome de três equipes
+     numa tela estreita já faz isso): ou sobraria um vão, ou o
+     cabeçalho da OS sumiria por baixo da barra. O ResizeObserver
+     acompanha, inclusive quando a janela muda de tamanho. */
+  const barraRef=useRef(null);
+  const [altoBarra,setAltoBarra]=useState(58);
+  useEffect(()=>{
+    const el=barraRef.current; if(!el) return;
+    const medir=()=>setAltoBarra(Math.round(el.getBoundingClientRect().height));
+    medir();
+    if(typeof ResizeObserver==="undefined") return;
+    const ro=new ResizeObserver(medir); ro.observe(el);
+    return()=>ro.disconnect();
+  },[aberto,porOS.length]);
+
   // ====================== TELA DE JULGAR ======================
   if(aberto){
     return <div>
@@ -6716,7 +6733,7 @@ function AnaliseView({sess}){
           voltar lá em cima, sair da tela depois de rolar meia hora
           vira uma viagem de volta. O contador de julgadas também
           acompanha, que é o que diz onde a pessoa está. */}
-      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16,flexWrap:"wrap",
+      <div ref={barraRef} style={{display:"flex",alignItems:"center",gap:12,marginBottom:16,flexWrap:"wrap",
         position:"sticky",top:0,zIndex:20,padding:"10px 12px",marginLeft:-12,marginRight:-12,
         background:C.bg,borderBottom:`1px solid ${C.border}`}}>
         <button onClick={()=>{setAberto(null);setFotos([]);setUrls({});}}
@@ -6746,29 +6763,53 @@ function AnaliseView({sess}){
       {erro&&<div style={{padding:"10px 14px",borderRadius:10,marginBottom:16,fontSize:13,
         background:"rgba(239,68,68,0.10)",border:`1px solid ${C.redBorder}`,color:C.red}}>{erro}</div>}
 
-      {porOS.map(g=>{
-        const etapas=[...g.etapas.entries()];
-        const visiveis=etapas.map(([tse,fs])=>[tse,sóFaltando?fs.filter(f=>!meus[f.id]):fs])
-                             .filter(([,fs])=>fs.length);
-        if(!visiveis.length)return null;
-        /* ONDE UMA OS ACABA E A OUTRA COMEÇA. Julgando trinta fotos
-           seguidas, a divisória de 1px não segurava: a separação
-           existia e não se via, e quem julga perde a conta de qual
-           serviço está olhando. Agora são três sinais somados —
-           faixa azul na lateral, cabeçalho tingido e um vão grande
-           entre um bloco e outro. A lateral é a que mais trabalha,
-           porque acompanha a rolagem: estando no meio das fotos,
-           ela continua ali dizendo que ainda é o mesmo bloco.
-           *(Bryan, 27/11/2026)* */
-        return <div key={g.os} style={{marginBottom:44,border:`1px solid ${C.border}`,
-          borderLeft:`4px solid ${C.accent}`,borderRadius:14,overflow:"hidden"}}>
-          {/* 0,12 e não o `C.accentBg` (0,06): desenhei os dois lado a
-              lado antes de escolher, e a 0,06 a faixa quase não se
-              distingue do fundo do cartão — ela existiria no código e
-              não na tela, que é o defeito que se está consertando. */}
-          <div style={{padding:"12px 16px",background:"rgba(59,130,246,0.12)",borderBottom:`1px solid ${C.border}`,
+      {/* Numero o bloco entre os que REALMENTE vao aparecer. Com
+          "mostrar so as que faltam" ligado, metade das OS some, e
+          "OS 3 de 7" contando as escondidas seria uma conta que a
+          tela desmente. */}
+      {(()=>{
+        const blocos=porOS.map(g=>{
+          const visiveis=[...g.etapas.entries()]
+            .map(([tse,fs])=>[tse,sóFaltando?fs.filter(f=>!meus[f.id]):fs])
+            .filter(([,fs])=>fs.length);
+          return visiveis.length?{g,visiveis}:null;
+        }).filter(Boolean);
+        if(!blocos.length) return <div style={{padding:"28px 4px",fontSize:13,color:C.textDim}}>
+          Nada para julgar aqui — todas as fotos já foram julgadas.</div>;
+        return blocos.map(({g,visiveis},iOS)=>{
+        /* ONDE UMA OS ACABA E A OUTRA COMEÇA.
+
+           O CABEÇALHO GRUDA, E TROCA SOZINHO. Ele fica preso logo
+           abaixo da barra de cima enquanto a OS está na tela, e é
+           EMPURRADO PARA FORA pelo cabeçalho da OS seguinte — que
+           toma o lugar dele. É o comportamento que o Bryan pediu em
+           27/11/2026: rolando trinta fotos, o número da OS que se
+           está julgando continua à vista, e ele muda no instante em
+           que a próxima começa. Antes só a barra de cima grudava, e
+           o cabeçalho da primeira OS viajava junto com ela, dizendo
+           a OS errada do meio da página para baixo.
+
+           ELE PRECISA SER OPACO. Translúcido, as fotos passariam por
+           baixo e seriam lidas através dele.
+
+           E O BLOCO NÃO PODE TER `overflow:hidden`: ancestral com
+           overflow vira a área de rolagem do sticky, e numa área que
+           não rola o sticky não gruda — foi exatamente o defeito do
+           botão "voltar" hoje de manhã. Por isso o arredondamento
+           está no cabeçalho, e não recortado pelo bloco.
+
+           Além do grudar, três sinais somados: faixa azul grossa na
+           lateral, que acompanha a rolagem; o número da OS grande e
+           azul; e um vão largo entre um bloco e outro. */
+        return <div key={g.os} style={{marginBottom:48,border:`1px solid ${C.border}`,
+          borderLeft:`5px solid ${C.accent}`,borderRadius:14}}>
+          <div style={{position:"sticky",top:altoBarra,zIndex:15,
+            padding:"12px 16px",background:FUNDO_OS,borderBottom:`1px solid ${BORDA_OS}`,
+            borderTopLeftRadius:10,borderTopRightRadius:13,
             display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
             <span style={{fontFamily:FONTE_NUM,fontWeight:700,fontSize:17,color:C.accent,letterSpacing:"0.02em"}}>OS {g.os}</span>
+            <span style={{fontSize:11,fontWeight:700,color:C.textDim,background:"rgba(148,163,184,0.12)",
+              borderRadius:6,padding:"2px 8px"}}>{iOS+1} de {blocos.length}</span>
             <span style={{fontSize:12,color:C.textDim}}>{g.equipe}</span>
             <span style={{marginLeft:"auto",fontSize:12,color:C.textDim}}>{g.n} fotos</span>
             {!g.temReposicao&&<span style={{fontSize:11,color:C.amber,border:`1px solid ${C.amber}`,
@@ -6804,7 +6845,8 @@ function AnaliseView({sess}){
             </div>;
           })}
         </div>;
-      })}
+        });
+      })()}
 
       {lupa&&<div onClick={()=>setLupa(null)}
         style={{position:"fixed",inset:0,zIndex:3000,background:"rgba(0,0,0,0.88)",display:"flex",
@@ -7013,6 +7055,14 @@ function AnaliseView({sess}){
    SUPERFÍCIE e não por OS — asfalto e calçada são equipes
    diferentes, e calçada mal feita não derruba o asfalto da mesma
    vala. (Bryan, 23/11/2026) */
+/* A FAIXA DA OS, na tela de julgar. Cor OPACA e calculada, não um
+   rgba: o cabeçalho gruda no topo e as fotos passam por baixo dele —
+   com transparência, dá para ler a foto através da faixa. O valor é
+   o C.card com 12% do azul por cima, que é como ela já estava
+   desenhada antes de grudar; só que resolvida de antemão. */
+const FUNDO_OS = "#162540";
+const BORDA_OS = "rgba(59,130,246,0.35)";
+
 /* A ETIQUETA DE ORIGEM, NUM LUGAR SÓ. Ela aparece na grade e na lupa;
    escrita duas vezes, um dia a cor de um lado muda e a do outro não.
 
