@@ -6739,8 +6739,16 @@ function AnaliseView({sess}){
         <button onClick={()=>{setAberto(null);setFotos([]);setUrls({});}}
           style={{padding:"8px 16px",borderRadius:8,border:`1px solid ${C.border}`,background:"transparent",
             color:C.textMuted,cursor:"pointer",fontSize:13}}>← voltar</button>
+        {/* AS EQUIPES DO PEDIDO SAÍRAM DAQUI. Elas ficavam grudadas no
+            topo e, estando logo acima da faixa azul da OS, pareciam
+            ser a equipe daquela OS — o Bryan leu assim, e com razão:
+            é o lugar onde o olho procura. Quem diz a equipe é a faixa
+            da OS, que está sempre à vista e troca com a rolagem.
+            Repetir o mesmo texto nas duas linhas seria pior que
+            tirar. O dia fica, que é o único dado do pedido que não
+            está em outro lugar da tela. *(Bryan, 27/11/2026)* */}
         <div>
-          <div style={{fontSize:15,fontWeight:700}}>{fmtDiaFull(aberto.dia)} — {aberto.equipes.join(", ")}</div>
+          <div style={{fontSize:15,fontWeight:700}}>{fmtDiaFull(aberto.dia)}</div>
           <div style={{fontSize:12,color:C.textDim}}>
             {fotos.length} fotos em {porOS.length} OS · <b style={{color:C.accent}}>{julgadas} julgadas</b>
             {julgadas<fotos.length&&` · faltam ${fotos.length-julgadas}`}
