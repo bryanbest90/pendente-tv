@@ -641,8 +641,17 @@ foto diária e no histórico, que é o que alimenta o gráfico.
   nunca abre. Apareceu quando o Bryan estava no GEOCALL com a MESMA
   conta do robô (552656) e sumiu quando ele fechou. O robô passa a
   parar a rodada ao ver essa caixinha, em vez de clicar no vazio — e
-  a conta do robô de fotos precisa deixar de ser a do Bryan, como já
-  é no `robo-geocall` (40043). *(26/11/2026)*
+  **o Bryan decidiu MANTER a conta dele (552656) no robô de fotos** —
+  a disputa só atrapalha enquanto a coleta está acontecendo, e ele
+  prefere isso a depender da conta emprestada. Então a regra de uso é:
+  não mexer no GEOCALL enquanto houver pedido sendo coletado.
+  *(Bryan, 26/11/2026)*
+
+- **PENDENTE: guardar o link das fotos de baixa interna.** Hoje o robô
+  só grita no log quando acha um link do Google Fotos na observação.
+  Sem gravar, a etapa aparece na tela como "sem foto" e quem julga
+  nunca fica sabendo que a foto existe noutro lugar. Falta uma coluna
+  e um aviso na aba Análise. *(a estudar com o Bryan, 27/11/2026)*
 
 - **O "Resumo OS" fica no menuzinho DA LINHA, e esse menu muda de
   tamanho:** seis itens quando a etapa foi executada (Visualizar OS,
