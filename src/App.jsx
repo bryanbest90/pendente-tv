@@ -9018,7 +9018,17 @@ export default function App(){
 
   return <SessaoCtx.Provider value={sess}><div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:FONTE_UI,display:"flex"}}>
     {rawRows&&<Sidebar activeUnit={activeUnit} setActiveUnit={switchUnit} unitCounts={unitCounts} collapsed={sideCollapsed} setCollapsed={setSideCollapsed} nNotas={notasDoPendente.length} onNotas={t=>{setFiltroNota(t);setShowNotas(true);}} tagsNotas={tagsNotas} onBuscarOS={buscarOS} onBuscarEndereco={buscarEndereco}/>}
-    <div style={{flex:1,padding:"24px 16px",overflowY:"auto",minHeight:"100vh"}}>
+    {/* SEM `overflowY` AQUI. Quem rola é a janela: este div só tem
+        `minHeight`, nunca uma altura máxima, então ele cresce com o
+        conteúdo e não rola nunca. Mas o `overflow` fazia dele a ÁREA
+        DE ROLAGEM de qualquer `position:sticky` abaixo — e, numa área
+        que não rola, sticky não gruda em nada. Era por isso que o
+        botão "voltar" da aba Análise subia com a página: a regra
+        estava certa e o navegador a media contra a caixa errada.
+        (Bryan reparou, 27/11/2026)
+        Os outros sticky do site são cabeçalhos de tabela dentro de
+        modais, que têm área de rolagem própria — esses não mudam. */}
+    <div style={{flex:1,padding:"24px 16px",minHeight:"100vh"}}>
       <div style={{maxWidth:activeTab==="producao"||activeTab==="itinerario"||activeTab==="etiquetas"||activeTab==="cadastro"||activeTab==="idg"||activeTab==="analise"?1180:960,margin:"0 auto"}}>
 
         {/* Tarja da subida recusada.
