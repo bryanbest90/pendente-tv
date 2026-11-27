@@ -1213,10 +1213,25 @@ function fmtDate(iso){if(!iso)return"—";try{const d=new Date(iso);return d.toL
 
    Devolve null se a tabela ainda não existe — aí a coluna não aparece
    e o resto da tela segue funcionando. */
-async function fetchEntradasDoDia(dia){
+/* UM PERÍODO, E O DIA É O PERÍODO DE UM DIA SÓ. A coluna da tela pede
+   um dia; a planilha pede um intervalo. São a MESMA busca, com o mesmo
+   `origem=neq.inicial` — se fossem duas, um dia a planilha e a tela
+   contariam coisas diferentes, e a planilha existe justamente para
+   defender o número da tela. (26/11/2026)
+
+   `data_insercao` e `unidade` entram no select por causa da planilha:
+   num intervalo, sem a data cada linha perde o dia a que pertence. */
+async function fetchEntradasDoPeriodo(ini,fim){
   const out=[];let from=0;const ps=1000;
   for(;;){
-    const r=await fetch(SUPABASE_URL+`/rest/v1/os_entrada?origem=neq.inicial&data_insercao=eq.${dia}&select=numero_os,tss,familia,atc,endereco,bairro,origem&order=numero_os.asc,tss.asc`,
+    const r=await fetch(SUPABASE_URL+`/rest/v1/os_entrada?origem=neq.inicial`
+      +`&data_insercao=gte.${ini}&data_insercao=lte.${fim}`
+      +`&select=numero_os,tss,data_insercao,familia,atc,unidade,endereco,bairro,origem`
+      /* A ordenação termina numa chave ÚNICA (o par OS+TSS+data é a
+         chave primária da tabela). Sem isso o PostgREST devolve as
+         páginas em ordem arbitrária e a leitura repete e omite linhas
+         — a regra do projeto para toda consulta paginada. */
+      +`&order=data_insercao.asc,numero_os.asc,tss.asc`,
       {headers:{...HEADERS,"Range":from+"-"+(from+ps-1)}});
     if(!r.ok&&r.status!==206) return null;
     const d=await r.json();
@@ -1227,6 +1242,7 @@ async function fetchEntradasDoDia(dia){
   }
   return out;
 }
+const fetchEntradasDoDia=(dia)=>fetchEntradasDoPeriodo(dia,dia);
 // A entrada mais antiga registrada — é o piso do calendário, e sai do
 // próprio dado em vez de uma data escrita à mão.
 async function fetchEntradaMaisAntiga(){
@@ -3413,7 +3429,7 @@ function OSModal({rows,familia,tssName,tipo,onClose}){
 }
 
 /* ── Diff Modal (comparação dia a dia) ── */
-function DiffModal({historico,dia,prevDia,activeUnit,familyFilter,onClose}){
+function DiffModal({historico,dia,prevDia,activeUnit,familyFilter,abrirPlanilhaEntradas,onClose}){
   const unidadeFilter = UNIT_TO_HISTORICO[activeUnit];
   const diffColor = (v) => v < 0 ? C.green : v > 0 ? C.red : C.textDim;
   const diffText = (v) => v > 0 ? "+"+v : String(v);
@@ -3461,6 +3477,17 @@ function DiffModal({historico,dia,prevDia,activeUnit,familyFilter,onClose}){
             {" · "}<span style={{color:diffColor(totais.diff),fontWeight:700}}>{diffText(totais.diff)} OS</span>
           </div>
         </div>
+        {/* O CAMINHO DO GRÁFICO PARA A PLANILHA. Clicar na barra já
+            abria esta tela desde antes, então o botão entra AQUI em
+            vez de o clique ganhar um segundo significado — duas coisas
+            no mesmo clique seria um jeito de nunca saber qual vai
+            acontecer. (26/11/2026) */}
+        {abrirPlanilhaEntradas&&<button onClick={()=>{abrirPlanilhaEntradas(dia,dia);onClose();}}
+          title="Quais serviços entraram neste dia, para conferir no GEOCALL — abre a planilha de entradas"
+          style={{background:C.accentBg,border:"1px solid rgba(59,130,246,0.35)",color:C.accent,
+            fontSize:11.5,fontWeight:700,cursor:"pointer",padding:"5px 12px",borderRadius:RAIO,marginRight:6}}>
+          ⤓ Entradas em planilha
+        </button>}
         <button onClick={onClose} style={{background:"transparent",border:"none",color:C.textDim,fontSize:22,cursor:"pointer",padding:"4px 8px"}}>✕</button>
       </div>
       <div style={{padding:"12px 20px",display:"flex",gap:16,borderBottom:`1px solid ${C.border}`,background:C.cardAlt}}>
@@ -3764,7 +3791,7 @@ function OSExitModal({diaA,diaB,activeUnit,familyFilter,onClose}){
   </div>;
 }
 
-function HistoricoChart({historico,entradaSerie,execucaoSerie,movimentoSerie,producaoSerie,sess,activeUnit}){
+function HistoricoChart({historico,entradaSerie,execucaoSerie,movimentoSerie,producaoSerie,sess,activeUnit,abrirPlanilhaEntradas}){
   const [showChart,setShowChart]=useState(true);
   const [diffModal,setDiffModal]=useState(null);
   const [exitModal,setExitModal]=useState(null);
@@ -4123,7 +4150,8 @@ function HistoricoChart({historico,entradaSerie,execucaoSerie,movimentoSerie,pro
       </> : <div style={{padding:"40px 20px",textAlign:"center",color:C.textDim,fontSize:13}}>Sem dados para o período selecionado</div>}
     </div>}
 
-    {diffModal&&<DiffModal historico={historico} dia={diffModal.dia} prevDia={diffModal.prevDia} activeUnit={activeUnit} familyFilter={familyFilter} onClose={()=>setDiffModal(null)}/>}
+    {diffModal&&<DiffModal historico={historico} dia={diffModal.dia} prevDia={diffModal.prevDia} activeUnit={activeUnit} familyFilter={familyFilter}
+      abrirPlanilhaEntradas={abrirPlanilhaEntradas} onClose={()=>setDiffModal(null)}/>}
     {exitModal&&<OSExitModal diaA={exitModal.diaA} diaB={exitModal.diaB} activeUnit={activeUnit} familyFilter={familyFilter} onClose={()=>setExitModal(null)}/>}
     {sumiuModal&&<SumiramModal dia={sumiuModal.dia} sess={sess} activeUnit={activeUnit} familyFilter={familyFilter} onClose={()=>setSumiuModal(null)}/>}
   </div>;
@@ -4133,6 +4161,141 @@ function HistoricoChart({historico,entradaSerie,execucaoSerie,movimentoSerie,pro
    Não dá para reaproveitar o OSModal: ele trabalha com as linhas do
    pendente, e boa parte destas já saiu da carteira. Os campos vêm da
    os_entrada, que guarda endereço por isso mesmo. */
+/* PLANILHA DE ENTRADAS — o intervalo, a família e o Excel.
+
+   Nasceu em 26/11/2026, quando o Bryan foi questionado se o número de
+   entradas do dia é verdadeiro. A tela mostra o total; isto mostra
+   QUAIS, serviço por serviço, para conferir no GEOCALL.
+
+   O `filtrar` vem de fora de propósito: é a MESMA função que a coluna
+   Entradas usa para contar (unidade, famílias visíveis, TSS
+   excluídas). Filtrar por conta própria aqui faria a planilha, um dia,
+   mostrar um número diferente do da tela — e ela existe justamente
+   para defender aquele número. */
+function PlanilhaEntradasModal({iniInicial,fimInicial,entradaMin,filtrar,unidadeLabel,usuario,onClose}){
+  const hoje=diaISO(new Date());
+  const [ini,setIni]=useState(iniInicial||hoje);
+  const [fim,setFim]=useState(fimInicial||iniInicial||hoje);
+  const [familia,setFamilia]=useState("TODAS");
+  const [brutas,setBrutas]=useState(null);     // null = buscando
+  const [erro,setErro]=useState(null);
+  const [baixando,setBaixando]=useState(false);
+
+  useEffect(()=>{
+    if(!ini||!fim||ini>fim){setBrutas([]);return;}
+    let vivo=true; setBrutas(null); setErro(null);
+    (async()=>{
+      try{
+        const l=await fetchEntradasDoPeriodo(ini,fim);
+        if(!vivo)return;
+        if(l===null){setBrutas([]);setErro("Não consegui ler a tabela de entradas.");return;}
+        setBrutas(l);
+      }catch(e){ if(vivo){setBrutas([]);setErro(e.message);} }
+    })();
+    return()=>{vivo=false;};
+  },[ini,fim]);
+
+  // O mesmo filtro da tela primeiro; só depois o da família escolhida.
+  const naUnidade=useMemo(()=>(brutas||[]).filter(e=>filtrar(e)),[brutas,filtrar]);
+  const familias=useMemo(()=>[...new Set(naUnidade.map(e=>String(e.familia||"").trim()).filter(Boolean))].sort(),[naUnidade]);
+  const linhas=useMemo(()=>familia==="TODAS"?naUnidade
+    :naUnidade.filter(e=>String(e.familia||"").trim()===familia),[naUnidade,familia]);
+  const aprox=linhas.filter(e=>String(e.origem||"").trim()==="foto").length;
+
+  // Resumo por dia, que é o número que costuma ser questionado.
+  const porDia=useMemo(()=>{
+    const m=new Map();
+    for(const e of linhas){const d=e.data_insercao||"";m.set(d,(m.get(d)||0)+1);}
+    return [...m.entries()].sort((a,b)=>a[0].localeCompare(b[0]));
+  },[linhas]);
+
+  const baixar=async()=>{
+    if(baixando||!linhas.length)return;
+    setBaixando(true); setErro(null);
+    try{
+      const {gerarPlanilhaEntradas}=await import("./relatorioEntradas.js");
+      const blob=await gerarPlanilhaEntradas({linhas,ini,fim,
+        familiaLabel:familia==="TODAS"?"Todas as famílias":familia,
+        unidadeLabel,usuario});
+      const a=document.createElement("a");
+      a.href=URL.createObjectURL(blob);
+      a.download=`entradas_${ini}_a_${fim}.xlsx`;
+      a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+    }catch(e){ setErro("Não consegui montar o Excel: "+String(e?.message||e)); }
+    setBaixando(false);
+  };
+
+  const campo={fontSize:11.5,fontFamily:FONTE_UI,fontWeight:600,color:C.text,background:C.cardAlt,
+    border:`1px solid ${C.border}`,borderRadius:RAIO,padding:"4px 7px",colorScheme:"dark"};
+
+  return <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center",padding:16,backdropFilter:"blur(4px)"}}>
+    <div onClick={e=>e.stopPropagation()} style={{background:C.card,borderRadius:14,border:`1px solid ${C.border}`,
+      width:"100%",maxWidth:720,maxHeight:"86vh",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+
+      <div style={{padding:"14px 18px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:12}}>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:15,fontWeight:700,color:C.text}}>Entradas em planilha</div>
+          <div style={{fontSize:12,color:C.textDim,marginTop:3}}>
+            Quais serviços foram solicitados no período — para conferir OS por OS no GEOCALL.
+          </div>
+        </div>
+        <span onClick={onClose} style={{cursor:"pointer",fontSize:20,color:C.textDim,lineHeight:1,padding:"0 4px"}}>✕</span>
+      </div>
+
+      <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.border}`,background:C.cardAlt,
+        display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+        <span style={{fontSize:11,color:C.textDim,fontWeight:600}}>De</span>
+        <input type="date" value={ini} min={entradaMin||undefined} max={hoje}
+          onChange={e=>setIni(e.target.value)} style={campo}/>
+        <span style={{fontSize:11,color:C.textDim,fontWeight:600}}>até</span>
+        <input type="date" value={fim} min={entradaMin||undefined} max={hoje}
+          onChange={e=>setFim(e.target.value)} style={campo}/>
+        <select value={familia} onChange={e=>setFamilia(e.target.value)} style={{...campo,maxWidth:260}}>
+          <option value="TODAS">Todas as famílias</option>
+          {familias.map(f=><option key={f} value={f}>{f}</option>)}
+        </select>
+      </div>
+
+      <div style={{overflowY:"auto",flex:1,padding:"12px 18px"}}>
+        {ini>fim&&<div style={{fontSize:12.5,color:C.amber}}>A data inicial está depois da final.</div>}
+        {erro&&<div style={{fontSize:12.5,color:C.red,marginBottom:8}}>{erro}</div>}
+        {brutas===null&&<div style={{fontSize:12.5,color:C.textDim}}>Buscando…</div>}
+        {brutas!==null&&ini<=fim&&<>
+          <div style={{fontSize:13,color:C.text,marginBottom:10}}>
+            <b style={{color:C.accent,fontSize:18}}>{linhas.length}</b> serviço{linhas.length===1?"":"s"}
+            {aprox>0&&<span style={{color:C.amber}}> · {aprox} com data aproximada</span>}
+          </div>
+          <table style={{width:"100%",borderCollapse:"collapse"}}>
+            <tbody>{porDia.map(([d,q])=>
+              <tr key={d}>
+                <td style={{padding:"4px 8px",fontSize:12.5,color:C.textDim,borderBottom:`1px solid ${C.border}`}}>{fmtDiaFull(d)}</td>
+                <td style={{...numStyle,padding:"4px 8px",fontSize:12.5,fontWeight:700,color:C.accent,textAlign:"right",borderBottom:`1px solid ${C.border}`}}>{q}</td>
+              </tr>)}
+            </tbody>
+          </table>
+          {aprox>0&&<div style={{fontSize:11.5,color:C.amber,marginTop:10,lineHeight:1.5}}>
+            {aprox} linha{aprox===1?"":"s"} com data <b>aproximada</b>: a Data Inserção do GEOCALL
+            não existia e usou-se o primeiro dia em que a OS apareceu na foto diária. A planilha
+            diz isso linha a linha, na coluna Origem.
+          </div>}
+        </>}
+      </div>
+
+      <div style={{padding:"12px 18px",borderTop:`1px solid ${C.border}`,display:"flex",justifyContent:"flex-end",gap:8}}>
+        <button onClick={baixar} disabled={baixando||!linhas.length}
+          style={{padding:"7px 16px",borderRadius:RAIO,fontSize:12.5,fontWeight:700,
+            cursor:(baixando||!linhas.length)?"default":"pointer",
+            border:`1px solid ${linhas.length?"rgba(59,130,246,0.35)":C.border}`,
+            background:linhas.length?C.accentBg:"transparent",
+            color:linhas.length?C.accent:C.textDim}}>
+          {baixando?"Montando…":"Baixar Excel"}
+        </button>
+      </div>
+    </div>
+  </div>;
+}
+
 function EntradaModal({titulo,dia,linhas,onClose}){
   const aprox=linhas.filter(l=>l.origem==="foto").length;
   const td={padding:"6px 10px",fontSize:12.5,borderBottom:`1px solid ${C.border}`};
@@ -4457,7 +4620,7 @@ function Sidebar({activeUnit,setActiveUnit,unitCounts,collapsed,setCollapsed,nNo
 
 /* ── Dashboard ── */
 function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitLabel,historico,entradaSerie,activeUnit,
-                    diaEntrada,setDiaEntrada,entradaInfo,entradaMin}){
+                    diaEntrada,setDiaEntrada,entradaInfo,entradaMin,abrirPlanilhaEntradas}){
   const totalEntradas=entradaInfo?.total??0;
   const {familyMap,totalPrazo,totalFora,total}=useMemo(()=>{
     const fm={};let tp=0,tf=0;
@@ -4484,7 +4647,8 @@ function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitL
       </div>
       <Bar prazo={totalPrazo} fora={totalFora} total={total}/>
     </div>
-    {historico&&historico.length>0&&<HistoricoChart historico={historico} entradaSerie={entradaSerie} activeUnit={activeUnit}/>}
+    {historico&&historico.length>0&&<HistoricoChart historico={historico} entradaSerie={entradaSerie} activeUnit={activeUnit}
+      abrirPlanilhaEntradas={abrirPlanilhaEntradas}/>}
     <div style={{fontSize:12,color:C.textDim,marginBottom:10,padding:"0 4px",display:"flex",gap:16,flexWrap:"wrap"}}>
       <span>Clique na família para filtrar TSS</span>
       <span>Clique nos números para ver as OS</span>
@@ -4532,6 +4696,12 @@ function Dashboard({rows,excludedTSS,sortBy,onToggleTSS,onToggleAll,onSort,unitL
                       +(entradaInfo?.aproximadas?` ${entradaInfo.aproximadas} deles têm data aproximada, vinda da foto diária.`:"")}
                     style={{...numStyle,fontSize:11,fontWeight:700,letterSpacing:0,cursor:"help",
                       color:totalEntradas?C.accent:C.textDim}}>{totalEntradas}</span>
+                  {/* O caminho para a planilha fica COLADO no número que
+                      ela defende. Quem duvidar do total está olhando
+                      exatamente para aqui. (26/11/2026) */}
+                  {abrirPlanilhaEntradas&&<span onClick={()=>abrirPlanilhaEntradas(diaEntrada,diaEntrada)}
+                    title="Abrir a planilha de entradas — escolher o período e a família, e baixar em Excel"
+                    style={{fontSize:11,cursor:"pointer",color:C.textDim,padding:"0 2px",userSelect:"none"}}>⤓</span>}
                 </span>}
                 {col.label}{sortBy===col.key?" ↓":""}
               </th>
@@ -8532,14 +8702,23 @@ export default function App(){
      outras não contam. `fora` são entradas de família que não tem linha
      na tabela porque nada dela está aberto hoje; aparecem no total do
      cabeçalho e ficariam invisíveis sem esse aviso. */
+  /* O FILTRO DA COLUNA ENTRADAS, NUMA FUNÇÃO SÓ. Ele era escrito aqui
+     dentro, e a planilha de entradas precisava do mesmo — duas cópias
+     seriam duas contas que um dia discordam, e a planilha existe para
+     defender o número da tela. Agora as duas chamam esta. (26/11/2026) */
+  const filtrarEntrada=useCallback((e)=>{
+    const atcAlvo=(UNITS.find(u=>u.id===activeUnit)||UNITS[0]).atc;
+    if(atcAlvo===null?!VALID_ATCS.includes(Number(e.atc)):Number(e.atc)!==atcAlvo) return false;
+    const tss=String(e.tss||"").trim();
+    return familiaTssVisivel(e.familia,tss)&&!excludedTSS.has(tss);
+  },[activeUnit,excludedTSS]);
+
   const entradaInfo=useMemo(()=>{
     if(!entradasDia) return null;
-    const atcAlvo=(UNITS.find(u=>u.id===activeUnit)||UNITS[0]).atc;
     const porFam=new Map(),porTss=new Map(),lista=[];
     for(const e of entradasDia){
-      if(atcAlvo===null?!VALID_ATCS.includes(Number(e.atc)):Number(e.atc)!==atcAlvo) continue;
+      if(!filtrarEntrada(e)) continue;
       const tss=String(e.tss||"").trim();
-      if(!familiaTssVisivel(e.familia,tss)||excludedTSS.has(tss)) continue;
       const f=String(e.familia||"").trim();
       porFam.set(f,(porFam.get(f)||0)+1);
       // chave por familia+TSS: a mesma TSS aparece em mais de uma
@@ -8551,7 +8730,13 @@ export default function App(){
     }
     return {porFam,porTss,lista,total:lista.length,
       aproximadas:lista.filter(e=>e.origem==="foto").length};
-  },[entradasDia,activeUnit,excludedTSS]);
+  },[entradasDia,filtrarEntrada]);
+
+  /* {ini,fim} do modal da planilha de entradas, ou null. Vive aqui em
+     cima porque dois lugares o abrem: o botão ao lado da coluna
+     Entradas e o modal de variação do gráfico. */
+  const [planilhaEntradas,setPlanilhaEntradas]=useState(null);
+  const abrirPlanilhaEntradas=useCallback((ini,fim)=>setPlanilhaEntradas({ini,fim:fim||ini}),[]);
   const [desde,setDesde]=useState("");        // "a carteira desta data para frente" (AAAA-MM-DD)
   const [entrada,setEntrada]=useState(null);  // {osSet,primeiroDia} das OS que entraram a partir de `desde`
   const [buscandoDesde,setBuscandoDesde]=useState(false);
@@ -8938,8 +9123,12 @@ export default function App(){
             </div>
           </div>
           <Dashboard rows={filteredRows} excludedTSS={excludedTSS} sortBy={sortBy} onToggleTSS={toggleTSS} onToggleAll={toggleAllTSS} onSort={doSort} unitLabel={currentUnit.label} historico={historico} entradaSerie={entradaSerie} activeUnit={activeUnit}
-            diaEntrada={diaEntrada} setDiaEntrada={setDiaEntrada} entradaInfo={entradaInfo} entradaMin={entradaMin}/>
+            diaEntrada={diaEntrada} setDiaEntrada={setDiaEntrada} entradaInfo={entradaInfo} entradaMin={entradaMin}
+            abrirPlanilhaEntradas={abrirPlanilhaEntradas}/>
         </div>}
+        {planilhaEntradas&&<PlanilhaEntradasModal iniInicial={planilhaEntradas.ini} fimInicial={planilhaEntradas.fim}
+          entradaMin={entradaMin} filtrar={filtrarEntrada} unidadeLabel={currentUnit.label}
+          usuario={sess?.perfil?.nome||sess?.perfil?.email||""} onClose={()=>setPlanilhaEntradas(null)}/>}
         {activeTab==="pendente"&&showGasModal&&gas.alerts.length>0&&<GasAlertModal alerts={gas.alerts} onIgnore={gas.doIgnore} onClose={()=>setShowGasModal(false)}/>}
         {buscaModal&&<OSModal rows={buscaModal.rows} familia={buscaModal.familia} tipo={buscaModal.tipo||"busca"} onClose={()=>setBuscaModal(null)}/>}
         {showNotas&&<NotasModal notas={notasDoPendente} rows={rawRows} filtroInicial={filtroNota} onClose={()=>setShowNotas(false)}
